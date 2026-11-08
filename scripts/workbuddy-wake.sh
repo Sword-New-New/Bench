@@ -24,7 +24,22 @@ for candidate in \
 done
 [[ -n "$bin" ]] || { echo "找不到 WorkBuddy 自带的 codebuddy" >&2; exit 127; }
 
+# The permissions the session has in the desktop app (its 权限 setting, kept
+# per session in workbuddy.db). Without them a print-mode run can't ask, so
+# every command needing approval is refused outright.
+mode="$(python3 -I - "$HOME/.workbuddy/workbuddy.db" "$session" <<'PY' 2>/dev/null || true
+import sqlite3, sys
+db = sqlite3.connect(f"file:{sys.argv[1]}?mode=ro", uri=True)
+row = db.execute("select permission_mode from sessions where id = ?", (sys.argv[2],)).fetchone()
+print(row[0] if row and row[0] else "")
+PY
+)"
+perm=()
+case "$mode" in
+  fullAccess | bypassPermissions | acceptEdits | plan | default) perm=(--permission-mode "$mode") ;;
+esac
+
 here="$(cd "$(dirname "$0")" && pwd)"
 exec "$here/resume-here.sh" "$session" "$HOME/.workbuddy:$HOME/.codebuddy" -- \
   bash -c 'CODEBUDDY_CONFIG_DIR="$BENCH_CONFIG_DIR" exec "$0" "$@"' \
-  "$bin" -r "$session" --allowedTools mcp__bench --output-format text -p "$@"
+  "$bin" -r "$session" "${perm[@]}" --allowedTools mcp__bench --output-format text -p "$@"

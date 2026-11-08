@@ -12,7 +12,8 @@ text="${2:-}"
 [[ "$id" =~ ^[A-Za-z0-9._-]+$ ]] || { echo "thread id 不对：$id" >&2; exit 2; }
 bin="$(command -v codex || echo /usr/lib/chatgpt/resources/codex)"
 
-exec "$bin" exec resume --skip-git-repo-check \
+# --json: one event per line, which the room turns into the 「过程」 panel.
+exec "$bin" exec resume --skip-git-repo-check --json \
   -c "mcp_servers.bench.env.BENCH_UUID=\"$id\"" \
   -c 'mcp_servers.bench.default_tools_approval_mode="approve"' \
   "$id" "$text" < /dev/null

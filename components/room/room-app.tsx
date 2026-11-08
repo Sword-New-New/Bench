@@ -11,6 +11,7 @@ import { Ambient } from "@/components/room/ambient"
 import { JoinDialog } from "@/components/room/join-dialog"
 import { Mark } from "@/components/room/bits"
 import { Roster } from "@/components/room/roster"
+import { RunPanel } from "@/components/room/run-panel"
 import { clearSummarySnooze, SummaryCard, SummaryNudge } from "@/components/room/summary"
 import { DEBUG_MENU, DebugMenu, NO_DEBUG, withDebug, type DebugView } from "@/components/room/debug-menu"
 import { TasksPanel } from "@/components/room/tasks-panel"
@@ -52,6 +53,7 @@ export function RoomApp() {
   const [focusId, setFocusId] = useState<string | null>(null)
   const [joinOpen, setJoinOpen] = useState(false)
   const [joinKind, setJoinKind] = useState<string | null>(null)
+  const [runId, setRunId] = useState<string | null>(null)
   const [adaptersOpen, setAdaptersOpen] = useState(false)
   const [adapterName, setAdapterName] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
@@ -304,6 +306,7 @@ export function RoomApp() {
                 setTab("chat")
               }}
               onLeave={setLeaving}
+              onOpenRun={setRunId}
               onJoin={(kind) => {
                 setJoinKind(kind ?? null)
                 setJoinOpen(true)
@@ -348,6 +351,7 @@ export function RoomApp() {
                 requestAnimationFrame(() => composerRef.current?.focus())
               }}
               onOpenTask={openTask}
+              onOpenRun={setRunId}
               onExample={(text) => {
                 setDraft(text)
                 requestAnimationFrame(() => composerRef.current?.focus())
@@ -480,6 +484,8 @@ export function RoomApp() {
           }, "唤起命令已保存")
         }
       />
+
+      <RunPanel runId={runId} onClose={() => setRunId(null)} />
 
       <JoinDialog
         open={joinOpen}

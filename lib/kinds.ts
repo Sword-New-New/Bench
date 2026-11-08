@@ -19,6 +19,9 @@ export type Kind = {
   // "stdout": the command prints the agent's answer, post it back as the agent.
   reply: "stdout" | "none"
   uuidHint: string
+  // Earlier default commands. A saved agents.json still holding one of them
+  // gets the current command instead.
+  was?: string[]
 }
 
 export const KINDS: Kind[] = [
@@ -42,7 +45,8 @@ export const KINDS: Kind[] = [
     shape: "drop",
     core: true,
     match: /deepseek|dsh/i,
-    command: "dsh-agent resume {uuid} {text}",
+    command: "dsh-agent resume --json {uuid} {text}",
+    was: ["dsh-agent resume {uuid} {text}"],
     reply: "none",
     uuidHint: "dsh-agent resume 用的会话 id，shell 里的 DSH_SESSION_ID",
   },
@@ -66,7 +70,8 @@ export const KINDS: Kind[] = [
     shape: "pebble",
     core: true,
     match: /grok|cursor|composer|xai/i,
-    command: "cursor-agent --resume {uuid} --model grok-4.7-low-fast --approve-mcps --trust -p {text}",
+    command: "cursor-agent --resume {uuid} --model grok-4.7-low-fast --approve-mcps --trust --output-format stream-json -p {text}",
+    was: ["cursor-agent --resume {uuid} --model grok-4.7-low-fast --approve-mcps --trust -p {text}"],
     reply: "stdout",
     uuidHint: "cursor-agent 的 chat id，CURSOR_AGENT_CHAT_ID（没有就看 cursor-agent ls）",
   },
@@ -78,7 +83,8 @@ export const KINDS: Kind[] = [
     shape: "sparkle",
     core: true,
     match: /gemini|antigravity|agy/i,
-    command: "agy --conversation {uuid} --model gemini-3.8-flash-low --settings '{\"permissions\":{\"allow\":[\"mcp(bench/*)\"]}}' -p {text}",
+    command: "agy --conversation {uuid} --model gemini-3.8-flash-low --settings '{\"permissions\":{\"allow\":[\"mcp(bench/*)\"]}}' --output-format stream-json -p {text}",
+    was: ["agy --conversation {uuid} --model gemini-3.8-flash-low --settings '{\"permissions\":{\"allow\":[\"mcp(bench/*)\"]}}' -p {text}"],
     reply: "stdout",
     uuidHint: "Antigravity 的 conversation id，ANTIGRAVITY_CONVERSATION_ID",
   },

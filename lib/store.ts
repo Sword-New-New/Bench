@@ -5,6 +5,7 @@ import path from "node:path"
 
 import { hasAdapter } from "@/lib/adapters"
 import { ApiError, asRecord, asString } from "@/lib/http"
+import { activeRun } from "@/lib/runs"
 import { liveStatus } from "@/lib/status"
 import { mentionedAgentIds, namedAgentIds } from "@/lib/text"
 import type {
@@ -160,6 +161,7 @@ function present(agent: Agent, now = Date.now()): PublicAgent {
     hasSession: Boolean(agent.agentName && agent.session),
     callable: Boolean(agent.agentName && agent.session) && hasAdapter(agent.agentName ?? ""),
     standby: (waitingOf().get(agent.id) ?? 0) > 0,
+    runId: activeRun(agent.id)?.id,
     createdAt: agent.createdAt,
     lastSeenAt: agent.lastSeenAt,
   }
@@ -488,6 +490,8 @@ export function say(input: unknown) {
     text: clip(text, 4000),
     mentions: mentionedAgentIds(text, runtime().state.agents),
     replyTo,
+    // Said during a wake, by stdout or by its own bench_say: tie it to the steps.
+    runId: agent ? activeRun(agent.id)?.id : undefined,
   })
   if (agent) agent.lastSeenAt = Date.now()
   commit()

@@ -46,7 +46,10 @@ export function adapters(): Adapter[] {
     const list = Array.isArray(parsed.agents) ? parsed.agents : []
     const saved = list.flatMap((item) => {
       const adapter = normalize(item)
-      return adapter ? [adapter] : []
+      if (!adapter) return []
+      // Still the default from before: move it to the current default.
+      const kind = KINDS.find((entry) => entry.id === adapter.name)
+      return [kind?.was?.includes(adapter.command) ? { ...adapter, command: kind.command } : adapter]
     })
     // A kind added to lib/kinds.ts after the file was written still gets its
     // default command.

@@ -19,6 +19,8 @@ export type PublicAgent = {
   callable: boolean
   // Blocked in bench_wait right now: a message for it is delivered at once.
   standby: boolean
+  // The wake it is in the middle of; its steps are at /api/v1/runs/<id>.
+  runId?: string
   createdAt: number
   lastSeenAt: number
 }
@@ -45,6 +47,8 @@ export type Message = {
   replyTo?: string
   taskId?: string
   handoff?: Handoff
+  // Posted during a wake: the steps that led to it.
+  runId?: string
   createdAt: number
 }
 
@@ -106,4 +110,28 @@ export type Actor = {
   type: "human" | "agent"
   id: string
   name: string
+}
+
+// One step of a wake: a tool call (with its result once it finishes), a bit
+// of the agent's own text, or a note from the room.
+export type RunStep = {
+  id: string
+  at: number
+  kind: "tool" | "text" | "note"
+  title: string
+  input?: string
+  output?: string
+  state: "running" | "done" | "failed"
+}
+
+export type Run = {
+  id: string
+  agentId: string
+  agentName: string
+  purpose: "reply" | "summary"
+  state: "running" | "done" | "failed"
+  startedAt: number
+  endedAt?: number
+  messageId?: string
+  steps: RunStep[]
 }

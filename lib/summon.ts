@@ -1,7 +1,9 @@
 import { spawn } from "node:child_process"
 
 import { adapterFor, commandFor, summonPath, type Adapter } from "@/lib/adapters"
+import { createParser, liveLine } from "@/lib/events"
 import { ApiError } from "@/lib/http"
+import { endRun, putStep, startRun } from "@/lib/runs"
 import {
   agentState,
   CATCH_UP_CHARS,
@@ -19,11 +21,19 @@ import {
   summarySource,
   summonCandidates,
 } from "@/lib/store"
-import type { Message, RoomSummary } from "@/lib/types"
+import type { Message, RoomSummary, Run } from "@/lib/types"
 
 const NOTE_GAP_MS = 30_000
 const RUN_LIMIT_MS = 15 * 60_000
 const OUT_LIMIT = 64_000
+// The seat line follows the steps, but not faster than this.
+const LIVE_GAP_MS = 800
+// A client that prints an event stream says something within seconds of
+// starting. When it hasn't, it is usually its own service queueing the
+// request (a Cursor wake once sat silent for five minutes, then finished in
+// seconds), so the run isn't stopped: the seat and the 「过程」 panel just say
+// how long it has been waiting, so it doesn't look frozen.
+const WAIT_NOTE_MS = 30_000
 // Agents answering agents can bounce forever. Stop the relay after this many
 // automatic hops and wait for a human message.
 const MAX_HOPS = 3
@@ -78,7 +88,7 @@ function stamp(at: number) {
 
 function envelope(body: string, skipped: number, summary: RoomSummary | undefined, replyByStdout: boolean) {
   const how = replyByStdout
-    ? "直接回答就行，你这次的输出会作为你的发言贴回房间，不用再调用 bench_say。"
+    ? "最后的回答直接输出就行，会作为你的发言贴回房间，不用调用 bench_say。中途的进度、逐条汇报直接说出来：这些话会实时显示在你自己的席位和过程记录里，用户看得到，但不会进群聊，所以不要用 bench_say 刷进度。"
     : `回复请发回房间：有 bench_say 工具就用它；没有的话 POST ${roomUrl()}/api/v1/say，带你入座时的 agentId 和 token。`
   // Say plainly how complete the batch is, so the seat does not go digging
   // for messages it already has, or trust a batch that was cut.
@@ -122,26 +132,57 @@ function summaryPrompt(replyByStdout: boolean) {
   }
 }
 
+function seconds(ms: number) {
+  const s = Math.round(ms / 1000)
+  return s < 60 ? `${s} 秒` : `${Math.floor(s / 60)} 分 ${s % 60} 秒`
+}
+
+// Whether a wake command prints an event stream (the core kinds' defaults
+// and their wake scripts do).
+function streams(command: string) {
+  return /stream-json|--json\b|claude-code\.sh|codex-wake\.sh/.test(command)
+}
+
 function tail(text: string, max: number) {
   const clean = text.trim().replace(/\s+/g, " ")
   return clean.length > max ? `…${clean.slice(-max)}` : clean
 }
 
-// Runs one command on a seat's session and reports how it went.
+// Runs one command on a seat's session and reports how it went. Its output
+// is read line by line as it comes: each step goes into the run log (the
+// 「过程」 panel) and the seat line shows the current one; `out` is the
+// final answer.
 function launch(
   agent: NonNullable<ReturnType<typeof agentState>>,
   command: string,
+  run: Run,
+  live: (line: string) => void,
   done: (result: { out: string; failure?: string }) => void,
 ) {
-  let out = ""
+  const parser = createParser()
+  let pending = ""
+  let size = 0
   let err = ""
   let finished = false
+  let shownAt = 0
+  const take = (line: string) => {
+    for (const step of parser.feed(line)) {
+      putStep(run, step)
+      const text = liveLine(step)
+      if (text && Date.now() - shownAt >= LIVE_GAP_MS) {
+        shownAt = Date.now()
+        live(text)
+      }
+    }
+  }
   const finish = (code: number | null, failure?: string) => {
     if (finished) return
     finished = true
     clearTimeout(timer)
+    clearInterval(quiet)
+    if (pending) take(pending)
     const why = failure ?? (code !== 0 ? tail(err, 160) || `退出码 ${code}` : undefined)
-    done({ out: out.trim(), failure: why })
+    done({ out: parser.answer(), failure: why })
   }
 
   const child = spawn(command, {
@@ -161,8 +202,28 @@ function launch(
     child.kill("SIGTERM")
     finish(null, "超过 15 分钟没结束，已停掉")
   }, RUN_LIMIT_MS)
+  let quiet: NodeJS.Timeout | undefined
+  if (streams(command)) {
+    const since = Date.now()
+    quiet = setInterval(() => {
+      const waited = `还没开始回应，已等 ${seconds(Date.now() - since)}（多半是它的服务在排队）`
+      putStep(run, { id: "wait", at: since, kind: "note", title: waited, state: "running" })
+      live(waited)
+    }, WAIT_NOTE_MS)
+  }
   child.stdout.on("data", (chunk: Buffer) => {
-    if (out.length < OUT_LIMIT) out += chunk.toString("utf8")
+    if (quiet) {
+      clearInterval(quiet)
+      quiet = undefined
+      if (run.steps.some((step) => step.id === "wait")) {
+        putStep(run, { id: "wait", at: run.startedAt, kind: "note", title: `等了 ${seconds(Date.now() - run.startedAt)} 才开始回应`, state: "done" })
+      }
+    }
+    if (size > OUT_LIMIT * 16) return
+    size += chunk.length
+    const lines = (pending + chunk.toString("utf8")).split("\n")
+    pending = lines.pop() ?? ""
+    for (const line of lines) take(line)
   })
   child.stderr.on("data", (chunk: Buffer) => {
     err = (err + chunk.toString("utf8")).slice(-4000)
@@ -175,16 +236,28 @@ function launch(
 // doing before, unless it changed that itself meanwhile.
 function busy(agentId: string, doing: string) {
   const before = agentState(agentId)?.doing ?? ""
+  let shown = doing
   try {
     pulseAgent(agentId, "working", doing)
   } catch {}
-  return () => {
-    const still = agentState(agentId)
-    if (still && still.doing === doing) {
+  return {
+    // The current step, while the seat still shows what we put there.
+    live(line: string) {
+      const still = agentState(agentId)
+      if (!still || still.doing !== shown) return
+      shown = line
       try {
-        pulseAgent(still.id, "idle", before)
+        pulseAgent(agentId, "working", line)
       } catch {}
-    }
+    },
+    settle() {
+      const still = agentState(agentId)
+      if (still && still.doing === shown) {
+        try {
+          pulseAgent(still.id, "idle", before)
+        } catch {}
+      }
+    },
   }
 }
 
@@ -224,15 +297,16 @@ function run(agentId: string) {
   if (!command) return
 
   queue.running = true
-  const settle = busy(agentId, "被点到了，正在回复")
-  launch(agent, command, ({ out, failure }) => {
+  const log = startRun(agentId, agent.name, "reply")
+  const seat = busy(agentId, "被点到了，正在回复")
+  launch(agent, command, log, seat.live, ({ out, failure }) => {
     queue.running = false
-    settle()
     const still = agentState(agentId)
     if (failure) {
       postSystem(`唤起 ${agent.name} 没成功：${failure}`)
     } else if (adapter.reply === "stdout" && still && out) {
       try {
+        // Posted while the run is still open, so the message links to it.
         const said = sayAs({ type: "agent", id: still.id, name: still.name }, { text: out.slice(0, 4000) })
         hops().set(said.message.id, hop + 1)
         if (hops().size > 500) hops().delete(hops().keys().next().value ?? "")
@@ -240,6 +314,8 @@ function run(agentId: string) {
         console.error(error)
       }
     }
+    endRun(log, failure ? "failed" : "done", failure ? `没成功：${failure}` : undefined)
+    seat.settle()
     run(agentId)
   })
 }
@@ -253,10 +329,12 @@ function writeSummary(agent: NonNullable<ReturnType<typeof agentState>>, adapter
   queue.running = true
   const asked = Date.now()
   startSummaryJob(agent.id, prompt.upToSeq)
-  const settle = busy(agent.id, "在写房间摘要")
-  launch(agent, command, ({ out, failure }) => {
+  const log = startRun(agent.id, agent.name, "summary")
+  const seat = busy(agent.id, "在写房间摘要")
+  launch(agent, command, log, seat.live, ({ out, failure }) => {
     queue.running = false
-    settle()
+    endRun(log, failure ? "failed" : "done", failure ? `没成功：${failure}` : undefined)
+    seat.settle()
     endSummaryJob(agent.id)
     if (failure) {
       postSystem(`请 ${agent.name} 写摘要没成功：${failure}`)

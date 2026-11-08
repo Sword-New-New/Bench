@@ -1,5 +1,5 @@
 import { useState } from "react"
-import { AtSign, ChevronRight, Ellipsis, Plus, Settings2 } from "lucide-react"
+import { AtSign, ChevronRight, Ellipsis, Loader2, Plus, Settings2 } from "lucide-react"
 
 import { Button } from "@/components/ui/button"
 import {
@@ -25,6 +25,7 @@ type Props = {
   onMention: (name: string) => void
   onFocus: (id: string | null) => void
   onLeave: (agent: PublicAgent) => void
+  onOpenRun: (runId: string) => void
   onConfigure: (name: string | null) => void
   // kind: open the join dialog with that agent already picked.
   onJoin: (kind?: string) => void
@@ -191,7 +192,8 @@ function SeatRow({ agent, ...props }: Props & { agent: PublicAgent }) {
       <span className="pt-1.5">
         <Lamp status={agent.status} />
       </span>
-      <button type="button" className="min-w-0 flex-1 text-left" onClick={() => props.onMention(agent.name)}>
+      <div className="min-w-0 flex-1">
+      <button type="button" className="block w-full text-left" onClick={() => props.onMention(agent.name)}>
         <span className="flex items-baseline gap-1.5">
           <span className="truncate text-[13px] font-medium">{agent.name}</span>
           {agent.demo ? <span className="shrink-0 text-[10px] text-muted-foreground">演示</span> : null}
@@ -208,10 +210,25 @@ function SeatRow({ agent, ...props }: Props & { agent: PublicAgent }) {
             </span>
           )}
         </span>
-        <span className="block truncate text-xs text-muted-foreground">
-          {agent.doing || `${agent.model} · ${agent.role}`}
-        </span>
+        {agent.runId ? null : (
+          <span className="block truncate text-xs text-muted-foreground">
+            {agent.doing || `${agent.model} · ${agent.role}`}
+          </span>
+        )}
       </button>
+      {agent.runId ? (
+        // Woken right now: the line follows its current step; click to watch.
+        <button
+          type="button"
+          className="flex w-full items-center gap-1 text-left text-xs text-sky-700 hover:underline dark:text-sky-300"
+          title="看它这次在做什么"
+          onClick={() => agent.runId && props.onOpenRun(agent.runId)}
+        >
+          <Loader2 className="size-3 shrink-0 animate-spin" />
+          <span className="truncate">{agent.doing || "正在回复"}</span>
+        </button>
+      ) : null}
+      </div>
       <DropdownMenu>
         <DropdownMenuTrigger
           className="mt-0.5 rounded-md p-0.5 text-muted-foreground opacity-60 group-hover:opacity-100 hover:bg-muted aria-expanded:opacity-100"

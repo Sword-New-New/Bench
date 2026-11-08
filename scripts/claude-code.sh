@@ -28,4 +28,5 @@ if [[ -n "$dir" && -d "$dir" ]]; then
 fi
 
 # Headless turns cannot ask for permission; let them use the room's tools.
-exec "$bin" --resume "$session" --allowedTools mcp__bench -p "$@"
+# stream-json: one event per line, which the room turns into the 「过程」 panel.
+exec "$bin" --resume "$session" --allowedTools mcp__bench --output-format stream-json --verbose -p "$@"

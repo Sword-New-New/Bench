@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState, type CSSProperties } from "react"
-import { ArrowRight, Reply, X } from "lucide-react"
+import { ArrowRight, ListTree, Reply, X } from "lucide-react"
 
 import { Avatar, MessageBody, seatLook } from "@/components/room/bits"
 import { DOCK_EVENT } from "@/components/room/composer"
@@ -20,6 +20,7 @@ export function Thread({
   onClearFocus,
   onReply,
   onOpenTask,
+  onOpenRun,
   onExample,
 }: {
   messages: Message[]
@@ -29,6 +30,7 @@ export function Thread({
   onClearFocus: () => void
   onReply: (message: Message) => void
   onOpenTask: (taskId: string) => void
+  onOpenRun: (runId: string) => void
   onExample: (text: string) => void
 }) {
   const scroller = useRef<HTMLDivElement>(null)
@@ -112,6 +114,7 @@ export function Thread({
               names={names}
               onReply={onReply}
               onOpenTask={onOpenTask}
+              onOpenRun={onOpenRun}
             />
           ))}
         </div>
@@ -151,6 +154,7 @@ function MessageRow({
   names,
   onReply,
   onOpenTask,
+  onOpenRun,
 }: {
   message: Message
   previous?: Message
@@ -159,6 +163,7 @@ function MessageRow({
   names: string[]
   onReply: (message: Message) => void
   onOpenTask: (taskId: string) => void
+  onOpenRun: (runId: string) => void
 }) {
   const [watching, setWatching] = useState(false)
 
@@ -269,6 +274,17 @@ function MessageRow({
         >
           <MessageBody text={message.text} names={names} />
         </div>
+        {message.runId ? (
+          // How it got there: the tool calls of the wake that wrote this.
+          <button
+            type="button"
+            className="mt-1 flex items-center gap-1 rounded-md px-1 text-[11px] text-muted-foreground hover:bg-muted hover:text-foreground"
+            onClick={() => message.runId && onOpenRun(message.runId)}
+          >
+            <ListTree className="size-3" />
+            查看过程
+          </button>
+        ) : null}
       </div>
       {replyButton}
     </article>

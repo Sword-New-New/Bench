@@ -26,4 +26,6 @@ export type AdapterInfo = {
   command: string
   reply: "stdout" | "none"
   installed: boolean
+  // The model a wake runs on, when the command or the client's config says.
+  model: string | null
 }

@@ -3,7 +3,7 @@ import os from "node:os"
 import path from "node:path"
 
 import { ApiError } from "@/lib/http"
-import { KINDS } from "@/lib/kinds"
+import { KINDS, wakeModel } from "@/lib/kinds"
 
 export type Adapter = {
   name: string
@@ -147,4 +147,37 @@ export function replaceAdapters(input: unknown) {
   renameSync(tmp, file)
   cached = { mtimeMs: statSync(file).mtimeMs, adapters: next }
   return next
+}
+
+function tomlString(file: string, key: string, table = "") {
+  try {
+    // The keys of one table: top level by default, else that [table].
+    const text = readFileSync(file, "utf8")
+    // A header on a line of its own; comments can mention "[table]" too.
+    const header = table ? new RegExp(`^\\[${table}\\][ \\t]*$`, "m").exec(text) : null
+    if (table && !header) return null
+    const body = text.slice(header ? header.index + header[0].length : 0).split(/^\[/m)[0]
+    return body.match(new RegExp(`^${key}\\s*=\\s*"([^"]+)"`, "m"))?.[1] ?? null
+  } catch {
+    return null
+  }
+}
+
+// The model a client falls back to when its wake command names none, where
+// its config says so plainly.
+function clientDefault(name: string) {
+  const home = os.homedir()
+  if (name === "codex") return tomlString(path.join(process.env.CODEX_HOME || path.join(home, ".codex"), "config.toml"), "model")
+  if (name === "dsh") {
+    const model = tomlString(path.join(process.env.DSH_HOME || path.join(home, ".dsh"), "dsh-agent.toml"), "model", "defaults")
+    // "cn:deepseek-v4.1-flash": drop the provider prefix.
+    return model?.replace(/^[\w-]+:/, "") ?? null
+  }
+  return null
+}
+
+// What a wake for this adapter runs on: the model in its command, else the
+// client's configured default; null when neither says.
+export function modelOf(adapter: Adapter) {
+  return wakeModel(adapter.command) ?? clientDefault(adapter.name)
 }

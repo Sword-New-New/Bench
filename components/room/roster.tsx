@@ -11,7 +11,7 @@ import {
 } from "@/components/ui/dropdown-menu"
 import { Avatar, Lamp } from "@/components/room/bits"
 import type { AdapterInfo } from "@/components/room/api"
-import { KINDS, kindOf, type Kind } from "@/lib/kinds"
+import { KINDS, kindOf, wakeModel, type Kind } from "@/lib/kinds"
 import { ago, STATUS_LABEL } from "@/lib/status"
 import type { PublicAgent } from "@/lib/types"
 
@@ -140,6 +140,9 @@ function KindGroup({
   ...props
 }: Props & { kind: Kind; seats: PublicAgent[]; state: ReturnType<typeof reach> }) {
   const [hover, setHover] = useState(false)
+  // What a wake actually runs on, which can differ from what a seat reported.
+  const adapter = props.adapters?.find((item) => item.name === kind.id)
+  const model = adapter ? adapter.model : wakeModel(kind.command)
   const primary = seats.find((agent) => agent.status !== "offline") ?? seats.find((agent) => agent.callable) ?? seats[0]
   // A seat that can be woken is only resting, so its character stays awake and
   // watches the pointer; it sleeps only when nothing would wake it.
@@ -163,7 +166,9 @@ function KindGroup({
             <span className="truncate text-sm font-semibold">{kind.label}</span>
             <span className={`shrink-0 text-[11px] ${TONE[state.tone]}`}>{state.text}</span>
           </span>
-          <span className="block truncate text-xs text-muted-foreground">{kind.harness}</span>
+          <span className="block truncate text-xs text-muted-foreground" title="被 @ 叫醒、写摘要时用的模型，在「唤起命令」里改">
+            {kind.harness} · {model ?? "默认模型"}
+          </span>
         </span>
       </button>
       {seats.length > 0 ? (

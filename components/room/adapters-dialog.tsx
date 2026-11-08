@@ -15,7 +15,7 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog"
 import { Input } from "@/components/ui/input"
-import { KINDS, kindById } from "@/lib/kinds"
+import { KINDS, kindById, wakeModel } from "@/lib/kinds"
 import type { PublicAgent } from "@/lib/types"
 
 type Row = { name: string; command: string; reply: "stdout" | "none"; installed?: boolean }
@@ -120,7 +120,10 @@ export function AdaptersDialog({
                     />
                     输出即回复
                   </label>
-                  <span className="truncate">{using.length > 0 ? `在用：${using.join("、")}` : ""}</span>
+                  <span className="truncate">
+                    唤起用 {wakeModel(row.command) ?? adapters?.find((item) => item.name === row.name)?.model ?? "客户端默认模型"}
+                    {using.length > 0 ? ` · 在用：${using.join("、")}` : ""}
+                  </span>
                 </div>
               </div>
             )

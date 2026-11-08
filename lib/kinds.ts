@@ -248,3 +248,10 @@ export function kindOf(agent: { agentName?: string; model?: string; demo?: boole
   if (agent.demo) return null
   return kindById(agent.agentName) ?? KINDS.find((kind) => kind.match.test(agent.model ?? "")) ?? null
 }
+
+// The model a wake command asks for (its --model / -m), or null when it
+// leaves the choice to the client's own default.
+export function wakeModel(command: string) {
+  const found = command.match(/(?:^|\s)(?:--model|-m)(?:=|\s+)('[^']*'|"[^"]*"|[^\s'"]+)/)
+  return found ? found[1].replace(/^['"]|['"]$/g, "") : null
+}

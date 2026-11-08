@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react"
+import { useEffect, useMemo, useRef, useState } from "react"
 import { Send, X } from "lucide-react"
 
 import { Avatar, seatLook } from "@/components/room/bits"
@@ -42,6 +42,17 @@ export function Composer({
   onClearReply: () => void
 }) {
   const [picked, setPicked] = useState(false)
+  const formRef = useRef<HTMLFormElement>(null)
+
+  // The composer floats over the thread; tell the thread how much room to leave.
+  useEffect(() => {
+    const form = formRef.current
+    const host = form?.parentElement
+    if (!form || !host) return
+    const observer = new ResizeObserver(() => host.style.setProperty("--dock", `${form.offsetHeight}px`))
+    observer.observe(form)
+    return () => observer.disconnect()
+  }, [])
   const query = useMemo(() => {
     const match = value.match(/@([\p{L}\p{N}_-]*)$/u)
     return match ? match[1] : null
@@ -72,15 +83,18 @@ export function Composer({
 
   return (
     <form
-      className="px-4 pb-4 md:px-6"
+      ref={formRef}
+      className="absolute inset-x-0 bottom-0 z-10 px-3 pb-3 md:px-6"
       onSubmit={(event) => {
         event.preventDefault()
         onSend()
       }}
     >
-      <div className="mx-auto max-w-3xl rounded-2xl border bg-card shadow-sm focus-within:border-ring/60 focus-within:ring-3 focus-within:ring-ring/15">
+      <div
+        className="raised mx-auto max-w-3xl rounded-[22px] transition-shadow focus-within:ring-3 focus-within:ring-ring/20"
+      >
         {reply ? (
-          <div className="flex items-center gap-2 border-b px-3 py-2 text-xs text-muted-foreground">
+          <div className="flex items-center gap-2 border-b border-foreground/8 px-3.5 py-2 text-xs text-muted-foreground">
             <span className="min-w-0 flex-1 truncate">
               回复 <span className="font-medium text-foreground">{reply.authorName}</span>：{reply.text}
             </span>
@@ -90,17 +104,17 @@ export function Composer({
           </div>
         ) : null}
         {matches.length > 0 && !picked ? (
-          <div className="flex flex-wrap gap-1 border-b px-2 py-2">
+          <div className="flex flex-wrap gap-1 border-b border-foreground/8 px-2 py-2">
             {matches.map((agent) => {
               const look = seatLook(agent)
               return (
                 <button
                   key={agent.id}
                   type="button"
-                  className="flex items-center gap-1.5 rounded-lg px-2 py-1 text-xs hover:bg-muted"
+                  className="flex items-center gap-1.5 rounded-lg px-2 py-1 text-xs hover:bg-foreground/6"
                   onClick={() => insert(agent.name)}
                 >
-                  <Avatar name={agent.name} color={look.color} label={look.label} size="sm" />
+                  <Avatar name={agent.name} color={look.color} label={look.label} kind={look.kind} size="sm" />
                   <span className="font-medium">{agent.name}</span>
                   <span className="text-muted-foreground">{look.kind?.label ?? agent.role}</span>
                 </button>
@@ -115,8 +129,8 @@ export function Composer({
           ref={inputRef}
           id="composer"
           value={value}
-          placeholder="说点什么，@ 谁就唤起谁……"
-          className="max-h-60 min-h-14 resize-none border-0 bg-transparent px-3.5 pt-3 shadow-none focus-visible:ring-0 dark:bg-transparent"
+          placeholder="说点什么，@ 谁就唤起谁 · Enter 发送，Shift+Enter 换行"
+          className="max-h-60 min-h-14 resize-none border-0 bg-transparent px-4 pt-3.5 shadow-none placeholder:text-foreground/45 focus-visible:ring-0 dark:bg-transparent"
           onChange={(event) => {
             setPicked(false)
             onChange(event.target.value)
@@ -142,10 +156,17 @@ export function Composer({
                   key={kind.id}
                   type="button"
                   title={`@${seat.name}`}
-                  className={`flex shrink-0 items-center gap-1 rounded-full border px-2 py-0.5 text-xs transition-colors ${
-                    on ? "text-white" : "hover:bg-muted"
+                  className={`flex shrink-0 items-center gap-1 rounded-full px-2.5 py-1 text-xs transition-[background,box-shadow,color] ${
+                    on ? "text-white" : "pill hover:brightness-105"
                   }`}
-                  style={on ? { background: kind.color, borderColor: kind.color } : undefined}
+                  style={
+                    on
+                      ? {
+                          background: `linear-gradient(160deg, color-mix(in oklch, ${kind.color} 80%, white), ${kind.color})`,
+                          boxShadow: `inset 0 1px 0 0 rgb(255 255 255 / .45), 0 4px 12px -4px ${kind.color}`,
+                        }
+                      : undefined
+                  }
                   onClick={() => {
                     onChange(toggleMention(value, seat.name))
                     inputRef.current?.focus()
@@ -159,8 +180,8 @@ export function Composer({
             {agents.length > 1 ? (
               <button
                 type="button"
-                className={`shrink-0 rounded-full border px-2 py-0.5 text-xs ${
-                  hasMention(value, "所有人") ? "bg-primary text-primary-foreground" : "hover:bg-muted"
+                className={`shrink-0 rounded-full px-2.5 py-1 text-xs ${
+                  hasMention(value, "所有人") ? "bg-primary text-primary-foreground" : "pill hover:brightness-105"
                 }`}
                 onClick={() => {
                   onChange(toggleMention(value, "所有人"))
@@ -174,16 +195,22 @@ export function Composer({
               <span className="truncate text-xs text-muted-foreground">还没有 AI 入座 · Enter 发送</span>
             ) : null}
           </div>
-          <Button type="submit" size="icon" disabled={busy || value.trim().length === 0} aria-label="发送">
+          <Button
+            type="submit"
+            size="icon"
+            className="rounded-full shadow-[inset_0_1px_0_0_rgb(255_255_255/0.25)]"
+            disabled={busy || value.trim().length === 0}
+            aria-label="发送"
+          >
             <Send />
           </Button>
         </div>
       </div>
-      <p className="mx-auto mt-1.5 max-w-3xl px-1 text-[11px] text-muted-foreground">
-        {unknown.length > 0
-          ? `房间里还没有 ${unknown.map((name) => `@${name}`).join("、")}，这句不会叫醒谁`
-          : "Enter 发送 · Shift+Enter 换行 · 消息里 @ 到的人会被唤起"}
-      </p>
+      {unknown.length > 0 ? (
+        <p className="pill mx-auto mt-1.5 w-fit max-w-3xl rounded-full px-3 py-0.5 text-[11px] text-amber-700 dark:text-amber-300">
+          房间里还没有 {unknown.map((name) => `@${name}`).join("、")}，这句不会叫醒谁
+        </p>
+      ) : null}
     </form>
   )
 }

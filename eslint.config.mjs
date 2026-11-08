@@ -12,6 +12,8 @@ const eslintConfig = defineConfig([
     "out/**",
     "build/**",
     "next-env.d.ts",
+    // Third-party code kept as upstream wrote it.
+    "lib/vendor/*.js",
   ]),
 ]);
 

@@ -7,6 +7,7 @@ import { toast } from "sonner"
 
 import { AdaptersDialog } from "@/components/room/adapters-dialog"
 import { Composer } from "@/components/room/composer"
+import { Ambient } from "@/components/room/ambient"
 import { JoinDialog } from "@/components/room/join-dialog"
 import { Mark } from "@/components/room/bits"
 import { Roster } from "@/components/room/roster"
@@ -187,8 +188,10 @@ export function RoomApp() {
   const openTasks = room?.tasks.filter((task) => task.status !== "done").length ?? 0
 
   return (
-    <main className="flex h-dvh flex-col bg-background">
-      <header className="flex h-14 shrink-0 items-center gap-3 border-b px-4">
+    <main className="relative isolate flex h-dvh flex-col">
+      <Ambient />
+      <div className="shrink-0 px-2 pt-2">
+      <header className="raised flex h-12 items-center gap-3 rounded-2xl pr-2 pl-3">
         <Mark />
         <div className="min-w-0">
           <h1 className="text-[15px] leading-tight font-semibold">并坐</h1>
@@ -196,7 +199,7 @@ export function RoomApp() {
         </div>
         <div className="ml-auto flex items-center gap-1.5">
           <span
-            className="mr-1 hidden items-center gap-1.5 rounded-full border px-2.5 py-1 text-xs text-muted-foreground sm:flex"
+            className="pill mr-1 hidden items-center gap-1.5 rounded-full px-2.5 py-1 text-xs text-muted-foreground sm:flex"
             title={live ? "实时连接正常" : "正在重连"}
           >
             <span className={`size-1.5 rounded-full ${live ? "bg-emerald-500" : "animate-pulse bg-amber-500"}`} />
@@ -211,24 +214,25 @@ export function RoomApp() {
           >
             {now > 0 && resolvedTheme === "dark" ? <Sun /> : <Moon />}
           </Button>
-          <Button type="button" size="sm" onClick={() => setJoinOpen(true)}>
+          <Button type="button" size="sm" className="rounded-full" onClick={() => setJoinOpen(true)}>
             <Plug />
             接入说明
           </Button>
         </div>
       </header>
+      </div>
 
       {!room ? (
-        <div className="grid min-h-0 flex-1 gap-3 p-4 lg:grid-cols-[272px_1fr_320px]">
+        <div className="grid min-h-0 flex-1 gap-2 p-2 lg:grid-cols-[272px_1fr_320px]">
           {["入口", "对话", "分工"].map((label) => (
-            <div key={label} className="animate-pulse rounded-xl bg-muted p-4 text-sm text-muted-foreground">
+            <div key={label} className="frost animate-pulse rounded-2xl p-4 text-sm text-muted-foreground">
               正在打开{label}
             </div>
           ))}
         </div>
       ) : (
-        <div className="grid min-h-0 flex-1 grid-rows-[minmax(0,1fr)] lg:grid-cols-[272px_minmax(0,1fr)_320px]">
-          <aside className={`${tab === "people" ? "block" : "hidden"} h-full min-h-0 overflow-hidden lg:block lg:border-r`}>
+        <div className="grid min-h-0 flex-1 grid-rows-[minmax(0,1fr)] pt-2 lg:grid-cols-[272px_minmax(0,1fr)_320px] lg:gap-2 lg:p-2">
+          <aside className={`${tab === "people" ? "block" : "hidden"} frost h-full min-h-0 overflow-hidden lg:block lg:rounded-2xl`}>
             <Roster
               agents={agents}
               adapters={adapters}
@@ -268,9 +272,9 @@ export function RoomApp() {
               }
             />
           </aside>
-          <section className={`${tab === "chat" ? "flex" : "hidden"} h-full min-h-0 flex-col lg:flex`}>
+          <section className={`${tab === "chat" ? "flex" : "hidden"} relative h-full min-h-0 flex-col lg:flex`}>
             {error ? (
-              <p className="border-b bg-destructive/10 px-4 py-2 text-xs text-destructive">{error} 正在重试。</p>
+              <p className="mx-3 rounded-xl bg-destructive/10 px-4 py-2 text-xs text-destructive">{error} 正在重试。</p>
             ) : null}
             <Thread
               messages={visibleMessages}
@@ -311,7 +315,7 @@ export function RoomApp() {
               }}
             />
           </section>
-          <aside className={`${tab === "tasks" ? "block" : "hidden"} h-full min-h-0 overflow-hidden lg:block lg:border-l`}>
+          <aside className={`${tab === "tasks" ? "block" : "hidden"} frost h-full min-h-0 overflow-hidden lg:block lg:rounded-2xl`}>
             <TasksPanel
               tasks={room.tasks}
               agents={agents}
@@ -346,7 +350,7 @@ export function RoomApp() {
         </div>
       )}
 
-      <nav className="grid shrink-0 grid-cols-3 border-t bg-background lg:hidden">
+      <nav className="frost grid shrink-0 grid-cols-3 lg:hidden">
         {tabs.map((item) => {
           const Icon = item.icon
           const on = tab === item.id

@@ -76,7 +76,7 @@ export function AdaptersDialog({
             return (
               <div key={index} className="rounded-xl border p-3">
                 <div className="flex items-center gap-2">
-                  <Avatar name={row.name || "?"} label={kind?.label} color={kind?.color ?? "#9ca3af"} size="sm" />
+                  <Avatar name={row.name || "?"} label={kind?.label} color={kind?.color ?? "#9ca3af"} kind={kind} size="sm" />
                   <Input
                     aria-label="agent 名"
                     value={row.name}

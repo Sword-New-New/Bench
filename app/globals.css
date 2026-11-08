@@ -138,3 +138,163 @@
     scrollbar-color: color-mix(in oklch, var(--foreground) 18%, transparent) transparent;
   }
 }
+/*
+ * Frosted glass over slow colored light.
+ *  .ambient  the five agents' colors drifting behind everything
+ *  .frost    panels: blur + tint
+ *  .raised   floating controls (top bar, composer): frost plus a lit rim and shadow
+ *  .pill     a small control sitting on frosted glass: light only, no blur of its own
+ */
+:root {
+  --glass-tint: oklch(1 0 0 / 0.55);
+  --glass-tint-2: oklch(1 0 0 / 0.3);
+  --glass-rim: oklch(1 0 0 / 0.95);
+  --glass-rim-soft: oklch(1 0 0 / 0.18);
+  --glass-shadow: oklch(0.3 0.03 265 / 0.16);
+  --frost-tint: oklch(0.985 0.004 85 / 0.62);
+  --ambient-dot: oklch(0.3 0.02 265 / 0.13);
+  --ambient-alpha: 0.5;
+}
+
+.dark {
+  --glass-tint: oklch(0.26 0.01 265 / 0.55);
+  --glass-tint-2: oklch(0.2 0.01 265 / 0.35);
+  --glass-rim: oklch(1 0 0 / 0.42);
+  --glass-rim-soft: oklch(1 0 0 / 0.06);
+  --glass-shadow: oklch(0 0 0 / 0.45);
+  --frost-tint: oklch(0.2 0.007 265 / 0.6);
+  --ambient-dot: oklch(1 0 0 / 0.08);
+  --ambient-alpha: 0.32;
+}
+
+.ambient {
+  position: absolute;
+  inset: 0;
+  z-index: -1;
+  overflow: hidden;
+  pointer-events: none;
+  background: var(--background);
+}
+
+.ambient::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background-image: radial-gradient(circle, var(--ambient-dot) 1px, transparent 1.6px);
+  background-size: 22px 22px;
+  mask-image: radial-gradient(ellipse 80% 70% at 50% 40%, #000 30%, transparent 85%);
+}
+
+.ambient > span {
+  position: absolute;
+  width: 46vmax;
+  height: 46vmax;
+  border-radius: 50%;
+  opacity: var(--ambient-alpha);
+  background: radial-gradient(circle at center, var(--c) 0%, transparent 62%);
+  animation: ambient-drift 38s ease-in-out infinite alternate;
+  will-change: transform;
+}
+
+@keyframes ambient-drift {
+  0% { transform: translate3d(0, 0, 0) scale(1); }
+  50% { transform: translate3d(var(--dx), var(--dy), 0) scale(1.12); }
+  100% { transform: translate3d(calc(var(--dx) * -0.6), calc(var(--dy) * 0.8), 0) scale(0.94); }
+}
+
+.frost,
+.raised {
+  position: relative;
+  isolation: isolate;
+}
+
+.frost {
+  background: var(--frost-tint);
+  box-shadow:
+    inset 0 1px 0 0 var(--glass-rim-soft),
+    0 1px 2px var(--glass-shadow);
+}
+
+/*
+ * The blur lives on a pseudo-element, not the panel: an element with a
+ * backdrop-filter cuts off the backdrop for everything inside it, and the
+ * sliding glass in the roster would then refract an empty grey layer.
+ */
+.frost::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  z-index: -1;
+  border-radius: inherit;
+  -webkit-backdrop-filter: blur(22px) saturate(1.6);
+  backdrop-filter: blur(22px) saturate(1.6);
+  pointer-events: none;
+}
+
+.raised {
+  background: linear-gradient(160deg, var(--glass-tint), var(--glass-tint-2));
+  -webkit-backdrop-filter: blur(16px) saturate(1.8);
+  backdrop-filter: blur(16px) saturate(1.8);
+  box-shadow:
+    inset 0 1px 1px 0 var(--glass-rim-soft),
+    inset 0 -8px 16px -12px var(--glass-rim-soft),
+    0 12px 32px -12px var(--glass-shadow),
+    0 2px 6px -2px var(--glass-shadow);
+}
+
+/* The specular rim: bright where light hits (top left, bottom right), gone in between. */
+.raised::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  z-index: -1;
+  border-radius: inherit;
+  padding: 1px;
+  background: linear-gradient(
+    135deg,
+    var(--glass-rim) 0%,
+    var(--glass-rim-soft) 28%,
+    transparent 50%,
+    var(--glass-rim-soft) 72%,
+    var(--glass-rim) 100%
+  );
+  -webkit-mask: linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0);
+  -webkit-mask-composite: xor;
+  mask: linear-gradient(#000 0 0) content-box exclude, linear-gradient(#000 0 0);
+  pointer-events: none;
+}
+
+.pill {
+  background: linear-gradient(160deg, oklch(1 0 0 / 0.5), oklch(1 0 0 / 0.16));
+  box-shadow:
+    inset 0 1px 0 0 oklch(1 0 0 / 0.7),
+    inset 0 0 0 1px oklch(1 0 0 / 0.25),
+    0 1px 3px -1px var(--glass-shadow);
+}
+
+.dark .pill {
+  background: linear-gradient(160deg, oklch(1 0 0 / 0.12), oklch(1 0 0 / 0.04));
+  box-shadow:
+    inset 0 1px 0 0 oklch(1 0 0 / 0.16),
+    inset 0 0 0 1px oklch(1 0 0 / 0.07),
+    0 1px 3px -1px var(--glass-shadow);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .ambient > span {
+    animation: none;
+  }
+}
+
+@media (prefers-reduced-transparency: reduce) {
+  .frost,
+  .raised {
+    background: var(--card);
+    -webkit-backdrop-filter: none;
+    backdrop-filter: none;
+  }
+
+  .frost::before {
+    display: none;
+  }
+}

@@ -1,4 +1,4 @@
-import { useEffect, useRef } from "react"
+import { useEffect, useRef, useState } from "react"
 import { ArrowRight, Reply, X } from "lucide-react"
 
 import { Avatar, MessageBody, seatLook } from "@/components/room/bits"
@@ -47,7 +47,7 @@ export function Thread({
         <div className="absolute inset-x-0 top-0 z-10 flex justify-center pt-2">
           <button
             type="button"
-            className="flex items-center gap-1.5 rounded-full border bg-card px-3 py-1 text-xs shadow-sm hover:bg-muted"
+            className="raised flex items-center gap-1.5 rounded-full px-3 py-1 text-xs"
             onClick={onClearFocus}
           >
             只看和 {focusName} 有关的
@@ -64,7 +64,7 @@ export function Thread({
         }}
         aria-live="polite"
       >
-        <div className="mx-auto flex max-w-3xl flex-col gap-1 px-4 py-6 md:px-6">
+        <div className="mx-auto flex max-w-3xl flex-col gap-1 px-4 pt-6 pb-[calc(var(--dock,8rem)+1rem)] md:px-6">
           {!talked ? <Welcome onExample={onExample} /> : null}
           {messages.map((message, index) => (
             <MessageRow
@@ -86,7 +86,7 @@ export function Thread({
 
 function Welcome({ onExample }: { onExample: (text: string) => void }) {
   return (
-    <div className="mb-6 rounded-2xl border border-dashed px-5 py-6">
+    <div className="frost mb-6 rounded-2xl px-5 py-6">
       <h2 className="text-base font-semibold">一个入口，叫到每一个 AI</h2>
       <p className="mt-1.5 text-sm leading-6 text-muted-foreground">
         Claude、DeepSeek、GPT、Grok、Gemini 各自在自己的软件里跑。它们入座以后，你在这里 @ 谁，房间就去唤起谁的会话，回答会回到这里。
@@ -96,7 +96,7 @@ function Welcome({ onExample }: { onExample: (text: string) => void }) {
           <button
             key={example}
             type="button"
-            className="rounded-full border bg-card px-3 py-1.5 text-left text-xs hover:bg-muted"
+            className="pill rounded-full px-3 py-1.5 text-left text-xs hover:brightness-105"
             onClick={() => onExample(example)}
           >
             {example}
@@ -124,6 +124,8 @@ function MessageRow({
   onReply: (message: Message) => void
   onOpenTask: (taskId: string) => void
 }) {
+  const [watching, setWatching] = useState(false)
+
   if (message.kind === "system") {
     return (
       <p className="my-2 self-center rounded-full bg-muted px-3 py-1 text-center text-xs leading-5 text-muted-foreground">
@@ -135,7 +137,7 @@ function MessageRow({
   if (message.kind === "handoff" && message.handoff) {
     const handoff = message.handoff
     return (
-      <article className="my-2 rounded-xl border bg-card px-4 py-3">
+      <article className="my-2 rounded-xl border bg-card/85 px-4 py-3">
         <p className="flex flex-wrap items-center gap-1.5 text-xs text-muted-foreground">
           <span className="font-medium text-foreground">{handoff.fromName}</span>
           <ArrowRight className="size-3" />
@@ -199,9 +201,15 @@ function MessageRow({
   }
 
   return (
-    <article className={`group flex gap-3 ${grouped ? "mt-0.5" : "mt-4"}`}>
+    <article
+      className={`group flex gap-3 ${grouped ? "mt-0.5" : "mt-4"}`}
+      onPointerEnter={() => setWatching(true)}
+      onPointerLeave={() => setWatching(false)}
+    >
       <div className="w-8 shrink-0">
-        {!grouped ? <Avatar name={message.authorName} color={look.color} label={look.label} /> : null}
+        {!grouped ? (
+          <Avatar name={message.authorName} color={look.color} label={look.label} kind={look.kind} watch={watching} />
+        ) : null}
       </div>
       <div className="min-w-0 max-w-[min(85%,40rem)]">
         {!grouped ? (
@@ -219,7 +227,7 @@ function MessageRow({
           </p>
         ) : null}
         {reply ? <Quote message={reply} align="start" /> : null}
-        <div className="rounded-2xl rounded-tl-md border bg-card px-3.5 py-2">
+        <div className="rounded-2xl rounded-tl-md border bg-card/85 px-3.5 py-2">
           <MessageBody text={message.text} names={names} />
         </div>
       </div>

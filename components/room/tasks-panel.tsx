@@ -55,7 +55,7 @@ export function TasksPanel({
   ]
 
   return (
-    <div className="flex h-full min-h-0 flex-col bg-sidebar">
+    <div className="flex h-full min-h-0 flex-col">
       <div className="flex items-baseline justify-between px-4 pt-4 pb-2">
         <h2 className="text-xs font-semibold tracking-wider text-muted-foreground uppercase">分工</h2>
         <span className="text-[11px] text-muted-foreground">

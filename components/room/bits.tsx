@@ -1,4 +1,5 @@
-import { kindOf } from "@/lib/kinds"
+import { Bot, BOT_SHAPE } from "@/components/room/bot"
+import { kindOf, type Kind } from "@/lib/kinds"
 import { splitMentions } from "@/lib/text"
 import { STATUS_COLOR, STATUS_LABEL } from "@/lib/status"
 import type { AgentStatus } from "@/lib/types"
@@ -32,20 +33,32 @@ export function Lamp({ status }: { status: AgentStatus }) {
   )
 }
 
-// A colored tile with the kind's initial, or the seat's own first letter.
+const BOT_SIZE = { sm: 24, md: 32, lg: 36 }
+
+// One of the five kinds is drawn as its animated character, which shows the
+// status itself. Anyone else gets a colored tile with their first letter.
 export function Avatar({
   name,
   color,
   label,
+  kind,
   size = "md",
   status,
+  hover,
+  watch,
 }: {
   name: string
   color: string
   label?: string
+  kind?: Kind | null
   size?: "sm" | "md" | "lg"
   status?: AgentStatus
+  hover?: boolean
+  watch?: boolean
 }) {
+  if (kind) {
+    return <Bot shape={BOT_SHAPE[kind.id]} color={kind.color} size={BOT_SIZE[size]} status={status} hover={hover} watch={watch ?? hover} />
+  }
   const glyph = (label || name).slice(0, 1).toUpperCase()
   const box = size === "lg" ? "size-9 text-sm" : size === "sm" ? "size-6 text-[11px]" : "size-8 text-xs"
   return (

@@ -103,7 +103,7 @@ export function JoinDialog({
         <div className="space-y-2.5">
           {KINDS.filter((kind) => MCP_KINDS.includes(kind.id)).map((kind) => (
             <div key={kind.id} className="flex items-center gap-3">
-              <Avatar name={kind.label} color={kind.color} size="sm" />
+              <Avatar name={kind.label} color={kind.color} kind={kind} size="sm" />
               <div className="w-28 shrink-0">
                 <p className="text-sm font-medium leading-tight">{kind.label}</p>
                 <p className="truncate text-[11px] text-muted-foreground">{kind.harness}</p>

@@ -1,3 +1,4 @@
+import { useState } from "react"
 import { AtSign, Ellipsis, Plus, Settings2 } from "lucide-react"
 
 import { Button } from "@/components/ui/button"
@@ -54,7 +55,7 @@ export function Roster(props: Props) {
   const others = agents.filter((agent) => kindOf(agent) === null)
 
   return (
-    <div className="flex h-full min-h-0 flex-col bg-sidebar">
+    <div className="flex h-full min-h-0 flex-col">
       <div className="flex items-center justify-between px-4 pt-4 pb-2">
         <h2 className="text-xs font-semibold tracking-wider text-muted-foreground uppercase">入口</h2>
         <Button type="button" variant="ghost" size="xs" onClick={props.onJoin}>
@@ -110,18 +111,25 @@ function KindGroup({
   state,
   ...props
 }: Props & { kind: Kind; seats: PublicAgent[]; state: ReturnType<typeof reach> }) {
+  const [hover, setHover] = useState(false)
   const primary = seats.find((agent) => agent.status !== "offline") ?? seats.find((agent) => agent.callable) ?? seats[0]
-  const best = seats.find((agent) => agent.status === "working")?.status ?? primary?.status
+  // A seat that can be woken is only resting, so its character stays awake and
+  // watches the pointer; it sleeps only when nothing would wake it.
+  const best =
+    seats.find((agent) => agent.status === "working")?.status ??
+    (primary?.status === "offline" && primary.callable ? "idle" : primary?.status)
 
   return (
-    <section className="rounded-xl p-1 transition-colors hover:bg-sidebar-accent/60">
+    <section className="p-1">
       <button
         type="button"
-        className="flex w-full items-center gap-3 rounded-lg px-1.5 py-1.5 text-left"
+        className="flex w-full items-center gap-3 rounded-xl px-2 py-2 text-left transition-colors hover:bg-sidebar-accent/70"
+        onPointerEnter={() => setHover(true)}
+        onPointerLeave={() => setHover(false)}
         onClick={() => (primary ? props.onMention(primary.name) : props.onJoin())}
         title={primary ? `@${primary.name}` : `把 ${kind.label} 接进来`}
       >
-        <Avatar name={kind.label} color={kind.color} size="lg" status={best} />
+        <Avatar name={kind.label} color={kind.color} kind={kind} size="lg" status={best} hover={hover} />
         <span className="min-w-0 flex-1">
           <span className="flex items-baseline justify-between gap-2">
             <span className="truncate text-sm font-semibold">{kind.label}</span>
@@ -145,7 +153,7 @@ function SeatRow({ agent, ...props }: Props & { agent: PublicAgent }) {
   const focused = props.focusId === agent.id
   return (
     <div
-      className={`group flex items-start gap-2 rounded-lg px-2 py-1.5 ${focused ? "bg-sidebar-accent" : "hover:bg-sidebar-accent/70"}`}
+      className={`group flex items-start gap-2 rounded-xl px-2 py-1.5 transition-colors ${focused ? "bg-sidebar-accent" : "hover:bg-sidebar-accent/70"}`}
     >
       <span className="pt-1.5">
         <Lamp status={agent.status} />

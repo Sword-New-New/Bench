@@ -2,6 +2,7 @@ import { useEffect, useRef, useState, type CSSProperties } from "react"
 import { ArrowRight, Reply, X } from "lucide-react"
 
 import { Avatar, MessageBody, seatLook } from "@/components/room/bits"
+import { DOCK_EVENT } from "@/components/room/composer"
 import { clock } from "@/lib/status"
 import type { Message, PublicAgent } from "@/lib/types"
 
@@ -32,14 +33,45 @@ export function Thread({
 }) {
   const scroller = useRef<HTMLDivElement>(null)
   const stick = useRef(true)
+  // A smooth scroll we started is still moving; it passes through spots far
+  // from the bottom, which must not count as you scrolling up.
+  const gliding = useRef(false)
   const talked = messages.some((message) => message.kind !== "system")
 
+  // New messages glide into view, as long as you were reading at the bottom.
+  const seen = useRef(0)
   useEffect(() => {
-    if (!stick.current) return
     const node = scroller.current
-    if (!node) return
-    node.scrollTop = node.scrollHeight
+    if (!node || !stick.current) return
+    const first = seen.current === 0
+    seen.current = messages.length
+    if (first) {
+      node.scrollTop = node.scrollHeight
+      return
+    }
+    if (node.scrollHeight - node.scrollTop - node.clientHeight < 1) return
+    gliding.current = true
+    node.scrollTo({ top: node.scrollHeight, behavior: "smooth" })
+    // scrollend can go missing (an interrupted scroll); never stay deaf to the user.
+    const timer = window.setTimeout(() => (gliding.current = false), 1200)
+    return () => {
+      window.clearTimeout(timer)
+      gliding.current = false
+    }
   }, [messages])
+
+  // The composer grows and shrinks with an animation; keep the last message
+  // just above it in the same frame, so it rides along instead of lagging.
+  useEffect(() => {
+    const node = scroller.current
+    const host = node?.parentElement?.parentElement
+    if (!node || !host) return
+    const pin = () => {
+      if (stick.current) node.scrollTop = node.scrollHeight
+    }
+    host.addEventListener(DOCK_EVENT, pin)
+    return () => host.removeEventListener(DOCK_EVENT, pin)
+  }, [])
 
   return (
     <div className="relative flex min-h-0 flex-1 flex-col">
@@ -59,8 +91,12 @@ export function Thread({
         ref={scroller}
         className="min-h-0 flex-1 overflow-y-auto"
         onScroll={(event) => {
+          if (gliding.current) return
           const node = event.currentTarget
           stick.current = node.scrollHeight - node.scrollTop - node.clientHeight < 80
+        }}
+        onScrollEnd={() => {
+          gliding.current = false
         }}
         aria-live="polite"
       >

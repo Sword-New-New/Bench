@@ -2,6 +2,7 @@ import { useEffect, useState } from "react"
 import { NotebookPen, X } from "lucide-react"
 
 import { Avatar, seatLook } from "@/components/room/bits"
+import { Reveal } from "@/components/room/reveal"
 import { Button } from "@/components/ui/button"
 import { Textarea } from "@/components/ui/textarea"
 import { clock } from "@/lib/status"
@@ -9,6 +10,14 @@ import type { PublicAgent, RoomSnapshot } from "@/lib/types"
 
 const SNOOZE_KEY = "bench-summary-snooze"
 const SNOOZE_MS = 30 * 60_000
+const SNOOZE_EVENT = "bench-summary-snooze"
+
+export function clearSummarySnooze() {
+  try {
+    localStorage.removeItem(SNOOZE_KEY)
+  } catch {}
+  window.dispatchEvent(new Event(SNOOZE_EVENT))
+}
 
 function snoozedUntil() {
   try {
@@ -41,25 +50,16 @@ export function SummaryNudge({
     }
     const first = window.setTimeout(tick, 0)
     const timer = window.setInterval(tick, 60_000)
+    window.addEventListener(SNOOZE_EVENT, tick)
     return () => {
       window.clearTimeout(first)
       window.clearInterval(timer)
+      window.removeEventListener(SNOOZE_EVENT, tick)
     }
   }, [])
 
   const writer = room.summaryWriter ? room.agents.find((agent) => agent.id === room.summaryWriter) : undefined
-  if (writer) {
-    return (
-      <div className="pill flex items-center gap-2 rounded-2xl px-3 py-2 text-xs text-muted-foreground">
-        <NotebookPen className="size-3.5 shrink-0" />
-        <span className="min-w-0 flex-1 truncate">
-          <span className="font-medium text-foreground">{writer.name}</span> 正在写房间摘要…
-        </span>
-      </div>
-    )
-  }
-  if (!room.summaryDue || now === 0 || now < until) return null
-
+  const due = room.summaryDue && now > 0 && now >= until
   const writers = room.agents.filter((agent) => agent.callable && !agent.demo)
   const { count, chars } = room.sinceSummary
   const snooze = () => {
@@ -71,45 +71,59 @@ export function SummaryNudge({
   }
 
   return (
-    <div className="pill rounded-2xl px-3 py-2 text-xs">
-      <div className="flex items-start gap-2">
-        <NotebookPen className="mt-0.5 size-3.5 shrink-0 text-muted-foreground" />
-        <p className="min-w-0 flex-1 leading-5">
-          {room.summary ? "上次摘要之后" : "到现在"}已经聊了 {count} 条（约 {Math.round(chars / 1000)} 千字），
-          超出一次唤起能带的量了。找谁写一份摘要？
-        </p>
-        <button type="button" className="rounded p-0.5 text-muted-foreground hover:bg-muted" onClick={snooze} aria-label="稍后提醒">
-          <X className="size-3.5" />
-        </button>
-      </div>
-      <div className="mt-2 flex flex-wrap items-center gap-1.5 pl-5.5">
-        {writers.map((agent) => {
-          const look = seatLook(agent)
-          return (
-            <Button
-              key={agent.id}
+    <Reveal open={Boolean(writer) || due} className="pb-2">
+      {writer ? (
+        <div className="pill flex items-center gap-2 rounded-2xl px-3 py-2 text-xs text-muted-foreground">
+          <NotebookPen className="size-3.5 shrink-0" />
+          <span className="min-w-0 flex-1 truncate">
+            <span className="font-medium text-foreground">{writer.name}</span> 正在写房间摘要…
+          </span>
+        </div>
+      ) : due ? (
+        <div className="pill rounded-2xl px-3 py-2 text-xs">
+          <div className="flex items-center gap-2">
+            <NotebookPen className="size-3.5 shrink-0 text-muted-foreground" />
+            <p className="min-w-0 flex-1 leading-5">
+              {room.summary ? "上次摘要之后" : "到现在"}已经聊了 {count} 条（约 {Math.round(chars / 1000)} 千字），超出一次唤起能带的量了。找谁写一份摘要？
+            </p>
+            <button
               type="button"
-              size="xs"
-              variant="outline"
-              className="rounded-full"
-              disabled={busy}
-              onClick={() => onRequest(agent)}
+              className="rounded p-0.5 text-muted-foreground hover:bg-muted"
+              onClick={snooze}
+              aria-label="稍后提醒"
             >
-              <Avatar name={agent.name} color={look.color} label={look.label} kind={look.kind} size="sm" />
-              {agent.name}
-            </Button>
-          )
-        })}
-        {writers.length === 0 ? <span className="text-muted-foreground">没有能唤起的席位</span> : null}
-        <span className="flex-1" />
-        <Button type="button" size="xs" variant="ghost" disabled={busy} onClick={snooze}>
-          稍后
-        </Button>
-        <Button type="button" size="xs" variant="ghost" disabled={busy} onClick={onSkip}>
-          这段不用
-        </Button>
-      </div>
-    </div>
+              <X className="size-3.5" />
+            </button>
+          </div>
+          <div className="mt-2 flex flex-wrap items-center gap-1.5 pl-5.5">
+            {writers.map((agent) => {
+              const look = seatLook(agent)
+              return (
+                <button
+                  key={agent.id}
+                  type="button"
+                  className="pill flex h-7 shrink-0 items-center gap-1.5 rounded-full pr-2.5 pl-0.5 text-xs font-medium hover:brightness-105 disabled:opacity-50"
+                  disabled={busy}
+                  onClick={() => onRequest(agent)}
+                >
+                  <Avatar name={agent.name} color={look.color} label={look.label} kind={look.kind} size="sm" />
+                  {agent.name}
+                </button>
+              )
+            })}
+            {writers.length === 0 ? <span className="text-muted-foreground">没有能唤起的席位</span> : null}
+            <span className="ml-auto flex shrink-0 gap-0.5">
+              <Button type="button" size="xs" variant="ghost" disabled={busy} onClick={snooze}>
+                稍后
+              </Button>
+              <Button type="button" size="xs" variant="ghost" disabled={busy} onClick={onSkip}>
+                这段不用
+              </Button>
+            </span>
+          </div>
+        </div>
+      ) : null}
+    </Reveal>
   )
 }
 

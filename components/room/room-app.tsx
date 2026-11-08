@@ -11,7 +11,8 @@ import { Ambient } from "@/components/room/ambient"
 import { JoinDialog } from "@/components/room/join-dialog"
 import { Mark } from "@/components/room/bits"
 import { Roster } from "@/components/room/roster"
-import { SummaryCard, SummaryNudge } from "@/components/room/summary"
+import { clearSummarySnooze, SummaryCard, SummaryNudge } from "@/components/room/summary"
+import { DEBUG_MENU, DebugMenu, NO_DEBUG, withDebug, type DebugView } from "@/components/room/debug-menu"
 import { TasksPanel } from "@/components/room/tasks-panel"
 import { Thread } from "@/components/room/thread"
 import { api, type AdapterInfo } from "@/components/room/api"
@@ -38,7 +39,10 @@ import type { Message, PublicAgent, RoomSnapshot, Task } from "@/lib/types"
 type TabId = "chat" | "people" | "tasks"
 
 export function RoomApp() {
-  const [room, setRoom] = useState<RoomSnapshot | null>(null)
+  const [actual, setRoom] = useState<RoomSnapshot | null>(null)
+  const [debug, setDebug] = useState<DebugView>(NO_DEBUG)
+  // What the page shows: the room, with any debug-menu overrides on top.
+  const room = useMemo(() => actual && withDebug(actual, debug), [actual, debug])
   const [error, setError] = useState<string | null>(null)
   const [live, setLive] = useState(false)
   const [now, setNow] = useState(0)
@@ -158,6 +162,10 @@ export function RoomApp() {
     }
   }
 
+  async function debugCall(body: Record<string, unknown>) {
+    await api("/api/v1/debug", { method: "POST", body: JSON.stringify({ as: "human", ...body }) })
+  }
+
   async function summaryCall(body: Record<string, unknown>) {
     await api("/api/v1/summary", { method: "POST", body: JSON.stringify({ as: "human", ...body }) })
   }
@@ -217,6 +225,23 @@ export function RoomApp() {
             <span className={`size-1.5 rounded-full ${live ? "bg-emerald-500" : "animate-pulse bg-amber-500"}`} />
             {room ? `${seated} 在线 · ${working} 在做` : "正在打开"}
           </span>
+          {DEBUG_MENU ? (
+            <DebugMenu
+              view={debug}
+              agents={agents}
+              busy={busy}
+              onView={setDebug}
+              onNote={(kind) => void run(() => debugCall({ action: "note", kind }))}
+              onForget={(agent) =>
+                void run(() => debugCall({ action: "forget", agentId: agent.id }), `${agent.name} 下次被叫醒会收到全部积压`)
+              }
+              onClearSummary={() => void run(() => debugCall({ action: "clearSummary" }), "摘要清空了")}
+              onClearSnooze={() => {
+                clearSummarySnooze()
+                toast.success("「稍后提醒」清掉了")
+              }}
+            />
+          ) : null}
           <DropdownMenu>
             <DropdownMenuTrigger render={<Button type="button" variant="ghost" size="icon-sm" aria-label="深浅色" />}>
               {now > 0 && theme === "dark" ? <Moon /> : now > 0 && theme === "light" ? <Sun /> : <Monitor />}

@@ -929,6 +929,25 @@ export async function waitFor(input: unknown, signal?: AbortSignal) {
   return reply(timedOut)
 }
 
+// Debug menu only: forget how far a seat has read, so its next wake carries
+// the whole backlog (and the cut, once it runs past the limit).
+export function debugForgetSeen(id: string) {
+  const agent = findAgent(id)
+  if (!agent) throw new ApiError(404, "这个席位不在了")
+  agent.seenSeq = undefined
+  commit()
+  return { name: agent.name }
+}
+
+// Debug menu only: drop the room summary and any skipped stretch.
+export function debugClearSummary() {
+  const state = runtime().state
+  state.summary = undefined
+  state.summarySkipSeq = undefined
+  bumpRev()
+  commit()
+}
+
 export function resetRoom() {
   runtime().state = emptyState()
   standbyOf().clear()

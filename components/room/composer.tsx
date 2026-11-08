@@ -2,12 +2,15 @@ import { useEffect, useMemo, useRef, useState } from "react"
 import { Send, X } from "lucide-react"
 
 import { Avatar, seatLook } from "@/components/room/bits"
+import { Reveal } from "@/components/room/reveal"
 import { Button } from "@/components/ui/button"
 import { Label } from "@/components/ui/label"
 import { Textarea } from "@/components/ui/textarea"
 import { KINDS, kindOf } from "@/lib/kinds"
 import { escapeRegExp, unknownMentions } from "@/lib/text"
 import type { Message, PublicAgent } from "@/lib/types"
+
+export const DOCK_EVENT = "bench-dock"
 
 function hasMention(text: string, name: string) {
   return new RegExp(`@${escapeRegExp(name)}(?![\\p{L}\\p{N}_-])`, "u").test(text)
@@ -47,12 +50,17 @@ export function Composer({
   const [picked, setPicked] = useState(false)
   const formRef = useRef<HTMLFormElement>(null)
 
-  // The composer floats over the thread; tell the thread how much room to leave.
+  // The composer floats over the thread; tell the thread how much room to
+  // leave. Panels open with an animation, so this fires every frame while they
+  // move, and the thread keeps its last message in view in the same frame.
   useEffect(() => {
     const form = formRef.current
     const host = form?.parentElement
     if (!form || !host) return
-    const observer = new ResizeObserver(() => host.style.setProperty("--dock", `${form.offsetHeight}px`))
+    const observer = new ResizeObserver(() => {
+      host.style.setProperty("--dock", `${form.offsetHeight}px`)
+      host.dispatchEvent(new Event(DOCK_EVENT))
+    })
     observer.observe(form)
     return () => observer.disconnect()
   }, [])
@@ -93,21 +101,23 @@ export function Composer({
         onSend()
       }}
     >
-      {notice ? <div className="mx-auto mb-2 max-w-3xl">{notice}</div> : null}
+      {notice ? <div className="mx-auto max-w-3xl">{notice}</div> : null}
       <div
         className="raised mx-auto max-w-3xl rounded-[22px] transition-shadow focus-within:ring-3 focus-within:ring-ring/20"
       >
-        {reply ? (
-          <div className="flex items-center gap-2 border-b border-foreground/8 px-3.5 py-2 text-xs text-muted-foreground">
-            <span className="min-w-0 flex-1 truncate">
-              回复 <span className="font-medium text-foreground">{reply.authorName}</span>：{reply.text}
-            </span>
-            <button type="button" className="rounded p-0.5 hover:bg-muted" onClick={onClearReply} aria-label="取消回复">
-              <X className="size-3.5" />
-            </button>
-          </div>
-        ) : null}
-        {matches.length > 0 && !picked ? (
+        <Reveal open={reply !== null}>
+          {reply ? (
+            <div className="flex items-center gap-2 border-b border-foreground/8 px-3.5 py-2 text-xs text-muted-foreground">
+              <span className="min-w-0 flex-1 truncate">
+                回复 <span className="font-medium text-foreground">{reply.authorName}</span>：{reply.text}
+              </span>
+              <button type="button" className="rounded p-0.5 hover:bg-muted" onClick={onClearReply} aria-label="取消回复">
+                <X className="size-3.5" />
+              </button>
+            </div>
+          ) : null}
+        </Reveal>
+        <Reveal open={matches.length > 0 && !picked}>
           <div className="flex flex-wrap gap-1 border-b border-foreground/8 px-2 py-2">
             {matches.map((agent) => {
               const look = seatLook(agent)
@@ -125,7 +135,7 @@ export function Composer({
               )
             })}
           </div>
-        ) : null}
+        </Reveal>
         <Label htmlFor="composer" className="sr-only">
           发给房间
         </Label>
@@ -210,11 +220,11 @@ export function Composer({
           </Button>
         </div>
       </div>
-      {unknown.length > 0 ? (
+      <Reveal open={unknown.length > 0}>
         <p className="pill mx-auto mt-1.5 w-fit max-w-3xl rounded-full px-3 py-0.5 text-[11px] text-amber-700 dark:text-amber-300">
           房间里还没有 {unknown.map((name) => `@${name}`).join("、")}，这句不会叫醒谁
         </p>
-      ) : null}
+      </Reveal>
     </form>
   )
 }

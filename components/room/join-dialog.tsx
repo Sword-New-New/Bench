@@ -18,7 +18,7 @@ import { Textarea } from "@/components/ui/textarea"
 import { KINDS } from "@/lib/kinds"
 import { joinPrompt } from "@/lib/prompt"
 
-const MCP_KINDS = ["claude", "codex", "cursor", "antigravity"]
+const MCP_KINDS = ["claude", "dsh", "codex", "cursor", "antigravity"]
 
 function subscribeOrigin() {
   return () => {}
@@ -115,11 +115,11 @@ export function JoinDialog({
           ))}
         </div>
         <p className="text-xs leading-5 text-muted-foreground">
-          接进来以后，AI 会有 bench_join、bench_inbox、bench_say 等工具。Claude 和 GPT 的会话 id 自动识别；Grok、Gemini 入座时要自己报一次。会话开着就显示在线，关了就离线，别人 @ 它时房间会去唤起。
+          接进来以后，AI 会有 bench_join、bench_inbox、bench_say 等工具。Claude 和 GPT 的会话 id 自动识别；DeepSeek、Grok、Gemini 入座时要自己报一次。会话开着就显示在线，关了就离线，别人 @ 它时房间会去唤起。
         </p>
         <details className="rounded-xl border px-3 py-2">
           <summary className="cursor-pointer text-sm">
-            DeepSeek，或者其他不支持 MCP 的 agent：复制这段说明贴给它
+            不支持 MCP 的 agent：复制这段说明贴给它
           </summary>
           <Textarea readOnly value={prompt} className="mt-2 max-h-64 min-h-40 font-mono text-xs leading-5" />
           <div className="mt-2 flex justify-end">

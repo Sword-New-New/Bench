@@ -47,7 +47,7 @@ case "$kind" in
     for profile in web headless; do
       patch="$dsh_home/profiles/$profile/cordis.patch.yml"
       [[ -f "$patch" ]] || { echo "跳过 $profile：没有 $patch"; continue; }
-      if grep -q "^- id: mcp-bench$" "$patch"; then
+      if grep -q "id: mcp-bench$" "$patch"; then
         echo "$profile 已经有 bench，跳过"
         continue
       fi
@@ -55,14 +55,16 @@ case "$kind" in
       # An empty layer is written as a literal `[]`; a list item can't follow it.
       sed -i '/^\[\][[:space:]]*$/d' "$patch"
       [[ -z "$(tail -c1 "$patch")" ]] || echo >> "$patch"
+      # A top-level row only overrides an existing id; a new row goes in an insert list.
       cat >> "$patch" <<EOF
-- id: mcp-bench
-  name: "@deepseek-ai/dsh-mcp-client"
-  config:
-    serverName: bench
-    transport: stdio
-    command: "$node"
-    args: ["$script", "--agent", "dsh"]
+- insert:
+    - id: mcp-bench
+      name: "@deepseek-ai/dsh-mcp-client"
+      config:
+        serverName: bench
+        transport: stdio
+        command: "$node"
+        args: ["$script", "--agent", "dsh"]
 EOF
       echo "已写入 $patch"
     done

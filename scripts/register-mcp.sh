@@ -1,8 +1,15 @@
 #!/usr/bin/env bash
-# Usage: register-mcp.sh <kind>   (kinds: see lib/kinds.ts)
-# Register the 并坐 MCP server (scripts/bench-mcp.mjs) with one agent client,
+# Usage: register-mcp.sh <kind> [<kind>...]   (kinds: see lib/kinds.ts)
+# Register the 并坐 MCP server (scripts/bench-mcp.mjs) with agent clients,
 # for this user. Running it again replaces the old entry.
 set -euo pipefail
+
+# Several kinds: one run each, and carry on past one that fails.
+if [[ $# -gt 1 ]]; then
+  failed=0
+  for each in "$@"; do "$0" "$each" || failed=1; done
+  exit "$failed"
+fi
 
 kind="${1:-}"
 root="$(cd "$(dirname "$0")/.." && pwd)"

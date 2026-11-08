@@ -26,7 +26,8 @@ type Props = {
   onFocus: (id: string | null) => void
   onLeave: (agent: PublicAgent) => void
   onConfigure: (name: string | null) => void
-  onJoin: () => void
+  // kind: open the join dialog with that agent already picked.
+  onJoin: (kind?: string) => void
   onSeat: () => void
   onDismiss: () => void
 }
@@ -62,7 +63,7 @@ export function Roster(props: Props) {
     <div className="flex h-full min-h-0 flex-col">
       <div className="flex items-center justify-between px-4 pt-4 pb-2">
         <h2 className="text-xs font-semibold tracking-wider text-muted-foreground uppercase">入口</h2>
-        <Button type="button" variant="ghost" size="xs" onClick={props.onJoin}>
+        <Button type="button" variant="ghost" size="xs" onClick={() => props.onJoin()}>
           <Plus />
           接入
         </Button>
@@ -86,7 +87,7 @@ export function Roster(props: Props) {
                   type="button"
                   className="pill chip flex items-center gap-1.5 rounded-full px-2.5 py-1 text-xs"
                   title={`${kind.harness} · 点开看怎么接`}
-                  onClick={props.onJoin}
+                  onClick={() => props.onJoin(kind.id)}
                 >
                   <span className="size-1.5 rounded-full" style={{ background: kind.color }} />
                   {kind.label}
@@ -153,7 +154,7 @@ function KindGroup({
         className="flex w-full items-center gap-3 rounded-xl px-2 py-2 text-left transition-colors hover:bg-sidebar-accent/70"
         onPointerEnter={() => setHover(true)}
         onPointerLeave={() => setHover(false)}
-        onClick={() => (primary ? props.onMention(primary.name) : props.onJoin())}
+        onClick={() => (primary ? props.onMention(primary.name) : props.onJoin(kind.id))}
         title={primary ? `@${primary.name}` : `把 ${kind.label} 接进来`}
       >
         <Avatar name={kind.label} color={kind.color} kind={kind} size="lg" status={best} hover={hover} />

@@ -17,15 +17,16 @@ const script = path.join(path.dirname(new URL(import.meta.url).pathname), "bench
 const node = process.execPath
 
 let config = {}
+let before = ""
 if (existsSync(file)) {
+  before = readFileSync(file, "utf8")
   try {
-    config = JSON.parse(readFileSync(file, "utf8"))
+    config = JSON.parse(before)
   } catch {
     console.error(`${file} 不是纯 JSON（可能带注释），没有改它。请手动把 bench 加进去：`)
     console.error(`  命令 ${node}，参数 ${script} --agent ${kind}`)
     process.exit(1)
   }
-  copyFileSync(file, `${file}.bak-bench-${Date.now()}`)
 }
 
 const args = [script, "--agent", kind]
@@ -56,6 +57,12 @@ for (const [name, value] of Object.entries(JSON.parse(top))) {
   config[name] = old
 }
 
+const after = `${JSON.stringify(config, null, 2)}\n`
+if (after === before) {
+  console.log(`${file} 里已经有 bench，不用改`)
+  process.exit(0)
+}
 mkdirSync(path.dirname(file), { recursive: true })
-writeFileSync(file, `${JSON.stringify(config, null, 2)}\n`)
+if (before) copyFileSync(file, `${file}.bak-bench-${Date.now()}`)
+writeFileSync(file, after)
 console.log(`已写入 ${file}`)

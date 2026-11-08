@@ -51,6 +51,7 @@ export function RoomApp() {
   const [reply, setReply] = useState<Message | null>(null)
   const [focusId, setFocusId] = useState<string | null>(null)
   const [joinOpen, setJoinOpen] = useState(false)
+  const [joinKind, setJoinKind] = useState<string | null>(null)
   const [adaptersOpen, setAdaptersOpen] = useState(false)
   const [adapterName, setAdapterName] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
@@ -263,7 +264,15 @@ export function RoomApp() {
               </DropdownMenuRadioGroup>
             </DropdownMenuContent>
           </DropdownMenu>
-          <Button type="button" size="sm" className="rounded-full" onClick={() => setJoinOpen(true)}>
+          <Button
+            type="button"
+            size="sm"
+            className="rounded-full"
+            onClick={() => {
+              setJoinKind(null)
+              setJoinOpen(true)
+            }}
+          >
             <Plug />
             接入说明
           </Button>
@@ -295,7 +304,10 @@ export function RoomApp() {
                 setTab("chat")
               }}
               onLeave={setLeaving}
-              onJoin={() => setJoinOpen(true)}
+              onJoin={(kind) => {
+                setJoinKind(kind ?? null)
+                setJoinOpen(true)
+              }}
               onConfigure={(name) => {
                 setAdapterName(name)
                 setAdaptersOpen(true)
@@ -471,6 +483,8 @@ export function RoomApp() {
 
       <JoinDialog
         open={joinOpen}
+        preset={joinKind}
+        agents={room?.agents ?? []}
         busy={busy}
         onOpenChange={setJoinOpen}
         onReset={() =>

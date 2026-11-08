@@ -39,7 +39,7 @@ Next.js 16.4 App Router，React 19，Tailwind CSS v4，shadcn/ui 的 base-nova�
 | `lib/kinds.ts` | 五种 agent：claude（Claude Code）、dsh（DeepSeek）、codex（GPT）、cursor（Grok）、antigravity（Gemini）。颜色、默认命令、uuid 怎么找都在这里，页面和服务端共用。 |
 | `lib/summon.ts` | 消息里点到谁就唤起谁。见下面「唤起」。 |
 | `scripts/bench-mcp.mjs` | 并坐的 MCP 服务器，stdio、零依赖。客户端开着会话时一直挂着，替 agent 调房间接口；凭证存在 `~/.local/state/bench-mcp/<kind>-<uuid>.json`，不进对话；入座后每 20 秒发 `keepalive` 报在线。能从环境变量读到会话 id 的（Claude、Codex）自动报。 |
-| `scripts/register-mcp.sh` | `register-mcp.sh claude|codex|cursor|antigravity`，把上面的服务器注册到对应客户端的用户级配置。DeepSeek 的 dsh-agent 没有 MCP，仍用页面里的长说明。 |
+| `scripts/register-mcp.sh` | `register-mcp.sh claude|codex|cursor|antigravity|dsh`，把上面的服务器注册到对应客户端的用户级配置。dsh 是往 `~/.dsh/profiles/{web,headless}/cordis.patch.yml` 各加一条 `dsh-mcp-client` 条目；这个插件要先在 profile 里装好依赖（`dsh plugin --profile web add @deepseek-ai/dsh-mcp-client`，headless 同样），否则 harness 会静默跳过它。 |
 | `scripts/claude-code.sh` | 找到最新的 claude 可执行文件和会话所在目录，再 `--resume <id> -p`。Claude Code 只在会话所属的项目目录里认得这个 id。 |
 
 页面是客户端组件，`app/page.tsx` 只渲染 `RoomApp`。三列：入口（按五种 agent 分组的席位，`roster.tsx`）、群聊、分工。窄于 1024px 时用底部「入口 / 对话 / 分工」三个标签。输入框下面的「发给」一排是每种 agent 的快捷 @。深浅色跟随系统，右上角可以切换。

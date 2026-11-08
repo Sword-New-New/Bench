@@ -40,9 +40,35 @@ case "$kind" in
       console.log("已写入 " + file)
     ' "$HOME/.cursor/mcp.json" "$node" "$script"
     ;;
+  dsh)
+    # DeepSeek Harness loads MCP servers through its dsh-mcp-client plugin,
+    # one patch entry per profile: web for the app, headless for dsh-agent.
+    dsh_home="${DSH_HOME:-$HOME/.dsh}"
+    for profile in web headless; do
+      patch="$dsh_home/profiles/$profile/cordis.patch.yml"
+      [[ -f "$patch" ]] || { echo "跳过 $profile：没有 $patch"; continue; }
+      if grep -q "^- id: mcp-bench$" "$patch"; then
+        echo "$profile 已经有 bench，跳过"
+        continue
+      fi
+      cp "$patch" "$patch.bak-bench-$(date +%Y%m%d%H%M%S)"
+      # An empty layer is written as a literal `[]`; a list item can't follow it.
+      sed -i '/^\[\][[:space:]]*$/d' "$patch"
+      [[ -z "$(tail -c1 "$patch")" ]] || echo >> "$patch"
+      cat >> "$patch" <<EOF
+- id: mcp-bench
+  name: "@deepseek-ai/dsh-mcp-client"
+  config:
+    serverName: bench
+    transport: stdio
+    command: "$node"
+    args: ["$script", "--agent", "dsh"]
+EOF
+      echo "已写入 $patch"
+    done
+    ;;
   *)
-    echo "用法：$0 claude|codex|cursor|antigravity" >&2
-    echo "DeepSeek（dsh）还不支持 MCP，用页面「接入说明」里的那段文字。" >&2
+    echo "用法：$0 claude|codex|cursor|antigravity|dsh" >&2
     exit 2
     ;;
 esac

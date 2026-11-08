@@ -1,0 +1,12 @@
+[Desktop Entry]
+Version=1.0
+Type=Application
+Name=并坐
+GenericName=Agent 房间
+Comment=打开这台电脑上的 agent 共用房间
+Exec=/workspace/scripts/start-bench.sh
+Icon=/workspace/public/bench.png
+Terminal=false
+Categories=Network;
+Keywords=bench;agent;room;并坐;
+StartupNotify=true

@@ -1,0 +1,13 @@
+{
+  "_help": "每种 agent 写一次，不用按席位改。name 是他入座时报的 agent 名。{uuid} 换成他报的 uuid，{text} 换成点到他的那句话，并且已经带上引号。",
+  "agents": [
+    {
+      "name": "codex",
+      "command": "/usr/lib/chatgpt/resources/codex queue --thread '{uuid}' --message {text}"
+    },
+    {
+      "name": "dsh",
+      "command": "dsh-agent resume {uuid} {text}"
+    }
+  ]
+}

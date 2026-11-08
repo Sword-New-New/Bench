@@ -55,6 +55,15 @@ export type TaskEvent = {
   note: string
 }
 
+// The sheet an agent fills in when it hands a task on.
+export type TaskBrief = {
+  done: string
+  left: string
+  caveats: string
+  by: string
+  at: number
+}
+
 export type Task = {
   id: string
   seq: number
@@ -67,6 +76,16 @@ export type Task = {
   createdByName: string
   updatedAt: number
   history: TaskEvent[]
+  brief?: TaskBrief
+}
+
+// A running digest of the room, written by an agent the user picks.
+export type RoomSummary = {
+  text: string
+  // Covers messages up to this seq.
+  upToSeq: number
+  by: string
+  at: number
 }
 
 export type RoomSnapshot = {
@@ -75,6 +94,12 @@ export type RoomSnapshot = {
   tasks: Task[]
   seq: number
   rev: number
+  summary: RoomSummary | null
+  // Talk since the last summary (or since the user skipped one).
+  sinceSummary: { count: number; chars: number }
+  summaryDue: boolean
+  // The seat writing a summary right now.
+  summaryWriter: string | null
 }
 
 export type Actor = {

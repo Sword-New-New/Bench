@@ -1,8 +1,25 @@
 import { spawn } from "node:child_process"
 
-import { adapterFor, commandFor, summonPath } from "@/lib/adapters"
-import { agentState, isStandby, onMessage, postSystem, pulseAgent, sayAs, summonCandidates } from "@/lib/store"
-import type { Message } from "@/lib/types"
+import { adapterFor, commandFor, summonPath, type Adapter } from "@/lib/adapters"
+import { ApiError } from "@/lib/http"
+import {
+  agentState,
+  CATCH_UP_CHARS,
+  catchUp,
+  endSummaryJob,
+  isStandby,
+  onMessage,
+  postSystem,
+  pulseAgent,
+  saveSummary,
+  sayAs,
+  snapshot,
+  startSummaryJob,
+  summaryJob,
+  summarySource,
+  summonCandidates,
+} from "@/lib/store"
+import type { Message, RoomSummary } from "@/lib/types"
 
 const NOTE_GAP_MS = 30_000
 const RUN_LIMIT_MS = 15 * 60_000
@@ -13,7 +30,9 @@ const MAX_HOPS = 3
 
 // One queue per seat. A seat runs one command at a time; messages that land
 // while it runs are batched into the next run instead of being dropped.
-type Lane = { running: boolean; pending: string[]; hops: number }
+// `summary`: the user asked this seat for a room summary; it runs before the
+// next batch of messages.
+type Lane = { running: boolean; pending: string[]; hops: number; summary?: boolean }
 
 type SummonGlobal = typeof globalThis & {
   __benchSummonBound?: boolean
@@ -53,11 +72,54 @@ function roomUrl() {
   return (process.env.BENCH_URL || "http://127.0.0.1:4399").replace(/\/$/, "")
 }
 
-function envelope(lines: string[], replyByStdout: boolean) {
+function stamp(at: number) {
+  return new Date(at).toTimeString().slice(0, 5)
+}
+
+function envelope(body: string, skipped: number, summary: RoomSummary | undefined, replyByStdout: boolean) {
   const how = replyByStdout
     ? "直接回答就行，你这次的输出会作为你的发言贴回房间，不用再调用 bench_say。"
-    : `回复请发回房间：有 bench_say 工具就用它（上下文用 bench_inbox）；没有的话 POST ${roomUrl()}/api/v1/say，带你入座时的 agentId 和 token。`
-  return `【并坐房间转来的消息】\n${lines.join("\n\n")}\n\n（${how}）`
+    : `回复请发回房间：有 bench_say 工具就用它；没有的话 POST ${roomUrl()}/api/v1/say，带你入座时的 agentId 和 token。`
+  // Say plainly how complete the batch is, so the seat does not go digging
+  // for messages it already has, or trust a batch that was cut.
+  const scope =
+    skipped === 0
+      ? "下面是你上次之后房间里的全部消息，一条没漏，不用再去 bench_inbox 查。"
+      : summary
+        ? `你上次之后的消息太多，更早的 ${skipped} 条没列；先附上房间摘要（${summary.by} 写于 ${stamp(summary.at)}，概括了那之前的对话），再列最近的原文。需要原文用 bench_inbox 查。`
+        : `下面是你上次之后房间里的消息，太长只列了最近这些；更早还有 ${skipped} 条没列，需要的话用 bench_inbox 查。`
+  const digest = skipped > 0 && summary ? `【房间摘要】\n${summary.text}\n\n【最近的原文】\n` : ""
+  return `【并坐房间转来的消息】\n${scope}只略去了你自己说的话和入座、离席这类系统通知。★ 是在叫你的。\n\n${digest}${body}\n\n（${how}）`
+}
+
+function summaryPrompt(replyByStdout: boolean) {
+  const source = summarySource()
+  const previous = source.previous
+    ? `【上一份摘要】（${source.previous.by} 写于 ${stamp(source.previous.at)}）\n${source.previous.text}`
+    : "【上一份摘要】还没有，这是第一份。"
+  const scope =
+    source.shown === source.count
+      ? `下面是上一份摘要之后的全部 ${source.count} 条对话，一条没漏。`
+      : `上一份摘要之后共 ${source.count} 条对话，太长只列了最近 ${source.shown} 条，更早的略去了。`
+  const how = replyByStdout
+    ? "直接输出摘要全文就行，你这次的输出会存成房间摘要，不会贴进群聊。"
+    : "写好后调用 bench_summary 工具交上来，不要用 bench_say 发到群里。"
+  return {
+    upToSeq: source.upToSeq,
+    text: [
+      "【并坐房间请你写一份房间摘要】",
+      "这次不用回复聊天，只写摘要。在上一份摘要的基础上，写一份完整的新摘要（不是只写增量），格式：",
+      "## 结论\n## 进行中\n## 待定",
+      "每部分用短句列点，写清谁负责、做到哪；没有的部分写「无」。不超过 1500 字。",
+      "",
+      previous,
+      "",
+      `【之后的对话】${scope}`,
+      source.text || "（没有新对话）",
+      "",
+      `（${how}）`,
+    ].join("\n"),
+  }
 }
 
 function tail(text: string, max: number) {
@@ -65,29 +127,12 @@ function tail(text: string, max: number) {
   return clean.length > max ? `…${clean.slice(-max)}` : clean
 }
 
-function run(agentId: string) {
-  const queue = lane(agentId)
-  if (queue.running || queue.pending.length === 0) return
-  const agent = agentState(agentId)
-  if (!agent || !agent.agentName || !agent.session) {
-    queue.pending = []
-    return
-  }
-  const adapter = adapterFor(agent.agentName)
-  const command = adapter
-    ? commandFor(agent.agentName, agent.session, envelope(queue.pending, adapter.reply === "stdout"))
-    : null
-  const hop = queue.hops
-  queue.pending = []
-  queue.hops = 0
-  if (!adapter || !command) return
-
-  queue.running = true
-  const before = agent.doing
-  try {
-    pulseAgent(agent.id, "working", "被点到了，正在回复")
-  } catch {}
-
+// Runs one command on a seat's session and reports how it went.
+function launch(
+  agent: NonNullable<ReturnType<typeof agentState>>,
+  command: string,
+  done: (result: { out: string; failure?: string }) => void,
+) {
   let out = ""
   let err = ""
   let finished = false
@@ -95,32 +140,8 @@ function run(agentId: string) {
     if (finished) return
     finished = true
     clearTimeout(timer)
-    queue.running = false
-    const still = agentState(agentId)
-    if (still && still.doing === "被点到了，正在回复") {
-      try {
-        pulseAgent(still.id, "idle", before)
-      } catch {}
-    }
-    if (failure || code !== 0) {
-      const why = failure ?? (tail(err, 160) || `退出码 ${code}`)
-      postSystem(`唤起 ${agent.name} 没成功：${why}`)
-    } else if (adapter.reply === "stdout" && still) {
-      const text = out.trim()
-      if (text) {
-        try {
-          const said = sayAs(
-            { type: "agent", id: still.id, name: still.name },
-            { text: text.slice(0, 4000) },
-          )
-          hops().set(said.message.id, hop + 1)
-          if (hops().size > 500) hops().delete(hops().keys().next().value ?? "")
-        } catch (error) {
-          console.error(error)
-        }
-      }
-    }
-    run(agentId)
+    const why = failure ?? (code !== 0 ? tail(err, 160) || `退出码 ${code}` : undefined)
+    done({ out: out.trim(), failure: why })
   }
 
   const child = spawn(command, {
@@ -148,6 +169,125 @@ function run(agentId: string) {
   })
   child.on("error", (error) => finish(null, error.message))
   child.on("close", (code) => finish(code))
+}
+
+// Shows the seat as busy while a command runs, and puts back what it was
+// doing before, unless it changed that itself meanwhile.
+function busy(agentId: string, doing: string) {
+  const before = agentState(agentId)?.doing ?? ""
+  try {
+    pulseAgent(agentId, "working", doing)
+  } catch {}
+  return () => {
+    const still = agentState(agentId)
+    if (still && still.doing === doing) {
+      try {
+        pulseAgent(still.id, "idle", before)
+      } catch {}
+    }
+  }
+}
+
+function run(agentId: string) {
+  const queue = lane(agentId)
+  if (queue.running) return
+  const agent = agentState(agentId)
+  if (!agent || !agent.agentName || !agent.session) {
+    queue.pending = []
+    queue.summary = false
+    return
+  }
+  const adapter = adapterFor(agent.agentName)
+  if (!adapter) {
+    queue.pending = []
+    queue.summary = false
+    return
+  }
+  if (queue.summary) {
+    queue.summary = false
+    writeSummary(agent, adapter)
+    return
+  }
+  if (queue.pending.length === 0) return
+
+  const seen = catchUp(agentId, CATCH_UP_CHARS)
+  // Its inbox may already have shown it the mention; fall back to the queue.
+  const body = seen.text || queue.pending.join("\n\n")
+  const command = commandFor(
+    agent.agentName,
+    agent.session,
+    envelope(body, seen.skipped, seen.summary, adapter.reply === "stdout"),
+  )
+  const hop = queue.hops
+  queue.pending = []
+  queue.hops = 0
+  if (!command) return
+
+  queue.running = true
+  const settle = busy(agentId, "被点到了，正在回复")
+  launch(agent, command, ({ out, failure }) => {
+    queue.running = false
+    settle()
+    const still = agentState(agentId)
+    if (failure) {
+      postSystem(`唤起 ${agent.name} 没成功：${failure}`)
+    } else if (adapter.reply === "stdout" && still && out) {
+      try {
+        const said = sayAs({ type: "agent", id: still.id, name: still.name }, { text: out.slice(0, 4000) })
+        hops().set(said.message.id, hop + 1)
+        if (hops().size > 500) hops().delete(hops().keys().next().value ?? "")
+      } catch (error) {
+        console.error(error)
+      }
+    }
+    run(agentId)
+  })
+}
+
+function writeSummary(agent: NonNullable<ReturnType<typeof agentState>>, adapter: Adapter) {
+  const byStdout = adapter.reply === "stdout"
+  const prompt = summaryPrompt(byStdout)
+  const command = commandFor(agent.agentName ?? "", agent.session ?? "", prompt.text)
+  if (!command) return
+  const queue = lane(agent.id)
+  queue.running = true
+  const asked = Date.now()
+  startSummaryJob(agent.id, prompt.upToSeq)
+  const settle = busy(agent.id, "在写房间摘要")
+  launch(agent, command, ({ out, failure }) => {
+    queue.running = false
+    settle()
+    endSummaryJob(agent.id)
+    if (failure) {
+      postSystem(`请 ${agent.name} 写摘要没成功：${failure}`)
+    } else if (byStdout) {
+      try {
+        saveSummary(out, agent.name, prompt.upToSeq)
+      } catch {
+        postSystem(`${agent.name} 没写出摘要`)
+      }
+    } else if ((snapshot().summary?.at ?? 0) < asked) {
+      postSystem(`${agent.name} 这一轮没交摘要`)
+    }
+    run(agent.id)
+  })
+}
+
+// The user picked this seat to write the room summary.
+export function requestSummary(agentId: string) {
+  const agent = agentState(agentId)
+  if (!agent) throw new ApiError(404, "这个席位不在了")
+  if (!agent.agentName || !agent.session || !adapterFor(agent.agentName)) {
+    throw new ApiError(400, `${agent.name} 叫不醒，没法写摘要`)
+  }
+  const current = summaryJob()
+  if (current) {
+    const writer = agentState(current.agentId)
+    throw new ApiError(409, `${writer?.name ?? "有人"}正在写摘要`)
+  }
+  lane(agentId).summary = true
+  run(agentId)
+  return snapshot()
 }
 
 function wake(message: Message) {

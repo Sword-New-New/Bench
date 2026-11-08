@@ -33,11 +33,14 @@ export function TasksPanel({
   onCreate,
   onAskHandoff,
   onStatus,
+  header,
 }: {
   tasks: Task[]
   agents: PublicAgent[]
   highlightId: string | null
   busy: boolean
+  // Shown above the new-task form, such as the room summary.
+  header?: React.ReactNode
   onCreate: (title: string, ownerId: string | null) => void
   onAskHandoff: (task: Task, agent: PublicAgent) => void
   onStatus: (task: Task, action: "done" | "block") => void
@@ -62,6 +65,7 @@ export function TasksPanel({
           {active.length} 进行中{done.length > 0 ? ` · ${done.length} 完成` : ""}
         </span>
       </div>
+      {header}
       <form
         className="mx-3 mb-3 space-y-2 rounded-xl border bg-card p-2"
         onSubmit={(event) => {
@@ -173,10 +177,27 @@ function TaskCard({
         {" · "}
         {task.createdByName} 建立
       </p>
+      {task.brief && task.status !== "done" ? (
+        <dl className="mt-2 space-y-1 rounded-lg bg-muted/60 px-2 py-1.5 text-[11px] leading-5">
+          <div className="text-muted-foreground">{task.brief.by} 的交接单</div>
+          {(
+            [
+              ["做完了", task.brief.done],
+              ["还剩", task.brief.left],
+              ["注意", task.brief.caveats],
+            ] as const
+          ).map(([label, text]) => (
+            <div key={label} className="flex gap-1.5">
+              <dt className="shrink-0 font-medium">{label}</dt>
+              <dd className="min-w-0 whitespace-pre-line text-muted-foreground">{text}</dd>
+            </div>
+          ))}
+        </dl>
+      ) : null}
       {task.history.length > 0 ? (
         <ol className="mt-2 space-y-0.5 border-l pl-2 text-[11px] leading-5 text-muted-foreground">
           {task.history.slice(-3).map((event, index) => (
-            <li key={`${event.at}-${index}`}>
+            <li key={`${event.at}-${index}`} className="line-clamp-2">
               {event.actor} {event.action}
               {event.note ? `：${event.note}` : ""}
             </li>

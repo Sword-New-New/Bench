@@ -13,6 +13,7 @@ import type {
   Message,
   PublicAgent,
   RoomSnapshot,
+  RoomSummary,
   Task,
   TaskStatus,
 } from "@/lib/types"
@@ -33,12 +34,19 @@ const NAME_RE = /^[\p{L}\p{N}_-]{1,24}$/u
 const UUID_RE = /^[A-Za-z0-9._-]{1,128}$/
 const STATUSES = new Set<AgentStatus>(["idle", "working", "blocked", "offline"])
 const TASK_STATUSES = new Set<TaskStatus>(["open", "doing", "blocked", "done"])
+// How much talk a woken seat is handed at most (about 100 messages). Once this
+// much has piled up since the last summary, the room suggests writing one.
+export const CATCH_UP_CHARS = 10_000
+// What a summary writer is handed: the last summary plus up to this much talk.
+const SUMMARY_SOURCE_CHARS = 40_000
 
 type Agent = Omit<PublicAgent, "hasSession" | "callable" | "standby" | "status" | "agentName"> & {
   token: string
   status: AgentStatus
   agentName?: string
   session?: string
+  // The last message seq this seat has been shown, by its inbox or a wake.
+  seenSeq?: number
 }
 
 type State = {
@@ -47,6 +55,9 @@ type State = {
   agents: Agent[]
   messages: Message[]
   tasks: Task[]
+  summary?: RoomSummary
+  // The user chose not to summarize talk up to this seq.
+  summarySkipSeq?: number
 }
 
 type Runtime = {
@@ -57,6 +68,8 @@ type Runtime = {
   // to them through the loop instead of waking them with a command.
   waiting?: Map<string, number>
   standby?: Map<string, number>
+  // The seat writing a summary, and the seq its material ends at.
+  summaryJob?: { agentId: string; upToSeq: number }
 }
 
 const globalStore = globalThis as typeof globalThis & { __bench?: Runtime }
@@ -81,6 +94,8 @@ function load(): State {
       agents: parsed.agents as Agent[],
       messages: parsed.messages,
       tasks: Array.isArray(parsed.tasks) ? (parsed.tasks as Task[]) : [],
+      summary: parsed.summary,
+      summarySkipSeq: parsed.summarySkipSeq,
     }
   } catch {
     return emptyState()
@@ -171,13 +186,33 @@ function sortTasks(tasks: Task[]) {
 
 export function snapshot(): RoomSnapshot {
   const state = runtime().state
+  const talk = talkSince(summaryBase())
+  const chars = talk.reduce((sum, message) => sum + message.text.length, 0)
   return {
     agents: sortAgents(state.agents.map((agent) => present(agent))),
     messages: state.messages,
     tasks: sortTasks(state.tasks),
     seq: state.seq,
     rev: state.rev,
+    summary: state.summary ?? null,
+    sinceSummary: { count: talk.length, chars },
+    summaryDue: chars >= CATCH_UP_CHARS,
+    summaryWriter: runtime().summaryJob?.agentId ?? null,
   }
+}
+
+function summaryBase() {
+  const state = runtime().state
+  return Math.max(state.summary?.upToSeq ?? 0, state.summarySkipSeq ?? 0)
+}
+
+function talkSince(after: number) {
+  return runtime().state.messages.filter((message) => message.seq > after && message.kind !== "system")
+}
+
+function talkLine(message: Message) {
+  const time = new Date(message.createdAt).toTimeString().slice(0, 5)
+  return `${time} ${message.authorName}：${message.text}`
 }
 
 function bumpRev() {
@@ -500,12 +535,13 @@ export function inbox(input: unknown) {
   if (!Number.isFinite(after) || after < 0) {
     throw new ApiError(400, "after 要是一个不小于 0 的数字")
   }
-  agent.lastSeenAt = Date.now()
-  bumpRev()
-  commit()
   const pending = runtime().state.messages.filter((message) => message.seq > after)
   const fresh = pending.slice(0, 100)
   const cursor = fresh.at(-1)?.seq ?? after
+  agent.lastSeenAt = Date.now()
+  agent.seenSeq = Math.max(agent.seenSeq ?? 0, cursor)
+  bumpRev()
+  commit()
   const room = snapshot()
   const forYou = fresh.filter((message) => isForAgent(message, agent.id, room.messages))
   return {
@@ -519,6 +555,99 @@ export function inbox(input: unknown) {
     roomSeq: room.seq,
     hasMore: pending.length > fresh.length,
   }
+}
+
+// Everything said since this seat last looked, newest kept when it runs past
+// `limit` characters, and marks it as seen. Join and leave notices are left
+// out; lines aimed at the seat are starred so they stand out in a long batch.
+export function catchUp(id: string, limit: number) {
+  const agent = findAgent(id)
+  if (!agent) return { text: "", skipped: 0 }
+  const { messages, seq } = runtime().state
+  const unseen = messages.filter(
+    (message) => message.seq > (agent.seenSeq ?? 0) && message.kind !== "system" && message.authorId !== id,
+  )
+  const lines: string[] = []
+  let size = 0
+  let index = unseen.length - 1
+  for (; index >= 0; index--) {
+    const message = unseen[index]
+    const line = (isForAgent(message, id, messages) ? "★ " : "") + talkLine(message)
+    if (lines.length > 0 && size + line.length > limit) break
+    lines.unshift(line)
+    size += line.length
+  }
+  agent.seenSeq = seq
+  commit()
+  const skipped = index + 1
+  return { text: lines.join("\n\n"), skipped, summary: skipped > 0 ? runtime().state.summary : undefined }
+}
+
+// What a summary writer works from: the last summary and the talk after it.
+export function summarySource() {
+  const state = runtime().state
+  const talk = talkSince(state.summary?.upToSeq ?? 0)
+  const lines: string[] = []
+  let size = 0
+  for (let index = talk.length - 1; index >= 0; index--) {
+    const line = talkLine(talk[index])
+    if (lines.length > 0 && size + line.length > SUMMARY_SOURCE_CHARS) break
+    lines.unshift(line)
+    size += line.length
+  }
+  return { previous: state.summary, text: lines.join("\n\n"), count: talk.length, shown: lines.length, upToSeq: state.seq }
+}
+
+export function summaryJob() {
+  return runtime().summaryJob
+}
+
+export function startSummaryJob(agentId: string, upToSeq: number) {
+  runtime().summaryJob = { agentId, upToSeq }
+  bumpRev()
+  commit()
+}
+
+export function endSummaryJob(agentId: string) {
+  if (runtime().summaryJob?.agentId !== agentId) return
+  runtime().summaryJob = undefined
+  bumpRev()
+  commit()
+}
+
+export function saveSummary(text: string, by: string, upToSeq = runtime().state.seq) {
+  const clean = text.trim()
+  if (!clean) throw new ApiError(400, "摘要是空的")
+  const state = runtime().state
+  state.summary = { text: clip(clean, 8000), upToSeq, by, at: Date.now() }
+  bumpRev()
+  commit()
+  return state.summary
+}
+
+// The user's side of summaries: skip this stretch, or edit the text by hand.
+// Writing by an agent goes through the bench_summary tool (agentId + token).
+export function summaryAction(input: unknown) {
+  const body = asRecord(input)
+  const actor = actorFrom(body)
+  const action = asString(body.action)
+  if (actor.type === "agent") {
+    if (action !== "write") throw new ApiError(400, "agent 只能 write 摘要")
+    const job = runtime().summaryJob
+    const upTo = job?.agentId === actor.id ? job.upToSeq : undefined
+    return { summary: saveSummary(asString(body.text) ?? "", actor.name, upTo) }
+  }
+  if (action === "skip") {
+    runtime().state.summarySkipSeq = runtime().state.seq
+    bumpRev()
+    commit()
+    return snapshot()
+  }
+  if (action === "edit") {
+    const upTo = runtime().state.summary?.upToSeq
+    return { summary: saveSummary(asString(body.text) ?? "", actor.name, upTo) }
+  }
+  throw new ApiError(400, "action 只能是 request、skip 或 edit")
 }
 
 function isForAgent(message: Message, agentId: string, messages: Message[]) {
@@ -637,6 +766,20 @@ export function actOnTask(input: unknown) {
     const to = resolveAgent(toRef)
     if (!to) throw new ApiError(404, `没有叫 ${toRef} 的席位`)
     if (to.id === actor.id) throw new ApiError(400, "不用把任务交给自己")
+    // An agent handing on fills in the sheet, so whoever picks the task up
+    // knows where it stands without reading back through the chat.
+    let sheet = note
+    if (actor.type === "agent") {
+      const done = clip(asString(body.done)?.trim() ?? "", 1000)
+      const left = clip(asString(body.left)?.trim() ?? "", 1000)
+      const caveats = clip(asString(body.caveats)?.trim() ?? "", 1000)
+      const missing = [!done && "done（做完了什么）", !left && "left（还剩什么）", !caveats && "caveats（注意事项，没有就写「无」）"]
+        .filter(Boolean)
+        .join("、")
+      if (missing) throw new ApiError(400, `交接单要填全：缺 ${missing}`)
+      task.brief = { done, left, caveats, by: actor.name, at: now }
+      sheet = [`做完了：${done}`, `还剩：${left}`, `注意：${caveats}`, note && `补充：${note}`].filter(Boolean).join("\n")
+    }
     task.ownerId = to.id
     task.ownerName = to.name
     task.status = "doing"
@@ -644,7 +787,7 @@ export function actOnTask(input: unknown) {
       at: now,
       actor: actor.name,
       action: "交给",
-      note: note || `交给 ${to.name}`,
+      note: sheet || `交给 ${to.name}`,
     })
     const fromAgent = actor.type === "agent" ? findAgent(actor.id) : undefined
     const message = appendMessage({
@@ -654,7 +797,7 @@ export function actOnTask(input: unknown) {
       authorModel: fromAgent?.model,
       authorColor: fromAgent?.color ?? "#1f1a14",
       authorDemo: fromAgent?.demo ?? false,
-      text: note || `交给 ${to.name}`,
+      text: sheet || `交给 ${to.name}`,
       mentions: [to.id],
       taskId: task.id,
       handoff: {

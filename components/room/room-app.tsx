@@ -11,6 +11,7 @@ import { Ambient } from "@/components/room/ambient"
 import { JoinDialog } from "@/components/room/join-dialog"
 import { Mark } from "@/components/room/bits"
 import { Roster } from "@/components/room/roster"
+import { SummaryCard, SummaryNudge } from "@/components/room/summary"
 import { TasksPanel } from "@/components/room/tasks-panel"
 import { Thread } from "@/components/room/thread"
 import { api, type AdapterInfo } from "@/components/room/api"
@@ -155,6 +156,10 @@ export function RoomApp() {
     } finally {
       setBusy(false)
     }
+  }
+
+  async function summaryCall(body: Record<string, unknown>) {
+    await api("/api/v1/summary", { method: "POST", body: JSON.stringify({ as: "human", ...body }) })
   }
 
   function mention(name: string) {
@@ -319,6 +324,21 @@ export function RoomApp() {
               inputRef={composerRef}
               onChange={setDraft}
               onClearReply={() => setReply(null)}
+              notice={
+                room ? (
+                  <SummaryNudge
+                    room={room}
+                    busy={busy}
+                    onRequest={(agent) =>
+                      void run(
+                        () => summaryCall({ action: "request", agentId: agent.id }),
+                        `请 ${agent.name} 写摘要了`,
+                      )
+                    }
+                    onSkip={() => void run(() => summaryCall({ action: "skip" }))}
+                  />
+                ) : null
+              }
               onSend={() => {
                 const text = draft.trim()
                 if (!text) return
@@ -340,6 +360,20 @@ export function RoomApp() {
               agents={agents}
               highlightId={highlight}
               busy={busy}
+              header={
+                <SummaryCard
+                  room={room}
+                  busy={busy}
+                  onSave={async (text) => {
+                    let saved = false
+                    await run(async () => {
+                      await summaryCall({ action: "edit", text })
+                      saved = true
+                    }, "摘要存好了")
+                    return saved
+                  }}
+                />
+              }
               onCreate={(title, ownerId) =>
                 void run(() =>
                   api("/api/v1/tasks", {

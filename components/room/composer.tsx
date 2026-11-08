@@ -31,6 +31,7 @@ export function Composer({
   onChange,
   onSend,
   onClearReply,
+  notice,
 }: {
   agents: PublicAgent[]
   value: string
@@ -40,6 +41,8 @@ export function Composer({
   onChange: (value: string) => void
   onSend: () => void
   onClearReply: () => void
+  // Shown just above the input, such as the summary reminder.
+  notice?: React.ReactNode
 }) {
   const [picked, setPicked] = useState(false)
   const formRef = useRef<HTMLFormElement>(null)
@@ -90,6 +93,7 @@ export function Composer({
         onSend()
       }}
     >
+      {notice ? <div className="mx-auto mb-2 max-w-3xl">{notice}</div> : null}
       <div
         className="raised mx-auto max-w-3xl rounded-[22px] transition-shadow focus-within:ring-3 focus-within:ring-ring/20"
       >

@@ -275,16 +275,28 @@ const tools = [
   {
     name: "bench_task_update",
     description:
-      "处理一条任务：claim 认领（已有别人负责会失败）、done 完成、block 卡住、handoff 交给别人（要写 to 和带上下文的 note）。",
+      "处理一条任务：claim 认领（已有别人负责会失败）、done 完成、block 卡住、handoff 交给别人（要写 to，并填全交接单 done、left、caveats）。",
     inputSchema: {
       type: "object",
       properties: {
         taskId: { type: "string", description: "t_… 开头的任务 id" },
         action: { type: "string", enum: ["claim", "done", "block", "handoff"] },
         to: { type: "string", description: "handoff 时交给谁（席位名）" },
-        note: { type: "string", description: "说明；handoff 时写清对方接着做需要的上下文" },
+        note: { type: "string", description: "说明；handoff 时可作补充" },
+        done: { type: "string", description: "handoff 必填：这阶段做完了什么" },
+        left: { type: "string", description: "handoff 必填：还剩什么没做" },
+        caveats: { type: "string", description: "handoff 必填：接手要注意的坑或约定，没有就写「无」" },
       },
       required: ["taskId", "action"],
+    },
+  },
+  {
+    name: "bench_summary",
+    description: "房间请你写摘要时，把写好的房间摘要交上来。平时不用调用。",
+    inputSchema: {
+      type: "object",
+      properties: { text: { type: "string", description: "摘要全文，按房间给的格式，最长 8000 字" } },
+      required: ["text"],
     },
   },
   {
@@ -413,8 +425,19 @@ async function runTool(name, args = {}, signal) {
     case "bench_task_update": {
       const id = String(args.taskId ?? "")
       if (!/^t_[A-Za-z0-9]+$/.test(id)) throw new RoomError(400, "taskId 应该是 t_ 开头的任务 id")
-      const data = await seatCall(`/api/v1/tasks/${id}`, { action: args.action, to: args.to, note: args.note })
+      const data = await seatCall(`/api/v1/tasks/${id}`, {
+        action: args.action,
+        to: args.to,
+        note: args.note,
+        done: args.done,
+        left: args.left,
+        caveats: args.caveats,
+      })
       return `好了：${taskLine(data.task).slice(2)}`
+    }
+    case "bench_summary": {
+      await seatCall("/api/v1/summary", { action: "write", text: args.text })
+      return "摘要交上去了。"
     }
     case "bench_leave": {
       await seatCall("/api/v1/leave", {})

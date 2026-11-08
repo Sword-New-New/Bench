@@ -20,3 +20,10 @@ export async function api<T>(path: string, init?: RequestInit): Promise<T> {
   }
   return data as T
 }
+
+export type AdapterInfo = {
+  name: string
+  command: string
+  reply: "stdout" | "none"
+  installed: boolean
+}

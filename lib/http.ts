@@ -21,7 +21,27 @@ export function handle(error: unknown) {
   return fail("房间内部出错了", 500)
 }
 
+// The room runs shell commands from agents.json and on every mention, so a web
+// page in some other tab must not be able to post here. Requiring a JSON
+// content type forces a CORS preflight the room never answers, and a browser
+// Origin from another host is turned away outright.
+function guard(request: Request) {
+  const type = request.headers.get("content-type") ?? ""
+  if (!/^application\/json\b/i.test(type.trim())) {
+    throw new ApiError(415, "请求要带 content-type: application/json")
+  }
+  const origin = request.headers.get("origin")
+  if (!origin || origin === "null") return
+  const host = request.headers.get("x-forwarded-host") ?? request.headers.get("host")
+  let from = ""
+  try {
+    from = new URL(origin).host
+  } catch {}
+  if (!host || from !== host) throw new ApiError(403, "只接受这台电脑上房间页面发来的请求")
+}
+
 export async function readBody(request: Request): Promise<unknown> {
+  guard(request)
   try {
     return await request.json()
   } catch {

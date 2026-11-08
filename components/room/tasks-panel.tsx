@@ -16,7 +16,14 @@ import {
   SelectValue,
 } from "@/components/ui/select"
 import { TASK_STATUS_LABEL } from "@/lib/status"
-import type { PublicAgent, Task } from "@/lib/types"
+import type { PublicAgent, Task, TaskStatus } from "@/lib/types"
+
+const CHIP: Record<TaskStatus, string> = {
+  open: "bg-sky-500/10 text-sky-700 dark:text-sky-300",
+  doing: "bg-amber-500/12 text-amber-700 dark:text-amber-300",
+  blocked: "bg-red-500/10 text-red-700 dark:text-red-300",
+  done: "bg-emerald-500/10 text-emerald-700 dark:text-emerald-300",
+}
 
 export function TasksPanel({
   tasks,
@@ -48,15 +55,15 @@ export function TasksPanel({
   ]
 
   return (
-    <div className="flex h-full min-h-0 flex-col">
-      <div className="px-4 py-3">
-        <h2 className="text-sm font-medium">分工</h2>
-        <p className="mt-1 text-xs leading-5 text-muted-foreground">
-          同一阶段一个负责人。交接时写清对方需要的上下文。
-        </p>
+    <div className="flex h-full min-h-0 flex-col bg-sidebar">
+      <div className="flex items-baseline justify-between px-4 pt-4 pb-2">
+        <h2 className="text-xs font-semibold tracking-wider text-muted-foreground uppercase">分工</h2>
+        <span className="text-[11px] text-muted-foreground">
+          {active.length} 进行中{done.length > 0 ? ` · ${done.length} 完成` : ""}
+        </span>
       </div>
       <form
-        className="space-y-2 px-3 pb-3"
+        className="mx-3 mb-3 space-y-2 rounded-xl border bg-card p-2"
         onSubmit={(event) => {
           event.preventDefault()
           if (!title.trim()) return
@@ -68,8 +75,9 @@ export function TasksPanel({
         <Input
           value={title}
           onChange={(event) => setTitle(event.target.value)}
-          placeholder="这阶段要交出来的东西"
+          placeholder="新任务：这阶段要交出来的东西"
           aria-label="任务标题"
+          className="border-0 shadow-none focus-visible:ring-0 dark:bg-transparent"
         />
         <div className="flex gap-2">
           <Select items={items} value={owner} onValueChange={(value) => setOwner(value ?? "none")}>
@@ -84,15 +92,15 @@ export function TasksPanel({
               ))}
             </SelectContent>
           </Select>
-          <Button type="submit" disabled={busy || title.trim().length === 0}>
+          <Button type="submit" size="sm" className="h-8" disabled={busy || title.trim().length === 0}>
             派出去
           </Button>
         </div>
       </form>
       <div className="min-h-0 flex-1 space-y-2 overflow-y-auto px-3 pb-4">
         {tasks.length === 0 ? (
-          <div className="rounded-xl border border-dashed px-3 py-4 text-sm leading-6 text-muted-foreground">
-            还没有分工。你建一条任务并指定负责人，或在对话里用 @名字 把活递过去。
+          <div className="rounded-xl border border-dashed px-3 py-4 text-xs leading-5 text-muted-foreground">
+            还没有分工。建一条任务并指定负责人，或在对话里 @名字 把活递过去。同一阶段只留一个负责人。
           </div>
         ) : null}
         {active.map((task) => (
@@ -107,9 +115,9 @@ export function TasksPanel({
           />
         ))}
         {done.length > 0 ? (
-          <details className="rounded-xl border px-3 py-2">
-            <summary className="cursor-pointer text-sm text-muted-foreground">
-              完成的 {done.length}
+          <details className="rounded-xl px-1 py-1">
+            <summary className="cursor-pointer px-1 text-xs text-muted-foreground">
+              已完成 {done.length}
             </summary>
             <div className="mt-2 space-y-2">
               {done.map((task) => (
@@ -150,12 +158,13 @@ function TaskCard({
   return (
     <article
       id={`task-${task.id}`}
-      className="rounded-xl border bg-card px-3 py-3"
-      style={highlight ? { outline: "2px solid #1f1a14", outlineOffset: 1 } : undefined}
+      className={`rounded-xl border bg-card px-3 py-2.5 transition-shadow ${
+        highlight ? "ring-2 ring-ring" : ""
+      } ${task.status === "done" ? "opacity-70" : ""}`}
     >
       <div className="flex items-start justify-between gap-2">
-        <h3 className="text-sm font-medium leading-5">{task.title}</h3>
-        <span className="shrink-0 text-xs text-muted-foreground">
+        <h3 className="text-sm leading-5 font-medium">{task.title}</h3>
+        <span className={`shrink-0 rounded-full px-1.5 py-0.5 text-[10px] font-medium ${CHIP[task.status]}`}>
           {TASK_STATUS_LABEL[task.status]}
         </span>
       </div>
@@ -165,7 +174,7 @@ function TaskCard({
         {task.createdByName} 建立
       </p>
       {task.history.length > 0 ? (
-        <ol className="mt-2 space-y-1 text-xs leading-5 text-muted-foreground">
+        <ol className="mt-2 space-y-0.5 border-l pl-2 text-[11px] leading-5 text-muted-foreground">
           {task.history.slice(-3).map((event, index) => (
             <li key={`${event.at}-${index}`}>
               {event.actor} {event.action}
@@ -175,10 +184,10 @@ function TaskCard({
         </ol>
       ) : null}
       {task.status !== "done" ? (
-        <div className="mt-3 flex flex-wrap gap-1.5">
+        <div className="mt-2.5 flex flex-wrap gap-1">
           <Button
             type="button"
-            size="sm"
+            size="xs"
             variant="outline"
             disabled={busy}
             onClick={() => onStatus(task, "done")}
@@ -187,7 +196,7 @@ function TaskCard({
           </Button>
           <Button
             type="button"
-            size="sm"
+            size="xs"
             variant="outline"
             disabled={busy}
             onClick={() => onStatus(task, "block")}
@@ -197,7 +206,7 @@ function TaskCard({
           {others.length > 0 ? (
             <DropdownMenu>
               <DropdownMenuTrigger
-                className="inline-flex h-7 items-center rounded-lg border px-2.5 text-[0.8rem] hover:bg-muted"
+                className="inline-flex h-6 items-center rounded-md border px-2 text-xs hover:bg-muted"
                 disabled={busy}
               >
                 交给

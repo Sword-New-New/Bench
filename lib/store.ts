@@ -203,6 +203,10 @@ function resolveAgent(ref: string) {
   return runtime().state.agents.find((agent) => agent.id === ref || agent.name === ref)
 }
 
+export function agentState(id: string): Readonly<Agent> | undefined {
+  return findAgent(id)
+}
+
 export function requireAgent(id: string, token: string) {
   const agent = findAgent(id)
   if (!agent || agent.token !== token) {
@@ -610,7 +614,7 @@ export function actOnTask(input: unknown) {
     if (to.id === actor.id) throw new ApiError(400, "不用把任务交给自己")
     task.ownerId = to.id
     task.ownerName = to.name
-    task.status = task.status === "done" ? "doing" : "doing"
+    task.status = "doing"
     task.history.push({
       at: now,
       actor: actor.name,

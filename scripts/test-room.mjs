@@ -1,4 +1,4 @@
-const origin = (process.env.BENCH_URL || "http://127.0.0.1:43123").replace(/\/$/, "")
+const origin = (process.env.BENCH_URL || "http://127.0.0.1:4399").replace(/\/$/, "")
 
 async function request(pathname, { method = "GET", body } = {}) {
   const res = await fetch(`${origin}${pathname}`, {

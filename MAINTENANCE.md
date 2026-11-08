@@ -6,13 +6,11 @@
 
 ## 现在跑在哪
 
-云端虚拟机上的开发服务是 `npm run dev`：`0.0.0.0:43123`。Cursor 把这个端口接到使用这台云端机器的人电脑上的 `127.0.0.1:43123`。所以别人浏览器里的 43123 往往是云端，不是他自己解压的那份。
+本机一个端口：**4399**，只绑 `127.0.0.1`。`npm run dev`、`start.sh`、`start.bat`、`scripts/start-bench.sh`、`scripts/bench.mjs`、Codex 的 bench-room 技能都用它。以前云端虚拟机上的 43123 已经不用了。
 
-本机启动用 `start.bat`，端口是 **4399**，只绑 `127.0.0.1`。地址是 http://127.0.0.1:4399。不要把 `start.bat` 改回 43123，那个端口已经被云端转发占着。
+不要绑 `0.0.0.0`。房间会按 `agents.json` 跑 shell 命令，局域网里的人能连上就等于能在这台电脑上执行命令。
 
-`package.json` 里的 `dev` 和 `start` 仍是 43123。那是云端这条进程用的，和 `start.bat` 分开。
-
-房间接口在虚拟机本机大约几毫秒到几十毫秒。页面若很慢，先看是不是还在走 43123 的转发。开发模式一次要拉大约 6 MB、二十多个未压缩脚本（React 开发包、Next 开发工具、热更新）。这不是房间数据慢。
+开发模式一次要拉大约 6 MB 未压缩脚本，第一次打开慢一点是正常的，不是房间数据慢。
 
 ## 技术栈
 
@@ -37,10 +35,26 @@ Next.js 16.4 App Router，React 19，Tailwind CSS v4，shadcn/ui 的 base-nova�
 | `scripts/test-room.mjs` | 接口集成测试。会清空房间再跑完一轮，最后再清空。 |
 | `data/room.json` | 运行时数据，已 gitignore。 |
 | `start.bat` | Windows 本机启动，端口 4399。 |
-| `agents.json` | 每种 agent 一条终端模板，页面「配置唤起」写这个文件。`{uuid}` 换成入座时报的 uuid，`{text}` 换成点到他的那句话。 |
-| `lib/summon.ts` | 消息里写到席位名、`@` 他、或任务交给他时，按 `agents.json` 唤起。 |
+| `agents.json` | 每种 agent 一条唤起命令，页面「唤起命令」写这个文件。`{uuid}`、`{text}` 都会加引号再替换。`reply: "stdout"` 表示命令输出就是回答，会以那个席位的名义贴回房间。 |
+| `lib/kinds.ts` | 五种 agent：claude（Claude Code）、dsh（DeepSeek）、codex（GPT）、cursor（Grok）、antigravity（Gemini）。颜色、默认命令、uuid 怎么找都在这里，页面和服务端共用。 |
+| `lib/summon.ts` | 消息里点到谁就唤起谁。见下面「唤起」。 |
+| `scripts/claude-code.sh` | 找到最新的 claude 可执行文件和会话所在目录，再 `--resume <id> -p`。Claude Code 只在会话所属的项目目录里认得这个 id。 |
 
-页面是客户端组件，`app/page.tsx` 只渲染 `RoomApp`。三列：席位、群聊、分工。窄屏用「对话 / 队友 / 分工」三个标签。
+页面是客户端组件，`app/page.tsx` 只渲染 `RoomApp`。三列：入口（按五种 agent 分组的席位，`roster.tsx`）、群聊、分工。窄于 1024px 时用底部「入口 / 对话 / 分工」三个标签。输入框下面的「发给」一排是每种 agent 的快捷 @。深浅色跟随系统，右上角可以切换。
+
+## 唤起
+
+- 人发的话：写到席位名、`@` 他、或交接给他，都会唤起。agent 发的话：只有明确 `@` 或交接才唤起。
+- 每个席位一条队列，同一时间只跑一条命令。跑的时候进来的消息攒着，结束后合成一条再唤起，不会丢。以前的 8 秒冷却会直接丢消息，已经去掉。
+- 唤起时席位显示「被点到了，正在回复」，结束后恢复原来的那句。
+- 命令非零退出、找不到、超过 15 分钟，房间里会出一条系统消息，带 stderr 的最后一段。
+- agent 之间靠输出自动接力最多 3 轮，然后停下等人说话，免得两个 agent 互相 @ 停不下来。
+- 唤起命令的 PATH 会补上 `~/.local/bin` 和 `/usr/local/nodejs/bin`，从桌面图标启动时也能找到 `dsh-agent`、`agy`。
+- `GET /api/v1/adapters` 会带 `installed`，告诉页面这条命令的第一个词在本机找不找得到。
+
+## 安全
+
+所有 POST 都要 `content-type: application/json`（`lib/http.ts` 的 `guard`）。浏览器从别的网站发来的跨域请求做不到这一点，带了别的 `Origin` 的也直接 403。以前任何网页都能用一个 `text/plain` 的表单请求改写 `agents.json`，等于远程执行命令。
 
 人类在房间里的身份是 `as:"human"`，显示名 jinbao，`authorId` 是 `human`。Agent 用入座返回的 `agentId` 和 `token`。token 只在 join 的响应里出现，别的接口不要再带回。
 
@@ -70,15 +84,17 @@ Next.js 16.4 App Router，React 19，Tailwind CSS v4，shadcn/ui 的 base-nova�
 
 ## 改页面时不要踩的地方
 
-`cacheComponents` 打开时，客户端组件在渲染期间读 `Date.now()` 会把预渲染卡住，页面停在「正在打开席位」。时钟放在 `useEffect` 里。现在的 `now` 初值是 `0`，效果开始时再取当前时间。
+`cacheComponents` 打开时，客户端组件在渲染期间读 `Date.now()` 会把预渲染卡住，页面停在「正在打开」。时钟放在 `useEffect` 里。现在的 `now` 初值是 `0`，效果开始时再取当前时间。
 
-开发服务认为自己是 `localhost`。浏览器从 `127.0.0.1` 打开时，热更新 WebSocket 会被拒绝，React 会一直等调试通道，页面同样停在骨架。`allowedDevOrigins` 里要留着 `127.0.0.1` 和 `localhost`。
+开发服务认为自己是 `localhost`。浏览器从 `127.0.0.1` 打开时，热更新 WebSocket 会被拒绝。`allowedDevOrigins` 里要留着 `127.0.0.1` 和 `localhost`。
 
-`next-themes` 会在 `<html>` 上写 `color-scheme`。`app/layout.tsx` 的 `<html>` 有 `suppressHydrationWarning`，拿掉会报水合不一致。
+`next-themes` 会在 `<html>` 上写 class，`app/layout.tsx` 的 `<html>` 有 `suppressHydrationWarning`，拿掉会报水合不一致。
 
-Next 开发徽章在左下角，会挡住席位栏底部。`app/globals.css` 里 `body:has(nextjs-portal) main` 的下内边距是为了躲开它。空房间时「先坐下三个演示席位」放在虚线空状态里，不放在会被徽章挡住的栏底。
+Next 开发徽章用 `devIndicators: false` 关掉了，它以前挡住入口栏底部。
 
-客户端只在快照的 `rev` 不比当前旧时才覆盖本地状态。
+页面以 SSE 为主，只有 SSE 断开时才每 4 秒轮询一次。客户端只在快照的 `rev` 不比当前旧时才覆盖本地状态。
+
+`lib/summon.ts` 的监听只在进程里绑一次（`__benchSummonBound`），改了 `ensureSummon` 里注册监听的那段，要重启开发服务才生效。
 
 ## 验证
 
@@ -97,13 +113,11 @@ npx tsc --noEmit
 npx eslint --max-warnings 0
 ```
 
-浏览器要看的是空房间、三个演示席位、一句「做一版定价页，手机上要能扫，做完看一遍边界」之后阿衡拆开、阿构做完、阿证复核完成，以及窄屏三个标签。云端预览用 43123。本机用 4399。
+浏览器要看的是空房间、五个入口、三个演示席位、一句「做一版定价页，手机上要能扫，做完看一遍边界」之后阿衡拆开、阿构做完、阿证复核完成，深浅两种配色，以及窄屏三个标签。地址 http://127.0.0.1:4399。
 
 ## 不要随便做的事
 
 不要把 `README.md` 写成给人看的说明。那份是给进房间的模型的协议。
-
-不要在云端预览里把端口改回和本机相同，除非先确认转发已经关了。
 
 不要用 `POST /api/v1/reset` 除非要清空。请求体必须是 `{"confirm":"清空"}`。测试脚本会自己清。
 

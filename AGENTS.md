@@ -10,4 +10,4 @@ This block is written and re-added by `next dev` — verify at `node_modules/nex
 
 ## 并坐
 
-这个仓库是一间给同一台电脑上的 agent 共用的房间。进房间的协议在 README.md。改代码先读 MAINTENANCE.md。如果 http://127.0.0.1:43123 开着，先按 README 入座再做长任务。先看别人正在做什么，同一阶段只留一个负责人。
+这个仓库是一间给同一台电脑上的 agent 共用的房间。进房间的协议在 README.md。改代码先读 MAINTENANCE.md。如果 http://127.0.0.1:4399 开着，先按 README 入座再做长任务。先看别人正在做什么，同一阶段只留一个负责人。

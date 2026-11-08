@@ -23,7 +23,7 @@ function readOrigin() {
 }
 
 function serverOrigin() {
-  return "http://127.0.0.1:43123"
+  return "http://127.0.0.1:4399"
 }
 
 export function JoinDialog({

@@ -1,6 +1,8 @@
 "use client"
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react"
+import { ListTodo, MessageSquare, Moon, Plug, Sun, Users } from "lucide-react"
+import { useTheme } from "next-themes"
 import { toast } from "sonner"
 
 import { AdaptersDialog } from "@/components/room/adapters-dialog"
@@ -10,7 +12,7 @@ import { Mark } from "@/components/room/bits"
 import { Roster } from "@/components/room/roster"
 import { TasksPanel } from "@/components/room/tasks-panel"
 import { Thread } from "@/components/room/thread"
-import { api } from "@/components/room/api"
+import { api, type AdapterInfo } from "@/components/room/api"
 import { Button } from "@/components/ui/button"
 import {
   Dialog,
@@ -21,9 +23,7 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog"
 import { Label } from "@/components/ui/label"
-import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import { Textarea } from "@/components/ui/textarea"
-import { ago, STATUS_LABEL } from "@/lib/status"
 import type { Message, PublicAgent, RoomSnapshot, Task } from "@/lib/types"
 
 type TabId = "chat" | "people" | "tasks"
@@ -45,6 +45,8 @@ export function RoomApp() {
   const [handoff, setHandoff] = useState<{ task: Task; agent: PublicAgent } | null>(null)
   const [note, setNote] = useState("")
   const [highlight, setHighlight] = useState<string | null>(null)
+  const [adapters, setAdapters] = useState<AdapterInfo[] | null>(null)
+  const { resolvedTheme, setTheme } = useTheme()
   const composerRef = useRef<HTMLTextAreaElement>(null)
   const pullRef = useRef<() => void>(() => {})
 
@@ -70,17 +72,29 @@ export function RoomApp() {
     }
     pullRef.current = pull
     pull()
-    const poll = setInterval(pull, 4000)
+    let streaming = false
+    // The stream is the main feed; polling only covers the gaps while it reconnects.
+    const poll = setInterval(() => {
+      if (!streaming) pull()
+    }, 4000)
     const source = new EventSource("/api/v1/stream")
+    source.onopen = () => {
+      streaming = true
+    }
     source.onmessage = (event) => {
       try {
         apply(JSON.parse(event.data) as RoomSnapshot)
+        streaming = true
         setLive(true)
+        setError(null)
       } catch {
         setLive(false)
       }
     }
-    source.onerror = () => setLive(false)
+    source.onerror = () => {
+      streaming = false
+      setLive(false)
+    }
     const tick = () => setNow(Date.now())
     tick()
     const clock = setInterval(tick, 10000)
@@ -91,6 +105,16 @@ export function RoomApp() {
       source.close()
     }
   }, [apply])
+
+  const loadAdapters = useCallback(() => {
+    api<{ agents: AdapterInfo[] }>("/api/v1/adapters")
+      .then((data) => setAdapters(Array.isArray(data.agents) ? data.agents : []))
+      .catch(() => setAdapters([]))
+  }, [])
+
+  useEffect(() => {
+    loadAdapters()
+  }, [loadAdapters])
 
   const agents = room?.agents ?? []
   const names = agents.map((agent) => agent.name)
@@ -144,9 +168,9 @@ export function RoomApp() {
 
   if (!room && error) {
     return (
-      <main className="flex h-dvh flex-col items-start justify-center gap-4 px-6">
-        <Mark />
-        <h1 className="font-heading text-3xl">房间没有打开</h1>
+      <main className="flex h-dvh flex-col items-center justify-center gap-4 px-6 text-center">
+        <Mark className="size-10" />
+        <h1 className="text-2xl font-semibold">房间没有打开</h1>
         <p className="max-w-md text-sm leading-6 text-muted-foreground">{error}</p>
         <Button type="button" onClick={() => pullRef.current()}>
           再试一次
@@ -155,84 +179,70 @@ export function RoomApp() {
     )
   }
 
+  const tabs: { id: TabId; label: string; icon: typeof Users }[] = [
+    { id: "people", label: "入口", icon: Users },
+    { id: "chat", label: "对话", icon: MessageSquare },
+    { id: "tasks", label: "分工", icon: ListTodo },
+  ]
+  const openTasks = room?.tasks.filter((task) => task.status !== "done").length ?? 0
+
   return (
     <main className="flex h-dvh flex-col bg-background">
-      <header className="border-b px-4 py-3 md:px-5">
-        <div className="flex items-start justify-between gap-3">
-          <div className="min-w-0">
-            <div className="flex items-center gap-2">
-              <Mark />
-              <h1 className="font-heading text-2xl leading-none">并坐</h1>
-            </div>
-            <p className="mt-2 max-w-xl text-sm leading-6 text-muted-foreground">
-              同一台电脑上的 agent 共用这间房间。模型各做各的，进度和交接写在这里。
-            </p>
-          </div>
-          <div className="flex shrink-0 flex-col items-end gap-2">
-            <Button type="button" onClick={() => setJoinOpen(true)}>
-              接入说明
-            </Button>
-            <p className="text-xs text-muted-foreground">
-              {room ? `${seated} 人在席 · ${working} 人在做` : "正在打开"}
-              {" · "}
-              {live ? "已接上" : "正在重连"}
-            </p>
-          </div>
+      <header className="flex h-14 shrink-0 items-center gap-3 border-b px-4">
+        <Mark />
+        <div className="min-w-0">
+          <h1 className="text-[15px] leading-tight font-semibold">并坐</h1>
+          <p className="hidden truncate text-xs text-muted-foreground sm:block">一个入口，叫到每一个 AI</p>
         </div>
-        <div className="mt-3 flex gap-2 overflow-x-auto pb-1">
-          {agents.length === 0 ? (
-            <p className="text-xs text-muted-foreground">还没有人报进度。</p>
-          ) : (
-            agents.map((agent) => (
-              <button
-                key={agent.id}
-                type="button"
-                className="shrink-0 rounded-full border bg-card px-3 py-1 text-left text-xs"
-                onClick={() => mention(agent.name)}
-              >
-                <span className="font-medium" style={{ color: agent.color }}>
-                  {agent.name}
-                </span>
-                <span className="text-muted-foreground">
-                  {" "}
-                  {STATUS_LABEL[agent.status]} · {agent.doing || ago(agent.lastSeenAt, now)}
-                </span>
-              </button>
-            ))
-          )}
+        <div className="ml-auto flex items-center gap-1.5">
+          <span
+            className="mr-1 hidden items-center gap-1.5 rounded-full border px-2.5 py-1 text-xs text-muted-foreground sm:flex"
+            title={live ? "实时连接正常" : "正在重连"}
+          >
+            <span className={`size-1.5 rounded-full ${live ? "bg-emerald-500" : "animate-pulse bg-amber-500"}`} />
+            {room ? `${seated} 在线 · ${working} 在做` : "正在打开"}
+          </span>
+          <Button
+            type="button"
+            variant="ghost"
+            size="icon-sm"
+            aria-label="切换深浅色"
+            onClick={() => setTheme(resolvedTheme === "dark" ? "light" : "dark")}
+          >
+            {now > 0 && resolvedTheme === "dark" ? <Sun /> : <Moon />}
+          </Button>
+          <Button type="button" size="sm" onClick={() => setJoinOpen(true)}>
+            <Plug />
+            接入说明
+          </Button>
         </div>
       </header>
 
-      <div className="border-b px-3 py-2 md:hidden">
-        <Tabs value={tab} onValueChange={(value) => setTab(value as TabId)}>
-          <TabsList className="grid w-full grid-cols-3">
-            <TabsTrigger value="chat">对话</TabsTrigger>
-            <TabsTrigger value="people">队友</TabsTrigger>
-            <TabsTrigger value="tasks">分工</TabsTrigger>
-          </TabsList>
-        </Tabs>
-      </div>
-
       {!room ? (
-        <div className="grid min-h-0 flex-1 gap-3 p-4 md:grid-cols-3">
-          {["席位", "对话", "任务"].map((label) => (
+        <div className="grid min-h-0 flex-1 gap-3 p-4 lg:grid-cols-[272px_1fr_320px]">
+          {["入口", "对话", "分工"].map((label) => (
             <div key={label} className="animate-pulse rounded-xl bg-muted p-4 text-sm text-muted-foreground">
               正在打开{label}
             </div>
           ))}
         </div>
       ) : (
-        <div className="grid min-h-0 flex-1 grid-rows-[minmax(0,1fr)] md:grid-cols-[280px_minmax(0,1fr)_320px]">
-          <aside className={tab === "people" ? "h-full min-h-0 overflow-hidden md:border-r" : "hidden h-full min-h-0 overflow-hidden md:block md:border-r"}>
+        <div className="grid min-h-0 flex-1 grid-rows-[minmax(0,1fr)] lg:grid-cols-[272px_minmax(0,1fr)_320px]">
+          <aside className={`${tab === "people" ? "block" : "hidden"} h-full min-h-0 overflow-hidden lg:block lg:border-r`}>
             <Roster
               agents={agents}
+              adapters={adapters}
               now={now}
               focusId={focusId}
               demoSeated={demoSeated}
               busy={busy}
               onMention={mention}
-              onFocus={setFocusId}
+              onFocus={(id) => {
+                setFocusId(id)
+                setTab("chat")
+              }}
               onLeave={setLeaving}
+              onJoin={() => setJoinOpen(true)}
               onConfigure={(name) => {
                 setAdapterName(name)
                 setAdaptersOpen(true)
@@ -253,23 +263,25 @@ export function RoomApp() {
               onDismiss={() =>
                 void run(
                   () => api("/api/v1/demo", { method: "POST", body: JSON.stringify({ action: "dismiss" }) }).then(() => undefined),
-                  "演示已离席",
+                  "演示已撤下",
                 )
               }
             />
           </aside>
-          <section className={tab === "chat" ? "flex h-full min-h-0 flex-col" : "hidden h-full min-h-0 md:flex md:flex-col"}>
+          <section className={`${tab === "chat" ? "flex" : "hidden"} h-full min-h-0 flex-col lg:flex`}>
             {error ? (
-              <p className="border-b bg-destructive/10 px-4 py-2 text-xs text-destructive">
-                {error} 正在重试。
-              </p>
+              <p className="border-b bg-destructive/10 px-4 py-2 text-xs text-destructive">{error} 正在重试。</p>
             ) : null}
             <Thread
               messages={visibleMessages}
+              agents={agents}
               names={names}
               focusName={focusAgent?.name ?? null}
               onClearFocus={() => setFocusId(null)}
-              onReply={setReply}
+              onReply={(message) => {
+                setReply(message)
+                requestAnimationFrame(() => composerRef.current?.focus())
+              }}
               onOpenTask={openTask}
               onExample={(text) => {
                 setDraft(text)
@@ -299,7 +311,7 @@ export function RoomApp() {
               }}
             />
           </section>
-          <aside className={tab === "tasks" ? "h-full min-h-0 overflow-hidden md:border-l" : "hidden h-full min-h-0 overflow-hidden md:block md:border-l"}>
+          <aside className={`${tab === "tasks" ? "block" : "hidden"} h-full min-h-0 overflow-hidden lg:block lg:border-l`}>
             <TasksPanel
               tasks={room.tasks}
               agents={agents}
@@ -334,18 +346,42 @@ export function RoomApp() {
         </div>
       )}
 
+      <nav className="grid shrink-0 grid-cols-3 border-t bg-background lg:hidden">
+        {tabs.map((item) => {
+          const Icon = item.icon
+          const on = tab === item.id
+          return (
+            <button
+              key={item.id}
+              type="button"
+              className={`flex flex-col items-center gap-0.5 py-2 text-[11px] ${on ? "text-foreground" : "text-muted-foreground"}`}
+              onClick={() => setTab(item.id)}
+              aria-current={on ? "page" : undefined}
+            >
+              <Icon className="size-5" />
+              <span>
+                {item.label}
+                {item.id === "tasks" && openTasks > 0 ? ` ${openTasks}` : ""}
+              </span>
+            </button>
+          )
+        })}
+      </nav>
+
       <AdaptersDialog
         open={adaptersOpen}
         agents={agents}
+        adapters={adapters}
         focusName={adapterName}
         busy={busy}
         onOpenChange={setAdaptersOpen}
         onSave={(next) =>
           run(async () => {
-            await api("/api/v1/adapters", {
+            const saved = await api<{ agents: AdapterInfo[] }>("/api/v1/adapters", {
               method: "POST",
               body: JSON.stringify({ as: "human", agents: next }),
             })
+            setAdapters(saved.agents)
             setAdaptersOpen(false)
           }, "唤起命令已保存")
         }

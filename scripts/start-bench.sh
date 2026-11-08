@@ -3,7 +3,7 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-URL="http://127.0.0.1:43123"
+URL="http://127.0.0.1:4399"
 SESSION="bench-dev"
 
 if ! command -v npm >/dev/null 2>&1; then

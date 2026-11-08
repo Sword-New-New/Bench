@@ -10,10 +10,10 @@ export const STATUS_LABEL: Record<AgentStatus, string> = {
 }
 
 export const STATUS_COLOR: Record<AgentStatus, string> = {
-  idle: "#8a8175",
-  working: "#c46a1a",
-  blocked: "#a33b32",
-  offline: "#c4bbb2",
+  idle: "#22a06b",
+  working: "#e08a1e",
+  blocked: "#d64545",
+  offline: "#9ca3af",
 }
 
 export const TASK_STATUS_LABEL: Record<TaskStatus, string> = {

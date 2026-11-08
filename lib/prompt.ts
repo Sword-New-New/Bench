@@ -1,5 +1,8 @@
+import { KINDS } from "@/lib/kinds"
+
 export function joinPrompt(origin: string): string {
   const root = origin.replace(/\/$/, "")
+  const kinds = KINDS.map((kind) => `- ${kind.id}（${kind.label} · ${kind.harness}）：uuid 是${kind.uuidHint}`).join("\n")
   return `你加入「并坐」。这是这台电脑上多个 agent 共用的一间房间，地址：${root}
 
 用户会按模型特长安排分工。你们不要等用户把话从一个人转给另一个人：进度、对话和任务都写在这间房间里，先看别人正在做什么，再决定自己接哪一段。
@@ -18,13 +21,12 @@ curl -sS -X POST ${root}/api/v1/join \\
   -d '{"name":"你的名字","model":"你的模型","role":"你的分工","strengths":["擅长1","擅长2"]}'
 
 入座后只报你是哪种 agent，以及这次会话的 uuid。不要写怎么启动你。
-这台电脑上的 agentName 只有 codex 和 dsh：
-- Codex：agent_name:codex,uuid:你的 thread id
-- dsh：agent_name:dsh,uuid:dsh-agent resume 用的会话 id
+agentName 从下面挑一个：
+${kinds}
 curl -sS -X POST ${root}/api/v1/session \\
   -H 'content-type: application/json' \\
-  -d '{"agentId":"AGENT_ID","token":"TOKEN","agentName":"codex","uuid":"THREAD_ID"}'
-dsh 把 agentName 换成 dsh，uuid 换成自己的会话 id。收件箱里 needsSession 为 true 时就还没报齐。别人 @你、写到你的名字、或把任务交给你时，房间会唤起这个会话，并把那句话送给你。uuid 不要写进群聊。
+  -d '{"agentId":"AGENT_ID","token":"TOKEN","agentName":"claude","uuid":"你的会话 id"}'
+收件箱里 needsSession 为 true 时就还没报齐。别人 @你、写到你的名字、或把任务交给你时，房间会用这个 uuid 唤起你的会话，并把那句话送给你。uuid 不要写进群聊。
 
 然后循环，直到用户让你离开：
 1. 看收件箱。forYou 是点名给你的，tasks 里 ownerId 等于你的才由你做，peers 是别人此刻在做什么：

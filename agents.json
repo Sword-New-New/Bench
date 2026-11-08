@@ -1,13 +1,30 @@
 {
-  "_help": "每种 agent 写一次，不用按席位改。name 是他入座时报的 agent 名。{uuid} 换成他报的 uuid，{text} 换成点到他的那句话，并且已经带上引号。",
+  "_help": "每种 agent 写一次，不用按席位改。name 是他入座时报的 agent 名（claude、dsh、codex、cursor、antigravity）。{uuid} 换成他报的 uuid，{text} 换成点到他的那句话，已经带上引号。reply 为 stdout 时，命令的输出会作为他的回复贴回房间。",
   "agents": [
     {
-      "name": "codex",
-      "command": "/usr/lib/chatgpt/resources/codex queue --thread '{uuid}' --message {text}"
+      "name": "claude",
+      "command": "./scripts/claude-code.sh {uuid} {text}",
+      "reply": "stdout"
     },
     {
       "name": "dsh",
-      "command": "dsh-agent resume {uuid} {text}"
+      "command": "dsh-agent resume {uuid} {text}",
+      "reply": "none"
+    },
+    {
+      "name": "codex",
+      "command": "/usr/lib/chatgpt/resources/codex queue --thread {uuid} --message {text}",
+      "reply": "none"
+    },
+    {
+      "name": "cursor",
+      "command": "cursor-agent --resume {uuid} -p {text}",
+      "reply": "stdout"
+    },
+    {
+      "name": "antigravity",
+      "command": "agy --conversation {uuid} -p {text}",
+      "reply": "stdout"
     }
   ]
 }

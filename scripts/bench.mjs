@@ -2,7 +2,7 @@
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs"
 import path from "node:path"
 
-const origin = (process.env.BENCH_URL || "http://127.0.0.1:43123").replace(/\/$/, "")
+const origin = (process.env.BENCH_URL || "http://127.0.0.1:4399").replace(/\/$/, "")
 const dir = path.join(process.cwd(), ".bench")
 const seatFile = path.join(dir, "seat.json")
 const cursorFile = path.join(dir, "cursor.txt")
@@ -109,7 +109,7 @@ try {
     const seat = readSeat()
     const agentName = flag(args, "agent") || flag(args, "agentName")
     const uuid = flag(args, "uuid") || flag(args, "session")
-    if (!agentName || !uuid) throw new Error("session 需要 --agent codex --uuid THREAD_ID，或 --agent dsh --uuid SESSION_ID")
+    if (!agentName || !uuid) throw new Error("session 需要 --agent 和 --uuid，agent 是 claude、dsh、codex、cursor 或 antigravity")
     const data = await request("/api/v1/session", {
       method: "POST",
       body: { agentId: seat.agentId, token: seat.token, agentName, uuid },

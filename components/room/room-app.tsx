@@ -1,7 +1,7 @@
 "use client"
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react"
-import { ListTodo, MessageSquare, Monitor, Moon, Plug, Sun, Users } from "lucide-react"
+import { ListTodo, MessageSquare, Monitor, Moon, Plug, Settings, Sun, TerminalSquare, Users } from "lucide-react"
 import { useTheme } from "next-themes"
 import { toast } from "sonner"
 
@@ -32,7 +32,11 @@ import {
   DropdownMenu,
   DropdownMenuContent,
   DropdownMenuRadioGroup,
+  DropdownMenuGroup,
+  DropdownMenuItem,
+  DropdownMenuLabel,
   DropdownMenuRadioItem,
+  DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu"
 import { Label } from "@/components/ui/label"
@@ -155,7 +159,6 @@ export function RoomApp() {
 
   const seated = agents.filter((agent) => agent.status !== "offline").length
   const working = agents.filter((agent) => agent.status === "working").length
-  const demoSeated = agents.some((agent) => agent.demo)
 
   async function run(action: () => Promise<void>, success?: string) {
     setBusy(true)
@@ -250,24 +253,37 @@ export function RoomApp() {
             />
           ) : null}
           <DropdownMenu>
-            <DropdownMenuTrigger render={<Button type="button" variant="ghost" size="icon-sm" aria-label="深浅色" />}>
-              {now > 0 && theme === "dark" ? <Moon /> : now > 0 && theme === "light" ? <Sun /> : <Monitor />}
+            <DropdownMenuTrigger render={<Button type="button" variant="ghost" size="icon-sm" aria-label="设置" />}>
+              <Settings />
             </DropdownMenuTrigger>
-            <DropdownMenuContent align="end" className="min-w-32">
-              <DropdownMenuRadioGroup value={theme ?? "system"} onValueChange={(value) => setTheme(value)}>
-                <DropdownMenuRadioItem value="light" closeOnClick>
-                  <Sun />
-                  浅色
-                </DropdownMenuRadioItem>
-                <DropdownMenuRadioItem value="dark" closeOnClick>
-                  <Moon />
-                  深色
-                </DropdownMenuRadioItem>
-                <DropdownMenuRadioItem value="system" closeOnClick>
-                  <Monitor />
-                  跟随系统
-                </DropdownMenuRadioItem>
-              </DropdownMenuRadioGroup>
+            <DropdownMenuContent align="end" className="min-w-44">
+              <DropdownMenuGroup>
+                <DropdownMenuLabel>深浅色</DropdownMenuLabel>
+                <DropdownMenuRadioGroup value={theme ?? "system"} onValueChange={(value) => setTheme(value)}>
+                  <DropdownMenuRadioItem value="light" closeOnClick>
+                    <Sun />
+                    浅色
+                  </DropdownMenuRadioItem>
+                  <DropdownMenuRadioItem value="dark" closeOnClick>
+                    <Moon />
+                    深色
+                  </DropdownMenuRadioItem>
+                  <DropdownMenuRadioItem value="system" closeOnClick>
+                    <Monitor />
+                    跟随系统
+                  </DropdownMenuRadioItem>
+                </DropdownMenuRadioGroup>
+              </DropdownMenuGroup>
+              <DropdownMenuSeparator />
+              <DropdownMenuItem
+                onClick={() => {
+                  setAdapterName(null)
+                  setAdaptersOpen(true)
+                }}
+              >
+                <TerminalSquare />
+                唤起命令…
+              </DropdownMenuItem>
             </DropdownMenuContent>
           </DropdownMenu>
           <Button
@@ -302,7 +318,6 @@ export function RoomApp() {
               adapters={adapters}
               now={now}
               focusId={focusId}
-              demoSeated={demoSeated}
               busy={busy}
               onMention={mention}
               onFocus={(id) => {
@@ -326,29 +341,6 @@ export function RoomApp() {
                 setJoinKind(kind ?? null)
                 setJoinOpen(true)
               }}
-              onConfigure={(name) => {
-                setAdapterName(name)
-                setAdaptersOpen(true)
-              }}
-              onSeat={() =>
-                void run(async () => {
-                  const result = await api<{ created: string[]; skipped: string[] }>("/api/v1/demo", {
-                    method: "POST",
-                    body: JSON.stringify({ action: "seat" }),
-                  })
-                  if (result.created.length === 0 && result.skipped.length > 0) {
-                    toast.message(`${result.skipped.join("、")} 已经是真席位`)
-                  } else if (result.created.length === 0) {
-                    toast.message("演示已经在座")
-                  }
-                })
-              }
-              onDismiss={() =>
-                void run(
-                  () => api("/api/v1/demo", { method: "POST", body: JSON.stringify({ action: "dismiss" }) }).then(() => undefined),
-                  "演示已撤下",
-                )
-              }
             />
           </aside>
           <section className={`${tab === "chat" ? "flex" : "hidden"} relative h-full min-h-0 flex-col lg:flex`}>

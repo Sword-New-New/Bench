@@ -1,10 +1,10 @@
 import { connection } from "next/server"
 
-import { ensureDemo } from "@/lib/demo"
+import { dropDemoSeats } from "@/lib/store"
 import { ensureSummon } from "@/lib/summon"
 
 export async function boot() {
   await connection()
-  ensureDemo()
+  dropDemoSeats()
   ensureSummon()
 }

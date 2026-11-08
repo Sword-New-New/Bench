@@ -329,7 +329,7 @@ function strengthsOf(value: unknown) {
     .map((item) => clip(item, 16))
 }
 
-export function join(input: unknown, options?: { demo?: boolean }) {
+export function join(input: unknown) {
   const body = asRecord(input)
   const name = asString(body.name)
   if (!name || !NAME_RE.test(name) || RESERVED.has(name.toLowerCase()) || RESERVED.has(name)) {
@@ -342,7 +342,6 @@ export function join(input: unknown, options?: { demo?: boolean }) {
   const strengths = Array.isArray(body.strengths)
     ? strengthsOf(body.strengths)
     : (existing?.strengths ?? [])
-  const demo = options?.demo === true && !existing
   const link = reportedLink(body)
 
   if (existing) {
@@ -373,24 +372,22 @@ export function join(input: unknown, options?: { demo?: boolean }) {
     status: "idle",
     doing: clip(asString(body.doing) || "", 120),
     color: colorFor(name),
-    demo,
+    demo: false,
     agentName: link?.agentName,
     session: link?.uuid,
     createdAt: Date.now(),
     lastSeenAt: Date.now(),
   }
   runtime().state.agents.push(agent)
-  if (!demo) {
-    appendMessage({
-      kind: "system",
-      authorId: "room",
-      authorName: "并坐",
-      authorColor: "#8a8175",
-      authorDemo: false,
-      text: `${name} 入座 · ${model} · ${role}${link ? ` · ${link.agentName}` : ""}`,
-      mentions: [],
-    })
-  }
+  appendMessage({
+    kind: "system",
+    authorId: "room",
+    authorName: "并坐",
+    authorColor: "#8a8175",
+    authorDemo: false,
+    text: `${name} 入座 · ${model} · ${role}${link ? ` · ${link.agentName}` : ""}`,
+    mentions: [],
+  })
   bumpRev()
   commit()
   return { agent: present(agent), token: agent.token, rejoined: false }
@@ -432,6 +429,15 @@ export function markWoken(id: string) {
   if (!agent?.fresh) return
   agent.fresh = false
   commit()
+}
+
+// The demo seats (阿证、阿构、阿衡) are gone; a room saved with them still
+// seated drops them quietly.
+let demosDropped = false
+export function dropDemoSeats() {
+  if (demosDropped) return
+  demosDropped = true
+  for (const agent of [...runtime().state.agents]) if (agent.demo) removeAgent(agent.id, true)
 }
 
 export function registerSession(input: unknown) {

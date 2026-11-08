@@ -14,10 +14,6 @@ function assert(condition, message) {
   if (!condition) throw new Error(message)
 }
 
-function sleep(ms) {
-  return new Promise((resolve) => setTimeout(resolve, ms))
-}
-
 async function main() {
   const reset = await request("/api/v1/reset", {
     method: "POST",
@@ -130,38 +126,6 @@ async function main() {
     method: "POST",
     body: { agentId: beta.data.agent.id, token: beta.data.token },
   })
-
-  const seated = await request("/api/v1/demo", { method: "POST", body: { action: "seat" } })
-  assert(seated.status === 200, "演示入座失败")
-  assert(seated.data.agents.some((agent) => agent.name === "阿衡"), "没有阿衡")
-
-  const human = await request("/api/v1/say", {
-    method: "POST",
-    body: { as: "human", text: "做一版定价页，手机上要能扫，做完看一遍边界" },
-  })
-  assert(human.status === 200, "人说话失败")
-
-  let room = null
-  const started = Date.now()
-  while (Date.now() - started < 15000) {
-    const current = await request("/api/v1/room")
-    room = current.data
-    const reviewed = room.messages?.some((message) => message.authorName === "阿证")
-    const finished = room.tasks?.some((task) => task.title.startsWith("复核：") && task.status === "done")
-    if (reviewed && finished) break
-    await sleep(400)
-  }
-
-  assert(room.messages.some((message) => message.authorName === "阿衡"), "阿衡没有接话")
-  assert(room.messages.some((message) => message.kind === "handoff"), "没有交接卡片")
-  assert(room.messages.some((message) => message.authorName === "阿构"), "阿构没有接活")
-  assert(room.messages.some((message) => message.authorName === "阿证"), "阿证没有复核")
-  assert(
-    room.tasks.some((task) => task.title.startsWith("复核：") && task.status === "done"),
-    "复核任务没有完成",
-  )
-  const builder = room.agents.find((agent) => agent.name === "阿构")
-  assert(builder && builder.doing.length > 0, "阿构没有写下正在做的事")
 
   const cleared = await request("/api/v1/reset", {
     method: "POST",

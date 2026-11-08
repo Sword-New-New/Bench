@@ -1,5 +1,5 @@
 import { useState } from "react"
-import { AtSign, Ellipsis, Loader2, MessageCircle, Plus, Settings2, Square } from "lucide-react"
+import { AtSign, Ellipsis, Loader2, MessageCircle, Plus, Square } from "lucide-react"
 
 import { Button } from "@/components/ui/button"
 import {
@@ -20,7 +20,6 @@ type Props = {
   adapters: AdapterInfo[] | null
   now: number
   focusId: string | null
-  demoSeated: boolean
   busy: boolean
   onMention: (name: string) => void
   onFocus: (id: string | null) => void
@@ -31,11 +30,8 @@ type Props = {
   onWhisper: (agent: PublicAgent) => void
   // Open 「开新会话」 for a kind, starting from this seat's folder if given.
   onSpawn: (kind: string, from: PublicAgent | null) => void
-  onConfigure: (name: string | null) => void
   // kind: open the join dialog with that agent already picked.
   onJoin: (kind?: string) => void
-  onSeat: () => void
-  onDismiss: () => void
 }
 
 function reach(kind: Kind, seats: PublicAgent[], adapters: AdapterInfo[] | null) {
@@ -58,7 +54,7 @@ const TONE = {
 }
 
 export function Roster(props: Props) {
-  const { agents, adapters, demoSeated, busy } = props
+  const { agents, adapters } = props
   const others = agents.filter((agent) => kindOf(agent) === null)
   // The five core kinds always get a row; any other kind once it has a seat.
   const seated = new Set(agents.map((agent) => kindOf(agent)?.id))
@@ -87,29 +83,6 @@ export function Roster(props: Props) {
             ))}
           </section>
         ) : null}
-      </div>
-      <div className="flex gap-1 border-t px-2 py-2">
-        <Button
-          type="button"
-          variant="ghost"
-          size="sm"
-          className="flex-1 justify-start"
-          disabled={busy}
-          onClick={() => props.onConfigure(null)}
-        >
-          <Settings2 />
-          唤起命令
-        </Button>
-        <Button
-          type="button"
-          variant="ghost"
-          size="sm"
-          className="text-muted-foreground"
-          disabled={busy}
-          onClick={demoSeated ? props.onDismiss : props.onSeat}
-        >
-          {demoSeated ? "撤下演示" : "演示席位"}
-        </Button>
       </div>
     </div>
   )
@@ -148,7 +121,7 @@ function KindGroup({
             <span className="truncate text-sm font-semibold">{kind.label}</span>
             <span className={`shrink-0 text-[11px] ${TONE[state.tone]}`}>{state.text}</span>
           </span>
-          <span className="block truncate text-xs text-muted-foreground" title="被 @ 叫醒、写摘要时用的模型，在「唤起命令」里改">
+          <span className="block truncate text-xs text-muted-foreground" title="被 @ 叫醒、写摘要时用的模型，在右上角设置 → 唤起命令里改">
             {kind.harness} · {model ?? "默认模型"}
           </span>
         </span>
@@ -276,11 +249,6 @@ function SeatRow({ agent, ...props }: Props & { agent: PublicAgent }) {
           <DropdownMenuItem onClick={() => props.onFocus(focused ? null : agent.id)}>
             {focused ? "看全部对话" : "只看和他有关的"}
           </DropdownMenuItem>
-          {!agent.demo ? (
-            <DropdownMenuItem onClick={() => props.onConfigure(agent.agentName || null)}>
-              唤起命令…
-            </DropdownMenuItem>
-          ) : null}
           <DropdownMenuSeparator />
           <DropdownMenuItem variant="destructive" onClick={() => props.onLeave(agent)}>
             请离席

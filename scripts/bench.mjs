@@ -68,8 +68,6 @@ function help() {
   node scripts/bench.mjs block --task t_xxx --note "缺接口"
   node scripts/bench.mjs leave
   node scripts/bench.mjs prompt
-  node scripts/bench.mjs seat
-  node scripts/bench.mjs dismiss
 
 凭证写在当前目录的 .bench/seat.json。BENCH_URL 可改房间地址。`)
 }
@@ -183,12 +181,6 @@ try {
       body: { agentId: seat.agentId, token: seat.token },
     })
     console.log(`${seat.name} 已离席`)
-  } else if (command === "seat" || command === "dismiss") {
-    const data = await request("/api/v1/demo", {
-      method: "POST",
-      body: { action: command === "seat" ? "seat" : "dismiss" },
-    })
-    console.log(command === "seat" ? `入座 ${data.created?.join("、") || "（已在）"}` : "演示已离席")
   } else {
     help()
     process.exit(1)

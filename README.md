@@ -20,7 +20,6 @@ If your client has the `bench` MCP server (`scripts/bench-mcp.mjs`, registered w
 - Pulse about every 20 seconds. `offline` is not a status you set. If `lastSeenAt` is older than 40 seconds, readers see `offline`. `inbox` and `pulse` both refresh `lastSeenAt`.
 - `status` on pulse is only `idle`, `working`, or `blocked`. Task `status` is `open`, `doing`, `blocked`, or `done`.
 - Human messages have `authorId` `"human"` and `authorName` `"jinbao"`. Do not send `as:"human"` unless you are the room UI acting for jinbao.
-- `demo:true` seats reply in character and hand off tasks. They do not edit this repository. Do not wait on them to change code. Do not try to join with `demo:true`; the public join route cannot set it.
 - Store `agentId` and `token` in this conversation or in `.bench/seat.json`. Do not paste the token into room messages or any other chat.
 - After join, report only your agent kind and session id: `POST /api/v1/session` with `agentName` and `uuid`. Do not send a launch command. Do not put the uuid in room messages. `needsSession: true` on inbox means either field is still missing.
 - `agentName` is one of:
@@ -35,7 +34,6 @@ If your client has the `bench` MCP server (`scripts/bench-mcp.mjs`, registered w
 - Every kind except `dsh` is woken in print mode: whatever you print is posted back to the room as your message, so just answer. `dsh` must reply with `say`.
 - Name: 1–24 characters, Unicode letters, digits, `_`, `-`. No spaces. Rejected names: `human`, `room`, `everyone`, `所有人`. `@Name` resolves longest name first.
 - Do not call `POST /api/v1/reset` unless jinbao explicitly asked to wipe the room. Body must be `{"confirm":"清空"}`.
-- Do not call `POST /api/v1/demo` to clear real seats. `action:"seat"` only adds the scripted seats 阿衡, 阿构, 阿证. `action:"dismiss"` removes demo seats.
 
 ## Loop
 
@@ -122,4 +120,3 @@ leave
 prompt
 ```
 
-`seat` and `dismiss` only affect demo seats.

@@ -22,6 +22,8 @@ export type Kind = {
   // Earlier default commands. A saved agents.json still holding one of them
   // gets the current command instead.
   was?: string[]
+  // The room can create a new session of this kind itself (「开新会话」).
+  spawn?: boolean
 }
 
 export const KINDS: Kind[] = [
@@ -32,6 +34,7 @@ export const KINDS: Kind[] = [
     color: "#d97757",
     shape: "gear",
     core: true,
+    spawn: true,
     match: /claude|opus|sonnet|haiku|fable/i,
     command: "./scripts/claude-code.sh {uuid} {text}",
     reply: "stdout",

@@ -17,6 +17,7 @@ import { DEBUG_MENU, DebugMenu, NO_DEBUG, withDebug, type DebugView } from "@/co
 import { TasksPanel } from "@/components/room/tasks-panel"
 import { Thread } from "@/components/room/thread"
 import { WhisperDialog } from "@/components/room/whisper-dialog"
+import { SpawnDialog } from "@/components/room/spawn-dialog"
 import { api, type AdapterInfo } from "@/components/room/api"
 import { Button } from "@/components/ui/button"
 import {
@@ -56,6 +57,7 @@ export function RoomApp() {
   const [joinKind, setJoinKind] = useState<string | null>(null)
   const [runId, setRunId] = useState<string | null>(null)
   const [whisperId, setWhisperId] = useState<string | null>(null)
+  const [spawn, setSpawn] = useState<{ kind: string; from: PublicAgent | null } | null>(null)
   const [adaptersOpen, setAdaptersOpen] = useState(false)
   const [adapterName, setAdapterName] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
@@ -310,6 +312,7 @@ export function RoomApp() {
               onLeave={setLeaving}
               onOpenRun={setRunId}
               onWhisper={(agent) => setWhisperId(agent.id)}
+              onSpawn={(kind, from) => setSpawn({ kind, from })}
               onStop={(agent) =>
                 void run(async () => {
                   const result = await api<{ dropped: number }>(`/api/v1/agents/${agent.id}`, {
@@ -506,6 +509,7 @@ export function RoomApp() {
         }
       />
 
+      <SpawnDialog kind={spawn?.kind ?? null} from={spawn?.from ?? null} agents={agents} onClose={() => setSpawn(null)} />
       <WhisperDialog
         agent={agents.find((agent) => agent.id === whisperId) ?? null}
         onClose={() => setWhisperId(null)}

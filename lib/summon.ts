@@ -10,6 +10,7 @@ import {
   catchUp,
   endSummaryJob,
   isStandby,
+  markWoken,
   onMessage,
   postSystem,
   pulseAgent,
@@ -95,6 +96,13 @@ function roomUrl() {
 
 function stamp(at: number) {
   return new Date(at).toTimeString().slice(0, 5)
+}
+
+// Said once, on the first wake of a session the room created: it starts with
+// no idea where it is.
+function introduce(agent: NonNullable<ReturnType<typeof agentState>>) {
+  if (!agent.fresh) return ""
+  return `【你是并坐房间新开的会话】你在房间里叫 ${agent.name}，分工是「${agent.role}」，工作目录是 ${agent.workdir}。房间已经替你入座了，bench 工具直接能用，不用再 bench_join。别人 @${agent.name} 时房间会叫醒你。\n\n`
 }
 
 function envelope(body: string, skipped: number, summary: RoomSummary | undefined, replyByStdout: boolean) {
@@ -211,6 +219,8 @@ function launch(
       BENCH_AGENT: agent.agentName,
       BENCH_UUID: agent.session,
       BENCH_SESSION: agent.session,
+      // A session the room created: where its first wake starts it.
+      ...(agent.workdir ? { BENCH_NEW_DIR: agent.workdir } : {}),
     },
   })
   const kill = () => {
@@ -327,7 +337,7 @@ function run(agentId: string) {
   const command = commandFor(
     agent.agentName,
     agent.session,
-    envelope(body, seen.skipped, seen.summary, adapter.reply === "stdout"),
+    introduce(agent) + envelope(body, seen.skipped, seen.summary, adapter.reply === "stdout"),
   )
   const hop = queue.hops
   queue.pending = []
@@ -359,6 +369,7 @@ function run(agentId: string) {
         console.error(error)
       }
     }
+    if (!failure && agent.fresh) markWoken(agentId)
     endRun(log, failure ? "failed" : "done", failure ? `没成功：${failure}` : undefined)
     seat.settle()
     run(agentId)
@@ -419,7 +430,7 @@ function whisperPrompt(text: string, interrupted: boolean) {
 function answerWhisper(agent: NonNullable<ReturnType<typeof agentState>>, text: string) {
   const queue = lane(agent.id)
   const interrupted = Boolean(queue.carry) || queue.summary === true
-  const command = commandFor(agent.agentName ?? "", agent.session ?? "", whisperPrompt(text, interrupted))
+  const command = commandFor(agent.agentName ?? "", agent.session ?? "", introduce(agent) + whisperPrompt(text, interrupted))
   if (!command) return
   queue.running = true
   const log = startRun(agent.id, agent.name, "private")
@@ -427,7 +438,10 @@ function answerWhisper(agent: NonNullable<ReturnType<typeof agentState>>, text: 
   const seat = busy(agent.id, "在回你单独说的话")
   launch(agent, command, log, seat.live, ({ out, failure, stopped }) => {
     queue.running = false
-    if (!stopped && !failure) log.answer = out.slice(0, 4000)
+    if (!stopped && !failure) {
+      log.answer = out.slice(0, 4000)
+      if (agent.fresh) markWoken(agent.id)
+    }
     endRun(log, failure || stopped ? "failed" : "done", stopped ? "被停下了" : failure ? `没成功：${failure}` : undefined)
     seat.settle()
     run(agent.id)

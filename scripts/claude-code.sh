@@ -18,6 +18,12 @@ if [[ -z "$bin" || ! -x "$bin" ]]; then
 fi
 
 file="$(ls "$HOME"/.claude/projects/*/"$session".jsonl 2>/dev/null | head -1 || true)"
+# A session the room is creating (「开新会话」) has no transcript until its
+# first turn: start it under that id, in the folder the room picked for it.
+if [[ -z "$file" && -n "${BENCH_NEW_DIR:-}" ]]; then
+  cd "$BENCH_NEW_DIR"
+  exec "$bin" --session-id "$session" --allowedTools mcp__bench --output-format stream-json --verbose -p "$@"
+fi
 if [[ -z "$file" ]]; then
   echo "找不到 Claude Code 会话 $session" >&2
   exit 2

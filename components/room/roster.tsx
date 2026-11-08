@@ -29,6 +29,8 @@ type Props = {
   onStop: (agent: PublicAgent) => void
   // Say something to this seat alone, outside the room.
   onWhisper: (agent: PublicAgent) => void
+  // Open 「开新会话」 for a kind, starting from this seat's folder if given.
+  onSpawn: (kind: string, from: PublicAgent | null) => void
   onConfigure: (name: string | null) => void
   // kind: open the join dialog with that agent already picked.
   onJoin: (kind?: string) => void
@@ -151,11 +153,22 @@ function KindGroup({
           </span>
         </span>
       </button>
-      {seats.length > 0 ? (
+      {seats.length > 0 || kind.spawn ? (
         <div className="mt-0.5 ml-[1.35rem] border-l pl-2">
           {seats.map((agent) => (
             <SeatRow key={agent.id} agent={agent} {...props} />
           ))}
+          {kind.spawn ? (
+            <button
+              type="button"
+              className="flex w-full items-center gap-1.5 rounded-xl px-2 py-1 text-left text-xs text-muted-foreground transition-colors hover:bg-sidebar-accent/70 hover:text-foreground"
+              title={`让房间在后台开一个新的 ${kind.label} 会话并入座`}
+              onClick={() => props.onSpawn(kind.id, primary ?? null)}
+            >
+              <Plus className="size-3.5" />
+              开新会话
+            </button>
+          ) : null}
         </div>
       ) : null}
     </section>
@@ -246,6 +259,12 @@ function SeatRow({ agent, ...props }: Props & { agent: PublicAgent }) {
             <DropdownMenuItem onClick={() => props.onWhisper(agent)}>
               <MessageCircle />
               单独说…
+            </DropdownMenuItem>
+          ) : null}
+          {kindOf(agent)?.spawn && !agent.demo ? (
+            <DropdownMenuItem onClick={() => props.onSpawn(kindOf(agent)!.id, agent)}>
+              <Plus />
+              在同目录开新会话…
             </DropdownMenuItem>
           ) : null}
           {agent.runId ? (

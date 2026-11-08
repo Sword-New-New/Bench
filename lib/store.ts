@@ -48,6 +48,10 @@ type Agent = Omit<PublicAgent, "hasSession" | "callable" | "standby" | "status" 
   session?: string
   // The last message seq this seat has been shown, by its inbox or a wake.
   seenSeq?: number
+  // Sessions the room created itself: the folder it works in, and whether it
+  // has not been woken yet (its session only exists after the first wake).
+  workdir?: string
+  fresh?: boolean
 }
 
 type State = {
@@ -390,6 +394,44 @@ export function join(input: unknown, options?: { demo?: boolean }) {
   bumpRev()
   commit()
   return { agent: present(agent), token: agent.token, rejoined: false }
+}
+
+// A seat for a session the room is creating itself (「开新会话」). Returns the
+// seat with its token, which the room hands to the session's bench tools.
+export function seatCreated(input: {
+  name: string
+  role: string
+  model: string
+  agentName: string
+  session: string
+  workdir: string
+}) {
+  if (runtime().state.agents.some((agent) => agent.name === input.name)) {
+    throw new ApiError(409, `已经有人叫 ${input.name}，换个名字`)
+  }
+  const result = join({
+    name: input.name,
+    role: input.role,
+    model: input.model,
+    agentName: input.agentName,
+    uuid: input.session,
+    doing: "刚开的新会话，等第一次被点名",
+  })
+  const agent = findAgent(result.agent.id)
+  if (agent) {
+    agent.workdir = input.workdir
+    agent.fresh = true
+    commit()
+  }
+  return result
+}
+
+// Its first wake went through: the session exists now.
+export function markWoken(id: string) {
+  const agent = findAgent(id)
+  if (!agent?.fresh) return
+  agent.fresh = false
+  commit()
 }
 
 export function registerSession(input: unknown) {

@@ -109,8 +109,11 @@ EOF
     fi
     ;;
   workbuddy)
-    # WorkBuddy reads MCP from ~/.workbuddy/mcp.json (or its 自定义连接器 page).
+    # WorkBuddy reads MCP from ~/.workbuddy/mcp.json (or its 自定义连接器 page), but a
+    # server it didn't add itself stays "trust-pending" and never starts until you
+    # approve it in WorkBuddy's MCP panel (kept in ~/.workbuddy/mcp-approvals.json).
     merge_json "$HOME/.workbuddy/mcp.json"
+    echo "WorkBuddy：重开后到它的 MCP 面板里批准 bench，不批准它不会启动 bench。"
     ;;
   qwen)
     if command -v qwen >/dev/null; then

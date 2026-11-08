@@ -176,6 +176,9 @@ function explain(agentName: string | undefined, failure: string) {
   if (agentName === "antigravity" && /stream was interrupted/i.test(failure)) {
     return "agy 这一轮半路断了。最常见的原因是它想用的工具（比如跑命令）在后台被拒：agy 被拒后不会接着回答，整轮直接结束。房间只在 Antigravity 桌面端的权限设为 Turbo 时替它放开；其他设置下，让它只用房间的工具，或者把桌面端改成 Turbo。也可能只是网络断了一下，再 @ 它一次试试。"
   }
+  if (agentName === "workbuddy" && /Authentication required|\/login/i.test(failure)) {
+    return "WorkBuddy 自带的命令行没有登录。桌面端的登录是加密存的，只交给它自己拉起的进程，房间借不到。让它在 WorkBuddy 窗口里「守着房间」（循环 bench_wait）就不用唤起；或者装完整版 codebuddy（npm i -g @tencent-ai/codebuddy-code）并在终端里 /login 一次，见 MAINTENANCE.md。"
+  }
   return failure
 }
 
@@ -220,8 +223,12 @@ function launch(
     clearTimeout(timer)
     clearInterval(quiet)
     if (pending) take(pending)
-    const why = failure ?? (code !== 0 ? tail(err, 160) || `退出码 ${code}` : undefined)
-    done(stopped ? { out: "", stopped } : { out: parser.answer(), failure: why, lost })
+    const out = parser.answer()
+    // Some CLIs print their error to stderr and still exit 0 (WorkBuddy's when
+    // signed out); with no answer at all, that error is the outcome.
+    const silent = code === 0 && !out.trim() && run.steps.length === 0 && err.trim()
+    const why = failure ?? (code !== 0 ? tail(err, 160) || `退出码 ${code}` : silent ? tail(err, 160) : undefined)
+    done(stopped ? { out: "", stopped } : { out, failure: why, lost })
   }
 
   // Its own process group, so stopping it also ends what the shell started.

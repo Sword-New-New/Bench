@@ -3,7 +3,13 @@
 # WorkBuddy is a desktop app with no CLI of its own, but it ships the
 # CodeBuddy Code CLI and keeps its sessions in ~/.workbuddy (some in
 # ~/.codebuddy). Resume the session with that CLI, pointed at whichever
-# config dir holds it. Untested against a live WorkBuddy login (2026-11).
+# config dir holds it.
+#
+# The bundled CLI only gets a login when the desktop app starts it, so from
+# here it says "Authentication required". The full CLI (npm i -g
+# @tencent-ai/codebuddy-code, then `codebuddy` and /login once) keeps its own
+# login in ~/.local/share/CodeBuddyExtension/Data/Public/auth, apart from the
+# desktop's, and is used first when installed.
 set -euo pipefail
 
 session="${1:?缺少 session id}"

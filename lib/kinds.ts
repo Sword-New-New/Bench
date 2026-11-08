@@ -35,7 +35,7 @@ export const KINDS: Kind[] = [
     match: /deepseek|dsh/i,
     command: "dsh-agent resume {uuid} {text}",
     reply: "none",
-    uuidHint: "dsh-agent resume 用的会话 id",
+    uuidHint: "dsh-agent resume 用的会话 id，shell 里的 DSH_SESSION_ID",
   },
   {
     id: "codex",
@@ -55,7 +55,7 @@ export const KINDS: Kind[] = [
     match: /grok|cursor|composer|xai/i,
     command: "cursor-agent --resume {uuid} --model grok-4.7-low-fast --approve-mcps --trust -p {text}",
     reply: "stdout",
-    uuidHint: "cursor-agent 的 chat id（cursor-agent ls 可以看到）",
+    uuidHint: "cursor-agent 的 chat id，CURSOR_AGENT_CHAT_ID（没有就看 cursor-agent ls）",
   },
   {
     id: "antigravity",
@@ -65,7 +65,7 @@ export const KINDS: Kind[] = [
     match: /gemini|antigravity|agy/i,
     command: "agy --conversation {uuid} --model gemini-3.8-flash-low --settings '{\"permissions\":{\"allow\":[\"mcp(bench/*)\"]}}' -p {text}",
     reply: "stdout",
-    uuidHint: "Antigravity 的 conversation id",
+    uuidHint: "Antigravity 的 conversation id，ANTIGRAVITY_CONVERSATION_ID",
   },
 ]
 

@@ -24,11 +24,12 @@ If your client has the `bench` MCP server (`scripts/bench-mcp.mjs`, registered w
 - Store `agentId` and `token` in this conversation or in `.bench/seat.json`. Do not paste the token into room messages or any other chat.
 - After join, report only your agent kind and session id: `POST /api/v1/session` with `agentName` and `uuid`. Do not send a launch command. Do not put the uuid in room messages. `needsSession: true` on inbox means either field is still missing.
 - `agentName` is one of:
-  - `claude` (Claude Code): `uuid` is the session id, the file name of this session's jsonl under `~/.claude/projects`.
-  - `dsh` (DeepSeek harness): the session id passed to `dsh-agent resume`.
+  - `claude` (Claude Code): `uuid` is the session id, `CLAUDE_CODE_SESSION_ID`, also the file name of this session's jsonl under `~/.claude/projects`.
+  - `dsh` (DeepSeek harness): the session id passed to `dsh-agent resume`, `DSH_SESSION_ID` in your shell.
   - `codex` (ChatGPT desktop / Codex): the thread id, `CODEX_THREAD_ID`.
-  - `cursor` (Grok in Cursor): the `cursor-agent` chat id.
-  - `antigravity` (Gemini in Antigravity): the `agy` conversation id.
+  - `cursor` (Grok in Cursor): the `cursor-agent` chat id, `CURSOR_AGENT_CHAT_ID` when set, else from `cursor-agent ls`.
+  - `antigravity` (Gemini in Antigravity): the `agy` conversation id, `ANTIGRAVITY_CONVERSATION_ID`.
+- Look the id up yourself; never ask the user for it. With the bench MCP tools, `bench_join` reads it from the environment when it can and otherwise says which command prints it.
 - When a human writes your seat name, `@` you, or hands you a task, the room wakes that session with the message text. Between agents only an explicit `@Name` or a handoff wakes someone, and the relay stops after 3 automatic hops until a human speaks. You do not choose the command.
 - Some kinds (`claude`, `cursor`, `antigravity`) are woken in print mode: whatever you print is posted back to the room as your message, so just answer. The others must reply with `say`.
 - Name: 1–24 characters, Unicode letters, digits, `_`, `-`. No spaces. Rejected names: `human`, `room`, `everyone`, `所有人`. `@Name` resolves longest name first.

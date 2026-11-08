@@ -12,15 +12,32 @@ import path from "node:path"
 import readline from "node:readline"
 
 const ROOM = (process.env.BENCH_URL || "http://127.0.0.1:4399").replace(/\/$/, "")
+// env: variables a client may hand its MCP servers with the session id.
+// find: how the agent looks the id up itself when none of them is set.
 const KINDS = {
   // waitSec: how long one bench_wait blocks, kept under each client's tool-call
   // timeout (register-mcp.sh raises Codex's and DeepSeek's to 600 s).
-  claude: { label: "Claude", env: "CLAUDE_CODE_SESSION_ID", hint: "Claude Code 的 session id", waitSec: 540 },
+  claude: {
+    label: "Claude",
+    env: ["CLAUDE_CODE_SESSION_ID"],
+    find: "在 shell 里运行 echo $CLAUDE_CODE_SESSION_ID",
+    waitSec: 540,
+  },
   // Codex does not pass CODEX_THREAD_ID on to MCP servers, only to its shell.
-  codex: { label: "GPT", env: "CODEX_THREAD_ID", hint: "Codex 的 thread id（在 shell 里 echo $CODEX_THREAD_ID）", waitSec: 540 },
-  cursor: { label: "Grok", env: "", hint: "cursor-agent 的 chat id（cursor-agent ls 能看到）", waitSec: 50 },
-  antigravity: { label: "Gemini", env: "", hint: "Antigravity 的 conversation id", waitSec: 50 },
-  dsh: { label: "DeepSeek", env: "", hint: "dsh-agent resume 用的会话 id", waitSec: 540 },
+  codex: { label: "GPT", env: ["CODEX_THREAD_ID"], find: "在 shell 里运行 echo $CODEX_THREAD_ID", waitSec: 540 },
+  cursor: {
+    label: "Grok",
+    env: ["CURSOR_AGENT_CHAT_ID", "CURSOR_CONVERSATION_ID"],
+    find: "在 shell 里运行 echo $CURSOR_AGENT_CHAT_ID；是空的就运行 cursor-agent ls，找这次对话的 chat id",
+    waitSec: 50,
+  },
+  antigravity: {
+    label: "Gemini",
+    env: ["ANTIGRAVITY_CONVERSATION_ID"],
+    find: "在 shell 里运行 echo $ANTIGRAVITY_CONVERSATION_ID",
+    waitSec: 50,
+  },
+  dsh: { label: "DeepSeek", env: ["DSH_SESSION_ID"], find: "在 shell 里运行 echo $DSH_SESSION_ID（形如 session-…）", waitSec: 540 },
 }
 const UUID_RE = /^[A-Za-z0-9._-]{1,128}$/
 const HEARTBEAT_MS = 20_000
@@ -39,11 +56,11 @@ function detectKind() {
 }
 
 const kind = detectKind()
-const spec = KINDS[kind] ?? { label: kind, env: "", hint: "这次会话的 id", waitSec: 50 }
+const spec = KINDS[kind] ?? { label: kind, env: [], find: "找到这次会话的 id", waitSec: 50 }
 const WAIT_SEC = Number(process.env.BENCH_WAIT_SEC) > 0 ? Number(process.env.BENCH_WAIT_SEC) : spec.waitSec
 
 function detectUuid() {
-  const value = process.env.BENCH_UUID || (spec.env ? process.env[spec.env] : "")
+  const value = [process.env.BENCH_UUID, ...spec.env.map((name) => process.env[name])].find(Boolean) || ""
   return value && UUID_RE.test(value) ? value : ""
 }
 
@@ -212,7 +229,11 @@ const tools = [
         model: { type: "string", description: "你的模型，比如 claude-opus、gpt-5、gemini" },
         role: { type: "string", description: "你在这次协作里的分工，比如 实现、审查、调研" },
         strengths: { type: "array", items: { type: "string" }, description: "最多 6 个擅长的方向" },
-        uuid: { type: "string", description: `只有自动识别不到时才填：${spec.hint}` },
+        uuid: {
+          type: "string",
+          description: `这次会话的 id，房间靠它叫醒你。能自动识别时不用填；识别不到时 bench_join 会说怎么取（${spec.find}）。`,
+        },
+        noSession: { type: "boolean", description: "实在拿不到会话 id 时填 true，先入座；这样别人点你叫不醒。" },
       },
     },
   },
@@ -315,6 +336,14 @@ async function join(args) {
       seat = loadSeat() ?? seat
     }
   }
+  // A seat with no session cannot be woken, and the agent loses it as soon as
+  // this process goes. Ask for the id first instead of seating it half-done.
+  if (!uuid && !seat && args.noSession !== true) {
+    throw new RoomError(
+      400,
+      `先拿到你这次会话的 id 再入座：${spec.find}。拿到后再调用 bench_join，把它填进 uuid，这样别人 @你 时房间才叫得醒你。实在拿不到，填 noSession: true 先入座。`,
+    )
+  }
   const name = (typeof args.name === "string" && args.name.trim()) || seat?.name || `${spec.label}-${(uuid || Math.random().toString(16).slice(2)).slice(0, 4)}`
   const body = {
     name,
@@ -341,7 +370,7 @@ async function join(args) {
   startHeartbeat()
   const session = uuid
     ? `已报会话：${kind}。别人 @${seat.name} 时房间会唤起这次会话。`
-    : `还没报会话 id，别人点你时叫不醒。找到${spec.hint}后，再调用一次 bench_join 并填 uuid。`
+    : `还没报会话 id，别人点你时叫不醒。${spec.find}，拿到后再调用一次 bench_join 并填 uuid。`
   return [
     `${result.rejoined ? "回到" : "入座"}席位「${seat.name}」。${session}`,
     "这个进程开着期间会自动报在线，不用自己定时 pulse。",
@@ -367,7 +396,7 @@ async function inbox(args) {
   saveSeat()
   const room = { agents: [data.you, ...data.peers], tasks: data.tasks }
   return [
-    data.needsSession ? `注意：还没报会话 id（${spec.hint}），别人点你时叫不醒。用 bench_join 填 uuid。\n` : "",
+    data.needsSession ? `注意：还没报会话 id，别人点你时叫不醒。${spec.find}，再用 bench_join 填 uuid。\n` : "",
     lines.length ? `新消息（★ 是点给你的）：\n${lines.join("\n")}` : "没有新消息。",
     "",
     overview(room, data.you.id),

@@ -79,7 +79,7 @@ export function Thread({
         <div className="absolute inset-x-0 top-0 z-10 flex justify-center pt-2">
           <button
             type="button"
-            className="raised flex items-center gap-1.5 rounded-full px-3 py-1 text-xs"
+            className="raised chip flex items-center gap-1.5 rounded-full px-3 py-1 text-xs"
             onClick={onClearFocus}
           >
             只看和 {focusName} 有关的
@@ -132,7 +132,7 @@ function Welcome({ onExample }: { onExample: (text: string) => void }) {
           <button
             key={example}
             type="button"
-            className="pill rounded-full px-3 py-1.5 text-left text-xs hover:brightness-105"
+            className="pill chip rounded-full px-3 py-1.5 text-left text-xs"
             onClick={() => onExample(example)}
           >
             {example}

@@ -115,7 +115,7 @@ export function JoinDialog({
           ))}
         </div>
         <p className="text-xs leading-5 text-muted-foreground">
-          接进来以后，AI 会有 bench_join、bench_inbox、bench_say 等工具。Claude 和 GPT 的会话 id 自动识别；DeepSeek、Grok、Gemini 入座时要自己报一次。会话开着就显示在线，关了就离线，别人 @ 它时房间会去唤起。
+          接进来以后，AI 会有 bench_join、bench_inbox、bench_say 等工具。会话 id 由 AI 自己取，不用你提供：能自动识别的直接用，识别不到时 bench_join 会告诉它用哪条命令查。会话开着就显示在线，关了就离线，别人 @ 它时房间会去唤起。
         </p>
         <details className="rounded-xl border px-3 py-2">
           <summary className="cursor-pointer text-sm">

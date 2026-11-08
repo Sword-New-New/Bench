@@ -102,7 +102,7 @@ export function SummaryNudge({
                 <button
                   key={agent.id}
                   type="button"
-                  className="pill flex h-7 shrink-0 items-center gap-1.5 rounded-full pr-2.5 pl-0.5 text-xs font-medium hover:brightness-105 disabled:opacity-50"
+                  className="pill chip flex h-7 shrink-0 items-center gap-1.5 rounded-full pr-2.5 pl-0.5 text-xs font-medium disabled:opacity-50"
                   disabled={busy}
                   onClick={() => onRequest(agent)}
                 >

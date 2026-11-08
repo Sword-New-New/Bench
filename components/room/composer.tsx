@@ -161,49 +161,33 @@ export function Composer({
           }}
         />
         <div className="flex items-center gap-2 px-2 pb-2">
-          <div className="flex min-w-0 flex-1 items-center gap-1 overflow-x-auto">
+          <div className="-my-1.5 flex min-w-0 flex-1 items-center overflow-x-auto py-1.5">
             <span className="shrink-0 px-1 text-xs text-muted-foreground">发给</span>
-            {targets.map(({ kind, seat }) => {
-              const on = hasMention(value, seat.name)
-              return (
-                <button
-                  key={kind.id}
-                  type="button"
-                  title={`@${seat.name}`}
-                  className={`flex shrink-0 items-center gap-1 rounded-full px-2.5 py-1 text-xs transition-[background,box-shadow,color] ${
-                    on ? "text-white" : "pill hover:brightness-105"
-                  }`}
-                  style={
-                    on
-                      ? {
-                          background: `linear-gradient(160deg, color-mix(in oklch, ${kind.color} 80%, white), ${kind.color})`,
-                          boxShadow: `inset 0 1px 0 0 rgb(255 255 255 / .45), 0 4px 12px -4px ${kind.color}`,
-                        }
-                      : undefined
-                  }
-                  onClick={() => {
-                    onChange(toggleMention(value, seat.name))
-                    inputRef.current?.focus()
-                  }}
-                >
-                  <span className="size-1.5 rounded-full" style={{ background: on ? "white" : kind.color }} />
-                  {kind.label}
-                </button>
-              )
-            })}
+            {targets.map(({ kind, seat }) => (
+              <Pick
+                key={kind.id}
+                gone={hasMention(value, seat.name)}
+                title={`@${seat.name}`}
+                onPick={() => {
+                  onChange(toggleMention(value, seat.name))
+                  inputRef.current?.focus()
+                }}
+              >
+                <span className="size-1.5 rounded-full" style={{ background: kind.color }} />
+                {kind.label}
+              </Pick>
+            ))}
             {agents.length > 1 ? (
-              <button
-                type="button"
-                className={`shrink-0 rounded-full px-2.5 py-1 text-xs ${
-                  hasMention(value, "所有人") ? "bg-primary text-primary-foreground" : "pill hover:brightness-105"
-                }`}
-                onClick={() => {
+              <Pick
+                gone={hasMention(value, "所有人")}
+                title="@所有人"
+                onPick={() => {
                   onChange(toggleMention(value, "所有人"))
                   inputRef.current?.focus()
                 }}
               >
                 所有人
-              </button>
+              </Pick>
             ) : null}
             {targets.length === 0 && agents.length <= 1 ? (
               <span className="truncate text-xs text-muted-foreground">还没有 AI 入座 · Enter 发送</span>
@@ -226,5 +210,45 @@ export function Composer({
         </p>
       </Reveal>
     </form>
+  )
+}
+
+// One quick-mention chip. Nobody gets @'d twice in one message, so once its
+// name is in the draft it shrinks away and the chips after it slide over;
+// taking the name back out of the text brings it back.
+function Pick({
+  gone,
+  title,
+  onPick,
+  children,
+}: {
+  gone: boolean
+  title: string
+  onPick: () => void
+  children: React.ReactNode
+}) {
+  return (
+    <div
+      className={`grid shrink-0 transition-[grid-template-columns,opacity] duration-300 ease-[cubic-bezier(.2,.9,.3,1)] motion-reduce:transition-none ${
+        gone ? "grid-cols-[0fr] opacity-0" : "grid-cols-[1fr] opacity-100"
+      }`}
+      inert={gone}
+    >
+      {/* Room above and below for the chip's shadow, which the collapse clips. */}
+      <div className="-my-1 min-w-0 overflow-hidden py-1">
+        <div className="pr-1 pl-0.5">
+          <button
+            type="button"
+            title={title}
+            className={`pill chip flex items-center gap-1 rounded-full px-2.5 py-1 text-xs whitespace-nowrap ${
+              gone ? "scale-50" : "scale-100"
+            }`}
+            onClick={onPick}
+          >
+            {children}
+          </button>
+        </div>
+      </div>
+    </div>
   )
 }

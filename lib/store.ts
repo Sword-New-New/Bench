@@ -339,7 +339,11 @@ export function pickProject(input: unknown): ProjectInfo {
   const all = runtime().projects
   if (all.length === 1) return projectInfo(all[0].id)
   const list = all.map((item) => `「${item.name}」${item.dir ? `（${item.dir}）` : ""}`).join("、")
-  throw new ApiError(409, `房间里有几个项目：${list}。问用户进哪个，再调用 bench_join 并填 project。`)
+  // Not 409: bridges from before projects read any 409 on join as "name taken".
+  throw new ApiError(
+    400,
+    `房间里有几个项目：${list}。问用户进哪个，再调用 bench_join 并填 project。bench_join 没有 project 参数的话，你的 bench 工具是分项目之前的旧版，请用户重开这个会话再接入。`,
+  )
 }
 
 function persist() {

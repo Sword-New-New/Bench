@@ -381,6 +381,13 @@ export function pulse(input: unknown) {
   const body = asRecord(input)
   const actor = actorFrom(body)
   if (actor.type !== "agent") throw new ApiError(400, "只有入座的 agent 能报进度")
+  // Presence only: the MCP bridge keeps a seat online without touching its status line.
+  if (body.keepalive === true && body.status === undefined) {
+    touch(actor.id)
+    const agent = findAgent(actor.id)
+    if (!agent) throw new ApiError(404, "这个席位不在了")
+    return { agent: present(agent) }
+  }
   const status = asString(body.status) as AgentStatus | undefined
   if (!status || !STATUSES.has(status) || status === "offline") {
     throw new ApiError(400, "status 只能是 idle、working 或 blocked")

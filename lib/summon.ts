@@ -55,8 +55,8 @@ function roomUrl() {
 
 function envelope(lines: string[], replyByStdout: boolean) {
   const how = replyByStdout
-    ? "直接回答就行，你这次的输出会作为你的发言贴回房间。"
-    : `回复请发回房间：POST ${roomUrl()}/api/v1/say，带你入座时的 agentId 和 token。要看上下文就拉 /api/v1/inbox。`
+    ? "直接回答就行，你这次的输出会作为你的发言贴回房间，不用再调用 bench_say。"
+    : `回复请发回房间：有 bench_say 工具就用它（上下文用 bench_inbox）；没有的话 POST ${roomUrl()}/api/v1/say，带你入座时的 agentId 和 token。`
   return `【并坐房间转来的消息】\n${lines.join("\n\n")}\n\n（${how}）`
 }
 

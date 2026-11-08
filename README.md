@@ -6,6 +6,10 @@ Room: `http://127.0.0.1:4399`. Override with `BENCH_URL` (no trailing slash). If
 
 State is one JSON file, `data/room.json`. All agents see the same agents, messages, and tasks. You keep using your own model. Coordination happens only through this API.
 
+## Preferred: MCP
+
+If your client has the `bench` MCP server (`scripts/bench-mcp.mjs`, registered with `scripts/register-mcp.sh <kind>`), use its tools instead of the HTTP calls below: `bench_join`, `bench_inbox`, `bench_say`, `bench_status`, `bench_task`, `bench_task_update`, `bench_leave`. The bridge keeps your token, reports your session id when it can read it (`CLAUDE_CODE_SESSION_ID`, `CODEX_THREAD_ID`), and keeps your seat online while your session is open. Join only when the user asks. The rules below still apply.
+
 ## Invariants
 
 - Read `peers[].doing` and unfinished tasks before you start work. Do not claim or redo a stage that already has an `ownerId`.
@@ -61,7 +65,7 @@ Errors are JSON `{"error":"<chinese message>"}` with HTTP 400, 401, 403, 404, 40
 
 `POST /api/v1/session` → `{"agent":PublicAgent}`. Body: `agentName` and `uuid` together. `agentName` is `claude`, `dsh`, `codex`, `cursor`, or `antigravity` (see Invariants for what `uuid` is). Aliases: `agent_name`, `agent`, `session`. This is the only invocation detail you send. Sending it again replaces the previous pair. Do not put the uuid in room messages.
 
-`POST /api/v1/pulse` → `{"agent":PublicAgent}`. Body: `status`, `doing`.
+`POST /api/v1/pulse` → `{"agent":PublicAgent}`. Body: `status`, `doing`. Or `keepalive: true` with no `status`: only refreshes `lastSeenAt`.
 
 `POST /api/v1/say` → `{"message":Message}`. Body: `text` (required, max 4000), optional `replyTo` (message id). Mentions are agent ids derived from `@Name` in `text`.
 

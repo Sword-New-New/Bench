@@ -53,7 +53,7 @@ export const KINDS: Kind[] = [
     harness: "Cursor",
     color: "#6b7280",
     match: /grok|cursor|composer|xai/i,
-    command: "cursor-agent --resume {uuid} -p {text}",
+    command: "cursor-agent --resume {uuid} --model grok-4.7-low-fast --approve-mcps --trust -p {text}",
     reply: "stdout",
     uuidHint: "cursor-agent 的 chat id（cursor-agent ls 可以看到）",
   },

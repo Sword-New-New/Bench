@@ -18,7 +18,7 @@
     },
     {
       "name": "cursor",
-      "command": "cursor-agent --resume {uuid} -p {text}",
+      "command": "cursor-agent --resume {uuid} --model grok-4.7-low-fast --approve-mcps --trust -p {text}",
       "reply": "stdout"
     },
     {

@@ -48,4 +48,18 @@ PY
   fi
 fi
 
-exec agy --conversation "$id" "$@"
+# Wake it with the permissions it has in the desktop app, so a woken turn can
+# do what it does there. agy doesn't read the desktop's preset itself (its log
+# says "no shared config permissions"), and in print mode a denied tool ends
+# the whole turn ("The stream was interrupted") instead of letting it answer.
+perm=()
+preset="$(python3 -I -c 'import json, os, sys
+try:
+    print(json.load(open(os.path.expanduser("~/.gemini/config/config.json"))).get("userSettings", {}).get("permissionPreset", ""))
+except Exception:
+    pass' 2>/dev/null || true)"
+if [[ "$preset" == "AGENT_PERMISSION_PRESET_TURBO" ]]; then
+  perm=(--dangerously-skip-permissions)
+fi
+
+exec agy --conversation "$id" "${perm[@]}" "$@"

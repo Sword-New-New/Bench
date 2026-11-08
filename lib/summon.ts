@@ -1,4 +1,5 @@
 import { spawn } from "node:child_process"
+import { StringDecoder } from "node:string_decoder"
 
 import { adapterFor, commandFor, summonPath, type Adapter } from "@/lib/adapters"
 import { createParser, liveLine } from "@/lib/events"
@@ -26,7 +27,11 @@ import type { Message, RoomSummary, Run } from "@/lib/types"
 
 const NOTE_GAP_MS = 30_000
 const RUN_LIMIT_MS = 15 * 60_000
-const OUT_LIMIT = 64_000
+// Every line of a wake's output is read, however much there is: the answer
+// is in the last event, and a stream of edits (each tool result carries the
+// whole file) passed 1MB once, which used to be where reading stopped. Only
+// a single line longer than this is dropped, and the room says so.
+const LINE_LIMIT = 8 * 1024 * 1024
 // The seat line follows the steps, but not faster than this.
 const LIVE_GAP_MS = 800
 // A client that prints an event stream says something within seconds of
@@ -176,11 +181,12 @@ function launch(
   command: string,
   run: Run,
   live: (line: string) => void,
-  done: (result: { out: string; failure?: string; stopped?: boolean }) => void,
+  done: (result: { out: string; failure?: string; stopped?: boolean; lost?: boolean }) => void,
 ) {
   const parser = createParser()
+  const decoder = new StringDecoder("utf8")
   let pending = ""
-  let size = 0
+  let lost = false
   let err = ""
   let finished = false
   let shownAt = 0
@@ -203,7 +209,7 @@ function launch(
     clearInterval(quiet)
     if (pending) take(pending)
     const why = failure ?? (code !== 0 ? tail(err, 160) || `退出码 ${code}` : undefined)
-    done(stopped ? { out: "", stopped } : { out: parser.answer(), failure: why })
+    done(stopped ? { out: "", stopped } : { out: parser.answer(), failure: why, lost })
   }
 
   // Its own process group, so stopping it also ends what the shell started.
@@ -256,11 +262,13 @@ function launch(
         putStep(run, { id: "wait", at: run.startedAt, kind: "note", title: `等了 ${seconds(Date.now() - run.startedAt)} 才开始回应`, state: "done" })
       }
     }
-    if (size > OUT_LIMIT * 16) return
-    size += chunk.length
-    const lines = (pending + chunk.toString("utf8")).split("\n")
+    const lines = (pending + decoder.write(chunk)).split("\n")
     pending = lines.pop() ?? ""
     for (const line of lines) take(line)
+    if (pending.length > LINE_LIMIT) {
+      pending = ""
+      lost = true
+    }
   })
   child.stderr.on("data", (chunk: Buffer) => {
     err = (err + chunk.toString("utf8")).slice(-4000)
@@ -347,9 +355,12 @@ function run(agentId: string) {
   queue.running = true
   const log = startRun(agentId, agent.name, "reply")
   const seat = busy(agentId, "被点到了，正在回复")
-  launch(agent, command, log, seat.live, ({ out, failure, stopped }) => {
+  launch(agent, command, log, seat.live, ({ out, failure, stopped, lost }) => {
     queue.running = false
     const still = agentState(agentId)
+    if (lost && !stopped) {
+      postSystem(`${agent.name} 这次有一行输出太长（超过 8MB）没读，下面贴出的回答可能不完整，「查看过程」里能看到读到的部分`)
+    }
     if (stopped) {
       // Stopped for an interjection: pick these messages up again after it.
       if (queue.whisper !== undefined) queue.carry = body

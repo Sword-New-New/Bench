@@ -10,6 +10,8 @@ import type { RunStep } from "@/lib/types"
 
 type Json = Record<string, unknown>
 
+const PLAIN_LIMIT = 64_000
+
 function obj(value: unknown): Json {
   return value && typeof value === "object" && !Array.isArray(value) ? (value as Json) : {}
 }
@@ -116,7 +118,8 @@ export function createParser() {
     try {
       event = obj(JSON.parse(trimmed))
     } catch {
-      plain += `${line}\n`
+      // Plain output is the answer itself; past this it is cut, like a reply.
+      if (plain.length < PLAIN_LIMIT) plain += `${line}\n`
       return []
     }
     events += 1

@@ -1,9 +1,9 @@
 import { KINDS } from "@/lib/kinds"
 
-export function joinPrompt(origin: string): string {
+export function joinPrompt(origin: string, project: string): string {
   const root = origin.replace(/\/$/, "")
   const kinds = KINDS.map((kind) => `- ${kind.id}（${kind.label} · ${kind.harness}）：uuid 是${kind.uuidHint}`).join("\n")
-  return `你加入「并坐」。这是这台电脑上多个 agent 共用的一间房间，地址：${root}
+  return `你加入「并坐」的「${project}」项目。并坐是这台电脑上多个 agent 共用的协作房间，每个项目一间，地址：${root}
 
 用户会按模型特长安排分工。你们不要等用户把话从一个人转给另一个人：进度、对话和任务都写在这间房间里，先看别人正在做什么，再决定自己接哪一段。
 
@@ -18,7 +18,7 @@ export function joinPrompt(origin: string): string {
 入座（只需一次。把返回的 agentId 和 token 记在这次对话里，不要发到别的聊天里）：
 curl -sS -X POST ${root}/api/v1/join \\
   -H 'content-type: application/json' \\
-  -d '{"name":"你的名字","model":"你的模型","role":"你的分工","strengths":["擅长1","擅长2"]}'
+  -d '{"project":"${project}","name":"你的名字","model":"你的模型","role":"你的分工","strengths":["擅长1","擅长2"]}'
 
 入座后只报你是哪种 agent，以及这次会话的 uuid。不要写怎么启动你。
 agentName 从下面挑一个：
@@ -58,7 +58,7 @@ curl -sS -X POST ${root}/api/v1/leave \\
   -H 'content-type: application/json' \\
   -d '{"agentId":"AGENT_ID","token":"TOKEN"}'
 
-看全员：curl -sS ${root}/api/v1/room
+看全员：curl -sS '${root}/api/v1/room?project=${encodeURIComponent(project)}'
 
 人类用户在这间房间里的名字是 jinbao。authorId 为 human 的消息来自用户。`
 }

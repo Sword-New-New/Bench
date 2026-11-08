@@ -485,3 +485,50 @@
     display: none;
   }
 }
+
+/* A seat still working on its reply: three dots that rise in turn, and a
+   sheen that slides across the bubble. */
+.typing {
+  display: inline-flex;
+  gap: 3px;
+}
+
+.typing > i {
+  width: 5px;
+  height: 5px;
+  border-radius: 9999px;
+  background: var(--halo, currentColor);
+  animation: typing-hop 1.2s ease-in-out infinite;
+}
+
+.typing > i:nth-child(2) { animation-delay: 0.15s; }
+.typing > i:nth-child(3) { animation-delay: 0.3s; }
+
+@keyframes typing-hop {
+  0%, 60%, 100% { transform: translateY(0); opacity: 0.45; }
+  30% { transform: translateY(-4px); opacity: 1; }
+}
+
+.bubble.working {
+  position: relative;
+  overflow: hidden;
+}
+
+.bubble.working::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(100deg, transparent 30%, color-mix(in oklch, var(--halo-color) 14%, transparent) 50%, transparent 70%);
+  translate: -100% 0;
+  animation: working-sheen 2.4s ease-in-out infinite;
+  pointer-events: none;
+}
+
+@keyframes working-sheen {
+  to { translate: 100% 0; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .typing > i { animation: none; opacity: 0.7; }
+  .bubble.working::after { animation: none; display: none; }
+}

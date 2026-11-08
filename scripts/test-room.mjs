@@ -1,10 +1,14 @@
 const origin = (process.env.BENCH_URL || "http://127.0.0.1:4399").replace(/\/$/, "")
 
+// Runs in a project of its own, deleted at the end; the projects in use are
+// left alone. Every call names it.
+let project = ""
+
 async function request(pathname, { method = "GET", body } = {}) {
   const res = await fetch(`${origin}${pathname}`, {
     method,
     headers: body ? { "content-type": "application/json" } : undefined,
-    body: body ? JSON.stringify(body) : undefined,
+    body: body ? JSON.stringify(project ? { project, ...body } : body) : undefined,
   })
   const data = await res.json().catch(() => ({}))
   return { status: res.status, data }
@@ -15,13 +19,21 @@ function assert(condition, message) {
 }
 
 async function main() {
-  const reset = await request("/api/v1/reset", {
-    method: "POST",
-    body: { confirm: "清空" },
-  })
-  assert(reset.status === 200, `清空失败 ${reset.status} ${reset.data.error || ""}`)
-
   const stamp = Date.now().toString(36)
+  const made = await request("/api/v1/projects", { method: "POST", body: { as: "human", name: `自测${stamp}` } })
+  assert(made.status === 201, `建测试项目失败 ${made.status} ${made.data.error || ""}`)
+  project = made.data.project.id
+  try {
+    await steps(stamp)
+  } finally {
+    const id = project
+    project = ""
+    await request(`/api/v1/projects/${id}`, { method: "POST", body: { as: "human", action: "delete", confirm: "删除" } })
+  }
+  console.log("room ok")
+}
+
+async function steps(stamp) {
   const alpha = await request("/api/v1/join", {
     method: "POST",
     body: { name: `甲${stamp}`, model: "grok-4.7", role: "协调", strengths: ["拆任务"] },
@@ -106,6 +118,9 @@ async function main() {
       action: "handoff",
       to: alpha.data.agent.name,
       note: "空状态好了，请看失败时谁负责说",
+      done: "导航的空状态",
+      left: "失败时的提示语",
+      caveats: "无",
     },
   })
   assert(handed.status === 200, `交接失败 ${handed.data.error || ""}`)
@@ -133,7 +148,7 @@ async function main() {
   })
   assert(cleared.status === 200, "结束时清空失败")
   assert(cleared.data.agents.length === 0, "清空后还有席位")
-  console.log("room ok")
+  assert(cleared.data.project.id === project, "清空的不是测试项目")
 }
 
 main().catch((error) => {

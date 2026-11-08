@@ -1,6 +1,7 @@
 import { boot } from "@/lib/boot"
 import { ApiError, asRecord, handle, json, readBody } from "@/lib/http"
 import { listRuns } from "@/lib/runs"
+import { inSeat } from "@/lib/store"
 import { stopAgent, whisper } from "@/lib/summon"
 
 // What you said to this seat alone, and what it answered.
@@ -21,8 +22,8 @@ export async function POST(request: Request, ctx: RouteContext<"/api/v1/agents/[
     const { id } = await ctx.params
     const body = asRecord(await readBody(request))
     if (body.as !== "human") throw new ApiError(400, "只有这台电脑上的人能这么做")
-    if (body.action === "stop") return json(stopAgent(id))
-    if (body.action === "whisper") return json(whisper(id, typeof body.text === "string" ? body.text : ""))
+    if (body.action === "stop") return json(inSeat(id, () => stopAgent(id)))
+    if (body.action === "whisper") return json(inSeat(id, () => whisper(id, typeof body.text === "string" ? body.text : "")))
     throw new ApiError(400, "action 只能是 stop 或 whisper")
   } catch (error) {
     return handle(error)

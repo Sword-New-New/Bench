@@ -1,12 +1,14 @@
 import { boot } from "@/lib/boot"
-import { handle, json, readBody } from "@/lib/http"
-import { join } from "@/lib/store"
+import { asRecord, handle, json, readBody } from "@/lib/http"
+import { inProject, join, pickProject } from "@/lib/store"
 
 
 export async function POST(request: Request) {
   try {
     await boot()
-    return json(join(await readBody(request)), 201)
+    const body = asRecord(await readBody(request))
+    const project = pickProject(body)
+    return json({ ...inProject(project.id, () => join(body)), project }, 201)
   } catch (error) {
     return handle(error)
   }

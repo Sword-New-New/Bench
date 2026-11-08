@@ -1,6 +1,6 @@
 import { boot } from "@/lib/boot"
 import { ApiError, asRecord, asString, handle, json, readBody } from "@/lib/http"
-import { debugClearSummary, debugForgetSeen, postSystem, snapshot } from "@/lib/store"
+import { debugClearSummary, debugForgetSeen, inRequest, postSystem, snapshot } from "@/lib/store"
 
 // Things that rarely happen on their own, triggered from the debug menu so the
 // UI for them can be checked. Off outside `next dev`.
@@ -16,20 +16,24 @@ export async function POST(request: Request) {
     await boot()
     const body = asRecord(await readBody(request))
     if (body.as !== "human") throw new ApiError(403, "调试接口只给人用")
-    const action = asString(body.action)
-    if (action === "note") {
-      const text = NOTES[asString(body.kind) ?? ""]
-      if (!text) throw new ApiError(400, "没有这种系统消息")
-      postSystem(text)
-      return json(snapshot())
-    }
-    if (action === "forget") return json(debugForgetSeen(asString(body.agentId) ?? ""))
-    if (action === "clearSummary") {
-      debugClearSummary()
-      return json(snapshot())
-    }
-    throw new ApiError(400, "action 只能是 note、forget 或 clearSummary")
+    return json(inRequest(body, () => debug(body)))
   } catch (error) {
     return handle(error)
   }
+}
+
+function debug(body: Record<string, unknown>) {
+  const action = asString(body.action)
+  if (action === "note") {
+    const text = NOTES[asString(body.kind) ?? ""]
+    if (!text) throw new ApiError(400, "没有这种系统消息")
+    postSystem(text)
+    return snapshot()
+  }
+  if (action === "forget") return debugForgetSeen(asString(body.agentId) ?? "")
+  if (action === "clearSummary") {
+    debugClearSummary()
+    return snapshot()
+  }
+  throw new ApiError(400, "action 只能是 note、forget 或 clearSummary")
 }

@@ -1,7 +1,7 @@
 "use client"
 
 import { useEffect, useState, useSyncExternalStore } from "react"
-import { Check, Copy, Loader2, Play, Search, X } from "lucide-react"
+import { Check, Copy, Loader2, Play, Plus, Search, X } from "lucide-react"
 import { toast } from "sonner"
 
 import { api } from "@/components/room/api"
@@ -19,7 +19,7 @@ import { Input } from "@/components/ui/input"
 import { KINDS, kindById, kindOf, type Kind } from "@/lib/kinds"
 import { joinPrompt } from "@/lib/prompt"
 import type { RegisterResult } from "@/lib/register"
-import type { PublicAgent } from "@/lib/types"
+import type { ProjectInfo, PublicAgent } from "@/lib/types"
 
 function subscribeOrigin() {
   return () => {}
@@ -152,18 +152,26 @@ function KindTile({
 
 export function JoinDialog({
   open,
+  project,
   preset,
   agents,
+  spawnable,
   busy,
   onOpenChange,
+  onSpawn,
   onReset,
 }: {
   open: boolean
+  // The project they join; everything here is for it.
+  project: ProjectInfo | null
   // A kind to have picked already, when you came from its row.
   preset: string | null
   agents: PublicAgent[]
+  // Kinds the room can start a session of itself.
+  spawnable: string[]
   busy: boolean
   onOpenChange: (open: boolean) => void
+  onSpawn: (kind: string) => void
   onReset: () => void
 }) {
   const origin = useSyncExternalStore(subscribeOrigin, readOrigin, serverOrigin)
@@ -193,7 +201,9 @@ export function JoinDialog({
       .catch(() => {})
   }, [open])
 
-  const prompt = joinPrompt(origin)
+  const projectName = project?.name ?? "默认项目"
+  const prompt = joinPrompt(origin, projectName)
+  const ask = `接入并坐的「${projectName}」项目，名字叫 …，分工是 …`
   const words = query.trim().toLowerCase()
   const shown = KINDS.filter((kind) =>
     words ? [kind.id, kind.label, kind.harness].some((text) => text.toLowerCase().includes(words)) : true,
@@ -225,8 +235,10 @@ export function JoinDialog({
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent className="max-h-[calc(100dvh-2rem)] grid-cols-[minmax(0,1fr)] overflow-y-auto sm:max-w-2xl">
         <DialogHeader>
-          <DialogTitle>把 AI 接进房间</DialogTitle>
-          <DialogDescription>选好要接的 AI，在终端里运行一次给出的命令，再让它入座。</DialogDescription>
+          <DialogTitle>把 AI 接进「{projectName}」</DialogTitle>
+          <DialogDescription>
+            选好要接的 AI，在终端里运行一次给出的命令，再在它的会话里说一句话入座。注册是每个 AI 一次，所有项目共用；进哪个项目看那句话。
+          </DialogDescription>
         </DialogHeader>
         <section className="space-y-2">
           <div className="flex items-center gap-2">
@@ -276,14 +288,41 @@ export function JoinDialog({
                 </Button>
               </div>
               {results ? <Results results={results} /> : null}
-              <p className="text-xs leading-5 text-muted-foreground">
-                以后不用再做。然后在{chosen.length > 1 ? "每个" : "这个"} AI 的新会话里说一句「接入并坐，名字叫 …，分工是 …」。
-              </p>
+              <p className="text-xs leading-5 text-muted-foreground">以后不用再做，换项目也不用重跑。</p>
             </>
           ) : (
             <p className="rounded-lg border border-dashed px-3 py-2.5 text-xs text-muted-foreground">先在上面选要接的 AI，可以多选。</p>
           )}
         </section>
+        <section className="space-y-2">
+          <h3 className="text-sm font-medium">3. 在它的会话里说</h3>
+          <CopyLine text={ask} />
+          <p className="text-xs leading-5 text-muted-foreground">
+            {project?.dir
+              ? `它的工作目录在 ${project.dir} 里面的话，不说项目名也会进这个项目。`
+              : "给项目设一个目录后，在那个目录里干活的 AI 不说项目名也会自动进来。"}
+            它原来坐在别的项目里的话，会离开那边。
+          </p>
+        </section>
+        {spawnable.length > 0 ? (
+          <section className="space-y-2">
+            <h3 className="text-sm font-medium">或者让房间直接开一个新会话</h3>
+            <div className="flex flex-wrap gap-1.5">
+              {spawnable.map((id) => {
+                const kind = kindById(id)
+                return (
+                  <Button key={id} type="button" variant="outline" size="sm" className="rounded-full" onClick={() => onSpawn(id)}>
+                    <Plus />
+                    新的 {kind?.label ?? id} 会话
+                  </Button>
+                )
+              })}
+            </div>
+            <p className="text-xs leading-5 text-muted-foreground">
+              房间在后台建好会话并入座{project?.dir ? `，默认开在项目目录 ${project.dir}` : ""}，不用你去打开它。
+            </p>
+          </section>
+        ) : null}
         <p className="text-xs leading-5 text-muted-foreground">
           接进来以后，AI 会有 bench_join、bench_inbox、bench_say 等工具。会话 id 由 AI 自己取，不用你提供：能自动识别的直接用，识别不到时 bench_join 会告诉它用哪条命令查。会话开着就显示在线，关了就离线，别人 @ 它时房间会去唤起。
         </p>
@@ -297,14 +336,14 @@ export function JoinDialog({
           <span className="text-xs text-muted-foreground">房间地址 {origin}</span>
           {confirmReset ? (
             <div className="flex items-center gap-2">
-              <span className="text-xs text-muted-foreground">席位、对话和任务都会删掉。</span>
+              <span className="text-xs text-muted-foreground">这个项目的席位、对话和任务都会删掉。</span>
               <Button type="button" variant="destructive" size="sm" disabled={busy} onClick={onReset}>
                 确认清空
               </Button>
             </div>
           ) : (
             <Button type="button" variant="ghost" size="sm" onClick={() => setConfirmReset(true)}>
-              清空记录
+              清空这个项目的记录
             </Button>
           )}
         </div>

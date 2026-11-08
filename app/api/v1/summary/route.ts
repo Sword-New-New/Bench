@@ -1,6 +1,6 @@
 import { boot } from "@/lib/boot"
 import { asRecord, asString, handle, json, readBody } from "@/lib/http"
-import { summaryAction } from "@/lib/store"
+import { inRequest, summaryAction } from "@/lib/store"
 import { requestSummary } from "@/lib/summon"
 
 
@@ -10,10 +10,13 @@ export async function POST(request: Request) {
   try {
     await boot()
     const body = asRecord(await readBody(request))
-    if (body.as === "human" && asString(body.action) === "request") {
-      return json(requestSummary(asString(body.agentId) ?? ""))
-    }
-    return json(summaryAction(body))
+    return json(
+      inRequest(body, () =>
+        body.as === "human" && asString(body.action) === "request"
+          ? requestSummary(asString(body.agentId) ?? "")
+          : summaryAction(body),
+      ),
+    )
   } catch (error) {
     return handle(error)
   }

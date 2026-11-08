@@ -1,6 +1,8 @@
+import { AsyncLocalStorage } from "node:async_hooks"
 import { randomBytes } from "node:crypto"
 import { EventEmitter } from "node:events"
-import { mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs"
+import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs"
+import { homedir } from "node:os"
 import path from "node:path"
 
 import { hasAdapter } from "@/lib/adapters"
@@ -12,6 +14,8 @@ import type {
   Actor,
   AgentStatus,
   Message,
+  Project,
+  ProjectInfo,
   PublicAgent,
   RoomSnapshot,
   RoomSummary,
@@ -65,9 +69,11 @@ type State = {
   summarySkipSeq?: number
 }
 
-type Runtime = {
+// One room per project: its own seats, talk, tasks and summary. A session
+// sits in one project at a time.
+type Room = {
+  id: string
   state: State
-  bus: EventEmitter
   // In-memory only. waiting: seats blocked in a wait call right now.
   // standby: seats that run a wait loop, until this time; the room delivers
   // to them through the loop instead of waking them with a command.
@@ -77,19 +83,39 @@ type Runtime = {
   summaryJob?: { agentId: string; upToSeq: number }
 }
 
-const globalStore = globalThis as typeof globalThis & { __bench?: Runtime }
+type ProjectRecord = { id: string; name: string; dir?: string; createdAt: number }
+
+type Runtime = {
+  projects: ProjectRecord[]
+  rooms: Map<string, Room>
+  bus: EventEmitter
+  // Which project the code running now acts on. Routes enter it once
+  // (`inProject`, `inSeat`); everything they call, and the wakes they start,
+  // carry it along.
+  scope: AsyncLocalStorage<string>
+}
+
+const globalStore = globalThis as typeof globalThis & { __benchRooms?: Runtime }
 
 function emptyState(): State {
   return { rev: 0, seq: 0, agents: [], messages: [], tasks: [] }
 }
 
-function dataFile() {
-  return path.join(process.cwd(), "data", "room.json")
+function dataDir() {
+  return path.join(process.cwd(), "data")
 }
 
-function load(): State {
+function projectsFile() {
+  return path.join(dataDir(), "projects.json")
+}
+
+function roomFile(id: string) {
+  return path.join(dataDir(), "projects", `${id}.json`)
+}
+
+function load(file: string): State {
   try {
-    const parsed = JSON.parse(readFileSync(dataFile(), "utf8")) as Partial<State>
+    const parsed = JSON.parse(readFileSync(file, "utf8")) as Partial<State>
     if (!parsed || !Array.isArray(parsed.agents) || !Array.isArray(parsed.messages)) {
       return emptyState()
     }
@@ -107,33 +133,244 @@ function load(): State {
   }
 }
 
-function runtime(): Runtime {
-  if (!globalStore.__bench) {
-    const bus = new EventEmitter()
-    bus.setMaxListeners(200)
-    globalStore.__bench = { state: load(), bus }
-  }
-  return globalStore.__bench
-}
-
-function persist() {
-  const file = dataFile()
+function writeJson(file: string, data: unknown) {
   mkdirSync(path.dirname(file), { recursive: true })
   const tmp = `${file}.tmp`
-  writeFileSync(tmp, JSON.stringify(runtime().state, null, 2))
+  writeFileSync(tmp, JSON.stringify(data, null, 2))
   renameSync(tmp, file)
 }
 
+// The projects, and each one's room. A room saved before there were projects
+// (data/room.json) becomes the first project, 「默认项目」.
+function loadProjects(): ProjectRecord[] {
+  try {
+    const parsed = JSON.parse(readFileSync(projectsFile(), "utf8")) as { projects?: ProjectRecord[] }
+    if (Array.isArray(parsed.projects)) return parsed.projects
+  } catch {}
+  const first: ProjectRecord = { id: uid("p"), name: "默认项目", createdAt: Date.now() }
+  const old = path.join(dataDir(), "room.json")
+  if (existsSync(old)) {
+    writeJson(roomFile(first.id), load(old))
+    renameSync(old, `${old}.before-projects`)
+  }
+  writeJson(projectsFile(), { projects: [first] })
+  return [first]
+}
+
+function runtime(): Runtime {
+  if (!globalStore.__benchRooms) {
+    const bus = new EventEmitter()
+    bus.setMaxListeners(200)
+    const projects = loadProjects()
+    const rooms = new Map(projects.map((project) => [project.id, { id: project.id, state: load(roomFile(project.id)) }]))
+    globalStore.__benchRooms = { projects, rooms, bus, scope: new AsyncLocalStorage() }
+  }
+  return globalStore.__benchRooms
+}
+
+// The room the running code acts on.
+function room(): Room {
+  const rt = runtime()
+  const id = rt.scope.getStore()
+  const found = id ? rt.rooms.get(id) : undefined
+  if (found) return found
+  throw new ApiError(400, id ? "这个项目不在了" : "没指明是哪个项目")
+}
+
+export function currentProject() {
+  return room().id
+}
+
+export function currentProjectInfo() {
+  return projectInfo(room().id)
+}
+
+// For callbacks that run later (a wake's output, its timers): they act on the
+// project that is current now. Once that project is deleted they do nothing.
+export function bindProject<A extends unknown[]>(fn: (...args: A) => void) {
+  const id = currentProject()
+  return (...args: A) => {
+    if (runtime().rooms.has(id)) runtime().scope.run(id, () => fn(...args))
+  }
+}
+
+export function inProject<T>(id: string, fn: () => T): T {
+  if (!runtime().rooms.has(id)) throw new ApiError(404, "没有这个项目")
+  return runtime().scope.run(id, fn)
+}
+
+// The project a seat sits in. Seat ids are unique across projects.
+export function projectOfSeat(agentId: string) {
+  for (const [id, item] of runtime().rooms) if (item.state.agents.some((agent) => agent.id === agentId)) return id
+  return undefined
+}
+
+export function inSeat<T>(agentId: string, fn: () => T): T {
+  const id = projectOfSeat(agentId)
+  if (!id) throw new ApiError(404, "这个席位不在了")
+  return runtime().scope.run(id, fn)
+}
+
+// What a request acts on: the seat it comes from, the project it names
+// (body or ?project=), or the only project there is.
+export function inRequest<T>(input: { agentId?: unknown; project?: unknown }, fn: () => T): T {
+  if (typeof input.agentId === "string" && input.agentId) return inSeat(input.agentId, fn)
+  const named = typeof input.project === "string" ? input.project.trim() : ""
+  if (named) return inProject(findProject(named).id, fn)
+  const all = runtime().projects
+  if (all.length === 1) return inProject(all[0].id, fn)
+  throw new ApiError(400, `没指明是哪个项目（有：${all.map((item) => item.name).join("、")}）`)
+}
+
+function findProject(ref: string) {
+  const all = runtime().projects
+  const lower = ref.toLowerCase()
+  const found = all.find((item) => item.id === ref) ?? all.find((item) => item.name.toLowerCase() === lower)
+  if (!found) throw new ApiError(404, `没有叫「${ref}」的项目（有：${all.map((item) => item.name).join("、")}）`)
+  return found
+}
+
+function projectInfo(id: string): ProjectInfo {
+  const found = runtime().projects.find((item) => item.id === id)
+  if (!found) throw new ApiError(404, "没有这个项目")
+  return { id: found.id, name: found.name, dir: found.dir, createdAt: found.createdAt }
+}
+
+function saveProjects() {
+  writeJson(projectsFile(), { projects: runtime().projects })
+  runtime().bus.emit("projects")
+}
+
+export function listProjects(): Project[] {
+  const now = Date.now()
+  return runtime().projects.map((item) =>
+    inProject(item.id, () => {
+      const state = room().state
+      const seats = state.agents.map((agent) => present(agent, now))
+      return {
+        ...projectInfo(item.id),
+        seats: seats.length,
+        online: seats.filter((agent) => agent.status !== "offline").length,
+        working: seats.filter((agent) => agent.status === "working").length,
+        lastAt: Math.max(item.createdAt, state.messages.at(-1)?.createdAt ?? 0),
+      }
+    }),
+  )
+}
+
+function projectFields(body: Record<string, unknown>, current?: ProjectRecord) {
+  const name = body.name === undefined && current ? current.name : clip(asString(body.name) ?? "", 24)
+  if (!name) throw new ApiError(400, "给项目起个名字")
+  if (/[「」"\n]/.test(name)) throw new ApiError(400, "项目名里不要有引号、「」或换行")
+  const taken = runtime().projects.find((item) => item.name.toLowerCase() === name.toLowerCase() && item.id !== current?.id)
+  if (taken) throw new ApiError(409, `已经有叫「${name}」的项目了`)
+  let dir = current?.dir
+  if (body.dir !== undefined) {
+    const raw = (asString(body.dir) ?? "").replace(/^~(?=\/|$)/, homedir())
+    if (!raw) dir = undefined
+    else {
+      if (!path.isAbsolute(raw)) throw new ApiError(400, "目录要填完整路径，比如 /home/you/project")
+      const resolved = path.resolve(raw)
+      if (!existsSync(resolved)) throw new ApiError(400, `${resolved} 不存在`)
+      dir = resolved
+    }
+  }
+  return { name, dir }
+}
+
+export function createProject(input: unknown) {
+  const fields = projectFields(asRecord(input))
+  const record: ProjectRecord = { id: uid("p"), ...fields, createdAt: Date.now() }
+  const rt = runtime()
+  rt.projects.push(record)
+  rt.rooms.set(record.id, { id: record.id, state: emptyState() })
+  saveProjects()
+  inProject(record.id, persist)
+  return { project: projectInfo(record.id) }
+}
+
+export function updateProject(id: string, input: unknown) {
+  const record = runtime().projects.find((item) => item.id === id)
+  if (!record) throw new ApiError(404, "没有这个项目")
+  Object.assign(record, projectFields(asRecord(input), record))
+  saveProjects()
+  inProject(id, () => {
+    bumpRev()
+    commit()
+  })
+  return { project: projectInfo(id) }
+}
+
+// Deletes a project and everything in its room. The seats' sessions are left
+// alone; they can join another project.
+export function deleteProject(id: string) {
+  const rt = runtime()
+  if (!rt.rooms.has(id)) throw new ApiError(404, "没有这个项目")
+  if (rt.projects.length === 1) throw new ApiError(400, "至少要留一个项目")
+  rt.projects = rt.projects.filter((item) => item.id !== id)
+  rt.rooms.delete(id)
+  saveProjects()
+  rmSync(roomFile(id), { force: true })
+  rt.bus.emit("room", id)
+  return { deleted: id }
+}
+
+// Which project a joining seat goes into: the one it names; else the one this
+// session already sits in; else the one whose folder holds its working
+// directory (the deepest such folder); else the only project there is.
+export function pickProject(input: unknown): ProjectInfo {
+  const body = asRecord(input)
+  const named = asString(body.project)
+  if (named) return projectInfo(findProject(named).id)
+  const agentName = asString(body.agentName ?? body.agent_name ?? body.agent)
+  const uuid = asString(body.uuid ?? body.session)
+  if (agentName && uuid) {
+    for (const [id, item] of runtime().rooms) {
+      if (item.state.agents.some((agent) => agent.agentName === agentName && agent.session === uuid)) return projectInfo(id)
+    }
+  }
+  const cwd = asString(body.cwd)
+  if (cwd && path.isAbsolute(cwd)) {
+    const inside = runtime()
+      .projects.filter((item) => item.dir && (cwd === item.dir || cwd.startsWith(`${item.dir}${path.sep}`)))
+      .sort((a, b) => (b.dir?.length ?? 0) - (a.dir?.length ?? 0))
+    if (inside[0]) return projectInfo(inside[0].id)
+  }
+  const all = runtime().projects
+  if (all.length === 1) return projectInfo(all[0].id)
+  const list = all.map((item) => `「${item.name}」${item.dir ? `（${item.dir}）` : ""}`).join("、")
+  throw new ApiError(409, `房间里有几个项目：${list}。问用户进哪个，再调用 bench_join 并填 project。`)
+}
+
+function persist() {
+  const current = room()
+  writeJson(roomFile(current.id), current.state)
+}
+
 function emit() {
-  runtime().bus.emit("room")
+  runtime().bus.emit("room", room().id)
 }
 
-export function subscribe(listener: () => void) {
+// Changes to one project's room.
+export function subscribe(project: string, listener: () => void) {
   const bus = runtime().bus
-  bus.on("room", listener)
-  return () => bus.off("room", listener)
+  const on = (id: string) => id === project && listener()
+  bus.on("room", on)
+  return () => bus.off("room", on)
 }
 
+// Changes to the project list, or to what it shows of each project.
+export function subscribeProjects(listener: () => void) {
+  const bus = runtime().bus
+  bus.on("projects", listener)
+  bus.on("room", listener)
+  return () => {
+    bus.off("projects", listener)
+    bus.off("room", listener)
+  }
+}
+
+// Called inside the message's project, so the listener acts on it too.
 export function onMessage(listener: (message: Message) => void) {
   const bus = runtime().bus
   bus.on("message", listener)
@@ -194,10 +431,11 @@ function sortTasks(tasks: Task[]) {
 }
 
 export function snapshot(): RoomSnapshot {
-  const state = runtime().state
+  const state = room().state
   const talk = talkSince(summaryBase())
   const chars = talk.reduce((sum, message) => sum + message.text.length, 0)
   return {
+    project: projectInfo(room().id),
     agents: sortAgents(state.agents.map((agent) => present(agent))),
     messages: state.messages,
     tasks: sortTasks(state.tasks),
@@ -206,17 +444,17 @@ export function snapshot(): RoomSnapshot {
     summary: state.summary ?? null,
     sinceSummary: { count: talk.length, chars },
     summaryDue: chars >= CATCH_UP_CHARS,
-    summaryWriter: runtime().summaryJob?.agentId ?? null,
+    summaryWriter: room().summaryJob?.agentId ?? null,
   }
 }
 
 function summaryBase() {
-  const state = runtime().state
+  const state = room().state
   return Math.max(state.summary?.upToSeq ?? 0, state.summarySkipSeq ?? 0)
 }
 
 function talkSince(after: number) {
-  return runtime().state.messages.filter((message) => message.seq > after && message.kind !== "system")
+  return room().state.messages.filter((message) => message.seq > after && message.kind !== "system")
 }
 
 function talkLine(message: Message) {
@@ -225,16 +463,21 @@ function talkLine(message: Message) {
 }
 
 function bumpRev() {
-  runtime().state.rev += 1
+  room().state.rev += 1
 }
 
-export function refreshRoom() {
-  bumpRev()
-  commit()
+// Every project's room, when something they all show changed (the wake commands).
+export function refreshRooms() {
+  for (const id of runtime().rooms.keys()) {
+    inProject(id, () => {
+      bumpRev()
+      commit()
+    })
+  }
 }
 
 function nextSeq() {
-  const state = runtime().state
+  const state = room().state
   state.seq += 1
   state.rev += 1
   return state.seq
@@ -246,19 +489,19 @@ function commit() {
 }
 
 function findAgent(id: string) {
-  return runtime().state.agents.find((agent) => agent.id === id)
+  return room().state.agents.find((agent) => agent.id === id)
 }
 
 function resolveAgent(ref: string) {
-  return runtime().state.agents.find((agent) => agent.id === ref || agent.name === ref)
+  return room().state.agents.find((agent) => agent.id === ref || agent.name === ref)
 }
 
 function waitingOf() {
-  return (runtime().waiting ??= new Map())
+  return (room().waiting ??= new Map())
 }
 
 function standbyOf() {
-  return (runtime().standby ??= new Map())
+  return (room().standby ??= new Map())
 }
 
 export function isStandby(id: string) {
@@ -339,7 +582,7 @@ export function join(input: unknown) {
     throw new ApiError(400, "名字用 1 到 24 个字母、数字或中文，不要空格，方便别人 @你")
   }
   const token = asString(body.token)
-  const existing = runtime().state.agents.find((agent) => agent.name === name)
+  const existing = room().state.agents.find((agent) => agent.name === name)
   const model = clip(asString(body.model) || existing?.model || "未填模型", 48)
   const role = clip(asString(body.role) || existing?.role || "未分工", 24)
   const strengths = Array.isArray(body.strengths)
@@ -362,6 +605,7 @@ export function join(input: unknown) {
     if (existing.status === "offline") existing.status = "idle"
     bumpRev()
     commit()
+    if (link) leaveOtherProjects(link, existing.id)
     return { agent: present(existing), token: existing.token, rejoined: true }
   }
 
@@ -381,7 +625,7 @@ export function join(input: unknown) {
     createdAt: Date.now(),
     lastSeenAt: Date.now(),
   }
-  runtime().state.agents.push(agent)
+  room().state.agents.push(agent)
   appendMessage({
     kind: "system",
     authorId: "room",
@@ -393,7 +637,24 @@ export function join(input: unknown) {
   })
   bumpRev()
   commit()
+  if (link) leaveOtherProjects(link, agent.id)
   return { agent: present(agent), token: agent.token, rejoined: false }
+}
+
+// A session sits in one project at a time: seated here, it leaves the seat it
+// had anywhere else.
+function leaveOtherProjects(link: { agentName: string; uuid: string }, keep: string) {
+  const here = projectInfo(room().id)
+  for (const id of runtime().rooms.keys()) {
+    if (id === here.id) continue
+    inProject(id, () => {
+      for (const agent of [...room().state.agents]) {
+        if (agent.id !== keep && agent.agentName === link.agentName && agent.session === link.uuid) {
+          removeAgent(agent.id, false, `${agent.name} 去了「${here.name}」`)
+        }
+      }
+    })
+  }
 }
 
 // A seat for a session the room is creating itself (「开新会话」). Returns the
@@ -406,7 +667,7 @@ export function seatCreated(input: {
   session: string
   workdir: string
 }) {
-  if (runtime().state.agents.some((agent) => agent.name === input.name)) {
+  if (room().state.agents.some((agent) => agent.name === input.name)) {
     throw new ApiError(409, `已经有人叫 ${input.name}，换个名字`)
   }
   const result = join({
@@ -440,7 +701,11 @@ let demosDropped = false
 export function dropDemoSeats() {
   if (demosDropped) return
   demosDropped = true
-  for (const agent of [...runtime().state.agents]) if (agent.demo) removeAgent(agent.id, true)
+  for (const id of runtime().rooms.keys()) {
+    inProject(id, () => {
+      for (const agent of [...room().state.agents]) if (agent.demo) removeAgent(agent.id, true)
+    })
+  }
 }
 
 export function registerSession(input: unknown) {
@@ -461,12 +726,13 @@ export function registerSession(input: unknown) {
     bumpRev()
     commit()
   }
+  if (changed) leaveOtherProjects(link, agent.id)
   return { agent: present(agent) }
 }
 
 export function summonCandidates(message: Message) {
   if (message.kind === "system") return []
-  const ids = new Set(namedAgentIds(message.text, runtime().state.agents))
+  const ids = new Set(namedAgentIds(message.text, room().state.agents))
   if (message.handoff?.toId) ids.add(message.handoff.toId)
   ids.delete(message.authorId)
   const found: { id: string; name: string; agentName?: string; session?: string }[] = []
@@ -527,7 +793,7 @@ export function say(input: unknown) {
   const text = asString(body.text)
   if (!text) throw new ApiError(400, "消息是空的")
   const replyTo = asString(body.replyTo)
-  if (replyTo && !runtime().state.messages.some((message) => message.id === replyTo)) {
+  if (replyTo && !room().state.messages.some((message) => message.id === replyTo)) {
     throw new ApiError(404, "要回复的那条消息不在了")
   }
   const agent = actor.type === "agent" ? findAgent(actor.id) : undefined
@@ -539,7 +805,7 @@ export function say(input: unknown) {
     authorColor: agent?.color ?? "#1f1a14",
     authorDemo: agent?.demo ?? false,
     text: clip(text, 4000),
-    mentions: mentionedAgentIds(text, runtime().state.agents),
+    mentions: mentionedAgentIds(text, room().state.agents),
     replyTo,
     // Said during a wake, by stdout or by its own bench_say: tie it to the steps.
     runId: agent ? activeRun(agent.id)?.id : undefined,
@@ -571,7 +837,7 @@ function appendMessage(input: Omit<Message, "id" | "seq" | "createdAt">) {
     seq: nextSeq(),
     createdAt: Date.now(),
   }
-  const state = runtime().state
+  const state = room().state
   state.messages.push(message)
   if (state.messages.length > 400) {
     state.messages.splice(0, state.messages.length - 400)
@@ -590,24 +856,24 @@ export function inbox(input: unknown) {
   if (!Number.isFinite(after) || after < 0) {
     throw new ApiError(400, "after 要是一个不小于 0 的数字")
   }
-  const pending = runtime().state.messages.filter((message) => message.seq > after)
+  const pending = room().state.messages.filter((message) => message.seq > after)
   const fresh = pending.slice(0, 100)
   const cursor = fresh.at(-1)?.seq ?? after
   agent.lastSeenAt = Date.now()
   agent.seenSeq = Math.max(agent.seenSeq ?? 0, cursor)
   bumpRev()
   commit()
-  const room = snapshot()
-  const forYou = fresh.filter((message) => isForAgent(message, agent.id, room.messages))
+  const view = snapshot()
+  const forYou = fresh.filter((message) => isForAgent(message, agent.id, view.messages))
   return {
     you: present(agent),
     needsSession: !agent.demo && !(agent.agentName && agent.session),
-    peers: room.agents.filter((item) => item.id !== agent.id),
-    tasks: room.tasks,
+    peers: view.agents.filter((item) => item.id !== agent.id),
+    tasks: view.tasks,
     messages: fresh,
     forYou,
     seq: cursor,
-    roomSeq: room.seq,
+    roomSeq: view.seq,
     hasMore: pending.length > fresh.length,
   }
 }
@@ -618,7 +884,7 @@ export function inbox(input: unknown) {
 export function catchUp(id: string, limit: number) {
   const agent = findAgent(id)
   if (!agent) return { text: "", skipped: 0 }
-  const { messages, seq } = runtime().state
+  const { messages, seq } = room().state
   const unseen = messages.filter(
     (message) => message.seq > (agent.seenSeq ?? 0) && message.kind !== "system" && message.authorId !== id,
   )
@@ -635,12 +901,12 @@ export function catchUp(id: string, limit: number) {
   agent.seenSeq = seq
   commit()
   const skipped = index + 1
-  return { text: lines.join("\n\n"), skipped, summary: skipped > 0 ? runtime().state.summary : undefined }
+  return { text: lines.join("\n\n"), skipped, summary: skipped > 0 ? room().state.summary : undefined }
 }
 
 // What a summary writer works from: the last summary and the talk after it.
 export function summarySource() {
-  const state = runtime().state
+  const state = room().state
   const talk = talkSince(state.summary?.upToSeq ?? 0)
   const lines: string[] = []
   let size = 0
@@ -654,26 +920,26 @@ export function summarySource() {
 }
 
 export function summaryJob() {
-  return runtime().summaryJob
+  return room().summaryJob
 }
 
 export function startSummaryJob(agentId: string, upToSeq: number) {
-  runtime().summaryJob = { agentId, upToSeq }
+  room().summaryJob = { agentId, upToSeq }
   bumpRev()
   commit()
 }
 
 export function endSummaryJob(agentId: string) {
-  if (runtime().summaryJob?.agentId !== agentId) return
-  runtime().summaryJob = undefined
+  if (room().summaryJob?.agentId !== agentId) return
+  room().summaryJob = undefined
   bumpRev()
   commit()
 }
 
-export function saveSummary(text: string, by: string, upToSeq = runtime().state.seq) {
+export function saveSummary(text: string, by: string, upToSeq = room().state.seq) {
   const clean = text.trim()
   if (!clean) throw new ApiError(400, "摘要是空的")
-  const state = runtime().state
+  const state = room().state
   state.summary = { text: clip(clean, 8000), upToSeq, by, at: Date.now() }
   bumpRev()
   commit()
@@ -688,18 +954,18 @@ export function summaryAction(input: unknown) {
   const action = asString(body.action)
   if (actor.type === "agent") {
     if (action !== "write") throw new ApiError(400, "agent 只能 write 摘要")
-    const job = runtime().summaryJob
+    const job = room().summaryJob
     const upTo = job?.agentId === actor.id ? job.upToSeq : undefined
     return { summary: saveSummary(asString(body.text) ?? "", actor.name, upTo) }
   }
   if (action === "skip") {
-    runtime().state.summarySkipSeq = runtime().state.seq
+    room().state.summarySkipSeq = room().state.seq
     bumpRev()
     commit()
     return snapshot()
   }
   if (action === "edit") {
-    const upTo = runtime().state.summary?.upToSeq
+    const upTo = room().state.summary?.upToSeq
     return { summary: saveSummary(asString(body.text) ?? "", actor.name, upTo) }
   }
   throw new ApiError(400, "action 只能是 request、skip 或 edit")
@@ -777,7 +1043,7 @@ export function createTask(input: unknown) {
       },
     ],
   }
-  const state = runtime().state
+  const state = room().state
   state.tasks.push(task)
   if (state.tasks.length > 200) state.tasks.splice(0, state.tasks.length - 200)
   commit()
@@ -789,7 +1055,7 @@ export function actOnTask(input: unknown) {
   const actor = actorFrom(body)
   const taskId = asString(body.taskId)
   if (!taskId) throw new ApiError(400, "缺少任务 id")
-  const task = runtime().state.tasks.find((item) => item.id === taskId)
+  const task = room().state.tasks.find((item) => item.id === taskId)
   if (!task) throw new ApiError(404, "没有这条任务")
   const action = asString(body.action)
   const note = clip(asString(body.note) ?? "", 500)
@@ -878,8 +1144,8 @@ export function actOnTask(input: unknown) {
   return { task }
 }
 
-export function removeAgent(id: string, silent = false) {
-  const state = runtime().state
+export function removeAgent(id: string, silent = false, note?: string) {
+  const state = room().state
   const agent = state.agents.find((item) => item.id === id)
   if (!agent) throw new ApiError(404, "这个席位不在了")
   const now = Date.now()
@@ -891,7 +1157,7 @@ export function removeAgent(id: string, silent = false) {
         at: now,
         actor: "并坐",
         action: "卡住",
-        note: `${agent.name} 离席，这阶段先停着`,
+        note: `${note ?? `${agent.name} 离席`}，这阶段先停着`,
       })
     }
   }
@@ -904,7 +1170,7 @@ export function removeAgent(id: string, silent = false) {
       authorName: "并坐",
       authorColor: "#8a8175",
       authorDemo: false,
-      text: `${agent.name} 离席`,
+      text: note ?? `${agent.name} 离席`,
       mentions: [],
     })
   }
@@ -947,7 +1213,7 @@ export async function waitFor(input: unknown, signal?: AbortSignal) {
   standbyOf().set(id, Date.now() + timeoutMs + STANDBY_GRACE_MS)
 
   const pending = () =>
-    runtime().state.messages.some((message) => message.seq > after && isForAgent(message, id, runtime().state.messages))
+    room().state.messages.some((message) => message.seq > after && isForAgent(message, id, room().state.messages))
   const reply = (timedOut: boolean) => ({ ...inbox({ agentId, token, after }), timedOut })
   if (pending()) return reply(false)
 
@@ -966,7 +1232,7 @@ export async function waitFor(input: unknown, signal?: AbortSignal) {
       resolve(value)
     }
     const stop = onMessage((message) => {
-      if (message.seq > after && isForAgent(message, id, runtime().state.messages)) finish(false)
+      if (message.seq > after && isForAgent(message, id, room().state.messages)) finish(false)
     })
     const timer = setTimeout(() => finish(true), timeoutMs)
     const onAbort = () => finish(true)
@@ -996,7 +1262,7 @@ export function debugForgetSeen(id: string) {
 
 // Debug menu only: drop the room summary and any skipped stretch.
 export function debugClearSummary() {
-  const state = runtime().state
+  const state = room().state
   state.summary = undefined
   state.summarySkipSeq = undefined
   bumpRev()
@@ -1004,7 +1270,7 @@ export function debugClearSummary() {
 }
 
 export function resetRoom() {
-  runtime().state = emptyState()
+  room().state = emptyState()
   standbyOf().clear()
   commit()
   return snapshot()

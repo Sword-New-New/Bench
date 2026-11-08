@@ -1,12 +1,13 @@
 import { boot } from "@/lib/boot"
-import { handle, json, readBody } from "@/lib/http"
-import { createTask } from "@/lib/store"
+import { asRecord, handle, json, readBody } from "@/lib/http"
+import { createTask, inRequest } from "@/lib/store"
 
 
 export async function POST(request: Request) {
   try {
     await boot()
-    return json(createTask(await readBody(request)), 201)
+    const body = asRecord(await readBody(request))
+    return json(inRequest(body, () => createTask(body)), 201)
   } catch (error) {
     return handle(error)
   }

@@ -7,7 +7,7 @@ import { promisify } from "node:util"
 
 import { ApiError } from "@/lib/http"
 import { KINDS } from "@/lib/kinds"
-import { agentState, sayAs, seatCreated, snapshot } from "@/lib/store"
+import { agentState, currentProjectInfo, sayAs, seatCreated, snapshot } from "@/lib/store"
 
 // 「开新会话」: the room creates a session of an agent kind itself, seats it
 // and, if given a task, hands it over. The session only comes into being on
@@ -68,9 +68,12 @@ function seatDir(agentId: string) {
   return null
 }
 
-// The folders the dialog offers: where each seat works, and the room's own.
+// The folders the dialog offers: the project's own folder first, then where
+// each of its seats works, and the room's own.
 export async function workspaces() {
   const seen = new Map<string, Workspace>()
+  const project = currentProjectInfo()
+  if (project.dir && isDir(project.dir)) seen.set(project.dir, { label: `项目目录`, path: project.dir, git: false })
   for (const agent of snapshot().agents) {
     const dir = seatDir(agent.id)
     if (!dir || !isDir(dir)) continue
@@ -108,12 +111,12 @@ async function newWorktree(base: string, name: string) {
 
 // Hand the new session's bench tools its seat, the way bench_join would have,
 // so it doesn't have to join again (see the state files in bench-mcp.mjs).
-function giveSeat(kind: string, session: string, seat: { agentId: string; token: string; name: string }) {
+function giveSeat(kind: string, session: string, seat: { agentId: string; token: string; name: string; project: string }) {
   const dir = path.join(process.env.XDG_STATE_HOME || path.join(os.homedir(), ".local", "state"), "bench-mcp")
   mkdirSync(dir, { recursive: true })
   const body = JSON.stringify({ ...seat, cursor: snapshot().seq })
   writeFileSync(path.join(dir, `${kind}-${session}.json`), body, { mode: 0o600 })
-  writeFileSync(path.join(dir, `${kind}-name-${Buffer.from(seat.name).toString("hex")}.json`), body, { mode: 0o600 })
+  writeFileSync(path.join(dir, `${kind}-name-${Buffer.from(`${seat.project}/${seat.name}`).toString("hex")}.json`), body, { mode: 0o600 })
 }
 
 function asText(value: unknown, max: number) {
@@ -141,7 +144,7 @@ export async function spawnSession(input: Record<string, unknown>) {
 
   const session = randomUUID()
   const seat = seatCreated({ name, role, model: "Claude Code", agentName: kind.id, session, workdir: dir })
-  giveSeat(kind.id, session, { agentId: seat.agent.id, token: seat.token, name })
+  giveSeat(kind.id, session, { agentId: seat.agent.id, token: seat.token, name, project: currentProjectInfo().id })
   // A task is said in the room, so everyone sees what the new seat is for, and
   // it is what wakes the seat for the first time.
   if (task) sayAs({ type: "human", id: "human", name: "jinbao" }, { text: `@${name} ${task}` })

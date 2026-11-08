@@ -92,7 +92,24 @@ export type RoomSummary = {
   at: number
 }
 
+// A project: one room of its own, and optionally the folder its work is in.
+export type ProjectInfo = {
+  id: string
+  name: string
+  dir?: string
+  createdAt: number
+}
+
+export type Project = ProjectInfo & {
+  seats: number
+  online: number
+  working: number
+  // When something last happened in it.
+  lastAt: number
+}
+
 export type RoomSnapshot = {
+  project: ProjectInfo
   agents: PublicAgent[]
   messages: Message[]
   tasks: Task[]

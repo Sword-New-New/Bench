@@ -18,7 +18,8 @@ import { TasksPanel } from "@/components/room/tasks-panel"
 import { Thread } from "@/components/room/thread"
 import { WhisperDialog } from "@/components/room/whisper-dialog"
 import { SpawnDialog } from "@/components/room/spawn-dialog"
-import { api, type AdapterInfo } from "@/components/room/api"
+import { api, inOpenProject, setOpenProject, type AdapterInfo } from "@/components/room/api"
+import { ProjectDialog, ProjectMenu } from "@/components/room/project-menu"
 import { Button } from "@/components/ui/button"
 import {
   Dialog,
@@ -41,7 +42,8 @@ import {
 } from "@/components/ui/dropdown-menu"
 import { Label } from "@/components/ui/label"
 import { Textarea } from "@/components/ui/textarea"
-import type { Message, PublicAgent, RoomSnapshot, Task } from "@/lib/types"
+import { KINDS } from "@/lib/kinds"
+import type { Message, Project, ProjectInfo, PublicAgent, RoomSnapshot, Task } from "@/lib/types"
 
 type TabId = "chat" | "people" | "tasks"
 
@@ -74,7 +76,35 @@ function showDetail(value: boolean) {
   window.dispatchEvent(new Event(DETAIL_EVENT))
 }
 
+// Kinds the room can open a session of itself (lib/spawn.ts SPAWNABLE).
+const SPAWNABLE_KINDS = KINDS.filter((kind) => kind.spawn).map((kind) => kind.id)
+
+// The project last open in this browser, and the one a link names.
+const PROJECT_KEY = "bench-project"
+
+function projectWanted() {
+  const linked = new URLSearchParams(window.location.search).get("project")
+  if (linked) return linked
+  try {
+    return localStorage.getItem(PROJECT_KEY)
+  } catch {
+    return null
+  }
+}
+
+function rememberProject(id: string) {
+  try {
+    localStorage.setItem(PROJECT_KEY, id)
+  } catch {}
+  const url = new URL(window.location.href)
+  url.searchParams.set("project", id)
+  window.history.replaceState(null, "", url)
+}
+
 export function RoomApp() {
+  const [projects, setProjects] = useState<Project[] | null>(null)
+  const [projectId, setProjectId] = useState<string | null>(null)
+  const [projectDialog, setProjectDialog] = useState<{ editing: ProjectInfo | null } | null>(null)
   const [actual, setRoom] = useState<RoomSnapshot | null>(null)
   const [debug, setDebug] = useState<DebugView>(NO_DEBUG)
   // What the page shows: the room, with any debug-menu overrides on top.
@@ -104,11 +134,55 @@ export function RoomApp() {
   const composerRef = useRef<HTMLTextAreaElement>(null)
   const pullRef = useRef<() => void>(() => {})
 
-  const apply = useCallback((next: RoomSnapshot) => {
-    setRoom((current) => (current && next.rev < current.rev ? current : next))
+  const loadProjects = useCallback(() => {
+    return api<{ projects: Project[] }>("/api/v1/projects").then((data) => {
+      setProjects(data.projects)
+      setProjectId((current) => {
+        const ids = data.projects.map((item) => item.id)
+        if (current && ids.includes(current)) return current
+        const wanted = current ? null : projectWanted()
+        const byName = wanted ? data.projects.find((item) => item.name === wanted)?.id : undefined
+        return wanted && ids.includes(wanted) ? wanted : (byName ?? ids[0] ?? null)
+      })
+      return data.projects
+    })
   }, [])
 
+  // The list (with who is online in each) is small; a poll keeps it current.
   useEffect(() => {
+    const first = setTimeout(() => void loadProjects().catch(() => {}), 0)
+    const timer = setInterval(() => void loadProjects().catch(() => {}), 5000)
+    return () => {
+      clearTimeout(first)
+      clearInterval(timer)
+    }
+  }, [loadProjects])
+
+  // Switching projects starts from a blank room until its snapshot arrives.
+  const openProject = useCallback((id: string) => {
+    setProjectId((current) => {
+      if (current !== id) {
+        setRoom(null)
+        setFocusId(null)
+        setReply(null)
+        setDraft("")
+      }
+      return id
+    })
+  }, [])
+
+  const apply = useCallback(
+    (next: RoomSnapshot) => {
+      if (next.project.id !== projectId) return
+      setRoom((current) => (current && current.project.id === next.project.id && next.rev < current.rev ? current : next))
+    },
+    [projectId],
+  )
+
+  useEffect(() => {
+    if (!projectId) return
+    setOpenProject(projectId)
+    rememberProject(projectId)
     let stopped = false
     const pull = () => {
       api<RoomSnapshot>("/api/v1/room")
@@ -131,7 +205,7 @@ export function RoomApp() {
     const poll = setInterval(() => {
       if (!streaming) pull()
     }, 4000)
-    const source = new EventSource("/api/v1/stream")
+    const source = new EventSource(inOpenProject("/api/v1/stream"))
     source.onopen = () => {
       streaming = true
     }
@@ -158,7 +232,7 @@ export function RoomApp() {
       clearInterval(clock)
       source.close()
     }
-  }, [apply])
+  }, [apply, projectId])
 
   const loadAdapters = useCallback(() => {
     api<{ agents: AdapterInfo[] }>("/api/v1/adapters")
@@ -253,9 +327,15 @@ export function RoomApp() {
       <div className="shrink-0 px-3 pt-2 lg:px-4">
       <header className="flex h-12 items-center gap-3 pr-1 pl-1">
         <Mark />
+        <h1 className="sr-only">并坐</h1>
         <div className="min-w-0">
-          <h1 className="text-[15px] leading-tight font-semibold">并坐</h1>
-          <p className="hidden truncate text-xs text-muted-foreground sm:block">一个入口，叫到每一个 AI</p>
+          <ProjectMenu
+            projects={projects ?? []}
+            current={room?.project ?? projects?.find((item) => item.id === projectId) ?? null}
+            onPick={openProject}
+            onCreate={() => setProjectDialog({ editing: null })}
+            onEdit={() => room && setProjectDialog({ editing: room.project })}
+          />
         </div>
         <div className="ml-auto flex items-center gap-1.5">
           <span
@@ -543,10 +623,16 @@ export function RoomApp() {
 
       <JoinDialog
         open={joinOpen}
+        project={room?.project ?? null}
         preset={joinKind}
         agents={room?.agents ?? []}
+        spawnable={SPAWNABLE_KINDS}
         busy={busy}
         onOpenChange={setJoinOpen}
+        onSpawn={(kind) => {
+          setJoinOpen(false)
+          setSpawn({ kind, from: null })
+        }}
         onReset={() =>
           void run(async () => {
             await api("/api/v1/reset", {
@@ -556,8 +642,34 @@ export function RoomApp() {
             setJoinOpen(false)
             setFocusId(null)
             setReply(null)
-          }, "房间已清空")
+          }, "这个项目的记录清空了")
         }
+      />
+      <ProjectDialog
+        open={projectDialog !== null}
+        editing={projectDialog?.editing ?? null}
+        canDelete={(projects?.length ?? 0) > 1}
+        onClose={() => setProjectDialog(null)}
+        onSaved={(project, created) => {
+          setProjectDialog(null)
+          void loadProjects().catch(() => {})
+          if (created) {
+            openProject(project.id)
+            setJoinKind(null)
+            setJoinOpen(true)
+            toast.success(`「${project.name}」建好了，接几个 AI 进来吧`)
+          } else {
+            pullRef.current()
+            toast.success("项目设置存好了")
+          }
+        }}
+        onDeleted={(id) => {
+          setProjectDialog(null)
+          const next = projects?.find((item) => item.id !== id)
+          if (next) openProject(next.id)
+          void loadProjects().catch(() => {})
+          toast.success("项目删掉了")
+        }}
       />
 
       <Dialog open={leaving !== null} onOpenChange={(open) => !open && setLeaving(null)}>

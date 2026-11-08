@@ -1,12 +1,13 @@
 import { boot } from "@/lib/boot"
-import { handle, json, readBody } from "@/lib/http"
-import { inbox } from "@/lib/store"
+import { asRecord, handle, json, readBody } from "@/lib/http"
+import { inRequest, inbox } from "@/lib/store"
 
 
 export async function POST(request: Request) {
   try {
     await boot()
-    return json(inbox(await readBody(request)))
+    const body = asRecord(await readBody(request))
+    return json(inRequest(body, () => inbox(body)))
   } catch (error) {
     return handle(error)
   }

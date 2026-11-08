@@ -7,7 +7,9 @@ import { ApiError } from "@/lib/http"
 import { endRun, putStep, startRun } from "@/lib/runs"
 import {
   agentState,
+  bindProject,
   CATCH_UP_CHARS,
+  currentProjectInfo,
   catchUp,
   endSummaryJob,
   isStandby,
@@ -107,7 +109,7 @@ function stamp(at: number) {
 // no idea where it is.
 function introduce(agent: NonNullable<ReturnType<typeof agentState>>) {
   if (!agent.fresh) return ""
-  return `【你是并坐房间新开的会话】你在房间里叫 ${agent.name}，分工是「${agent.role}」，工作目录是 ${agent.workdir}。房间已经替你入座了，bench 工具直接能用，不用再 bench_join。别人 @${agent.name} 时房间会叫醒你。\n\n`
+  return `【你是并坐房间新开的会话】你在「${currentProjectInfo().name}」项目里叫 ${agent.name}，分工是「${agent.role}」，工作目录是 ${agent.workdir}。房间已经替你入座了，bench 工具直接能用，不用再 bench_join。别人 @${agent.name} 时房间会叫醒你。\n\n`
 }
 
 function envelope(body: string, skipped: number, summary: RoomSummary | undefined, replyByStdout: boolean) {
@@ -123,7 +125,7 @@ function envelope(body: string, skipped: number, summary: RoomSummary | undefine
         ? `你上次之后的消息太多，更早的 ${skipped} 条没列；先附上房间摘要（${summary.by} 写于 ${stamp(summary.at)}，概括了那之前的对话），再列最近的原文。需要原文用 bench_inbox 查。`
         : `下面是你上次之后房间里的消息，太长只列了最近这些；更早还有 ${skipped} 条没列，需要的话用 bench_inbox 查。`
   const digest = skipped > 0 && summary ? `【房间摘要】\n${summary.text}\n\n【最近的原文】\n` : ""
-  return `【并坐房间转来的消息】\n${scope}只略去了你自己说的话和入座、离席这类系统通知。★ 是在叫你的。\n\n${digest}${body}\n\n（${how}）`
+  return `【并坐「${currentProjectInfo().name}」项目转来的消息】\n${scope}只略去了你自己说的话和入座、离席这类系统通知。★ 是在叫你的。\n\n${digest}${body}\n\n（${how}）`
 }
 
 function summaryPrompt(replyByStdout: boolean) {
@@ -205,7 +207,7 @@ function launch(
   let err = ""
   let finished = false
   let shownAt = 0
-  const take = (line: string) => {
+  const take = bindProject((line: string) => {
     for (const step of parser.feed(line)) {
       putStep(run, step)
       const text = liveLine(step)
@@ -214,9 +216,9 @@ function launch(
         live(text)
       }
     }
-  }
+  })
   let stopped = false
-  const finish = (code: number | null, failure?: string) => {
+  const finish = bindProject((code: number | null, failure?: string) => {
     if (finished) return
     finished = true
     lane(agent.id).stop = undefined
@@ -229,7 +231,7 @@ function launch(
     const silent = code === 0 && !out.trim() && run.steps.length === 0 && err.trim()
     const why = failure ?? (code !== 0 ? tail(err, 160) || `退出码 ${code}` : silent ? tail(err, 160) : undefined)
     done(stopped ? { out: "", stopped } : { out, failure: why, lost })
-  }
+  })
 
   // Its own process group, so stopping it also ends what the shell started.
   const child = spawn(command, {
@@ -267,13 +269,13 @@ function launch(
   let quiet: NodeJS.Timeout | undefined
   if (streams(command)) {
     const since = Date.now()
-    quiet = setInterval(() => {
+    quiet = setInterval(bindProject(() => {
       const waited = `还没开始回应，已等 ${seconds(Date.now() - since)}（多半是它的服务在排队）`
       putStep(run, { id: "wait", at: since, kind: "note", title: waited, state: "running" })
       live(waited)
-    }, WAIT_NOTE_MS)
+    }), WAIT_NOTE_MS)
   }
-  child.stdout.on("data", (chunk: Buffer) => {
+  child.stdout.on("data", bindProject((chunk: Buffer) => {
     if (quiet) {
       clearInterval(quiet)
       quiet = undefined
@@ -288,7 +290,7 @@ function launch(
       pending = ""
       lost = true
     }
-  })
+  }))
   child.stderr.on("data", (chunk: Buffer) => {
     err = (err + chunk.toString("utf8")).slice(-4000)
   })

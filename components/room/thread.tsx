@@ -96,7 +96,7 @@ export function Thread({
 
   // Wakes still going whose reply isn't in yet.
   const posted = new Set(messages.map((message) => message.runId).filter(Boolean))
-  const live = detail ? agents.filter((agent) => agent.runId && !posted.has(agent.runId)) : []
+  const live = agents.filter((agent) => agent.runId && !posted.has(agent.runId))
 
   return (
     <div className="relative flex min-h-0 flex-1 flex-col">
@@ -164,7 +164,7 @@ export function Thread({
             />
           ))}
           {live.map((agent) => (
-            <LiveRun key={agent.id} agent={agent} />
+            <LiveRun key={agent.id} agent={agent} detail={detail} onOpenRun={onOpenRun} />
           ))}
         </div>
       </div>
@@ -343,8 +343,18 @@ function MessageRow({
   )
 }
 
-// 「详细」: a seat that is working right now, with its steps as they come.
-function LiveRun({ agent }: { agent: PublicAgent }) {
+// A seat that is working on a reply right now. 「详细」 shows its steps as they
+// come; 「摘要」 a bubble that keeps moving until the reply lands in its place,
+// with the step it is on and a way into the full log.
+function LiveRun({
+  agent,
+  detail,
+  onOpenRun,
+}: {
+  agent: PublicAgent
+  detail: boolean
+  onOpenRun: (runId: string) => void
+}) {
   const look = seatLook(agent)
   return (
     <article className="mt-4 flex gap-3">
@@ -356,7 +366,25 @@ function LiveRun({ agent }: { agent: PublicAgent }) {
           <span className="font-semibold">{agent.name}</span>
           <span className="text-sky-700 dark:text-sky-300">正在做</span>
         </p>
-        {agent.runId ? <RunTrail runId={agent.runId} /> : null}
+        {detail ? (
+          agent.runId ? <RunTrail runId={agent.runId} /> : null
+        ) : (
+          <button
+            type="button"
+            className="bubble working flex w-fit max-w-full items-center gap-2.5 rounded-2xl rounded-tl-md bg-card/85 px-3.5 py-2.5 text-left"
+            style={{ "--halo": look.color } as CSSProperties}
+            title="查看过程"
+            onClick={() => agent.runId && onOpenRun(agent.runId)}
+          >
+            <span className="typing shrink-0" aria-hidden>
+              <i />
+              <i />
+              <i />
+            </span>
+            <span className="min-w-0 truncate text-sm text-muted-foreground">{agent.doing || "在想…"}</span>
+            <ListTree className="size-3.5 shrink-0 text-muted-foreground" aria-label="查看过程" />
+          </button>
+        )}
       </div>
     </article>
   )

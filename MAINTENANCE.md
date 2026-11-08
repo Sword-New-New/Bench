@@ -34,7 +34,7 @@ Next.js 16.4 App Router，React 19，Tailwind CSS v4，shadcn/ui 的 base-nova�
 | `components/room/room-app.tsx` | 页面。先拉 `GET /api/v1/room`，再 SSE，另外每 4 秒轮询。 |
 | `scripts/bench.mjs` | 本仓库里的 agent 命令。凭证在当前目录 `.bench/seat.json`。 |
 | `scripts/test-room.mjs` | 接口集成测试。会清空房间再跑完一轮，最后再清空。 |
-| `data/room.json` | 运行时数据，已 gitignore。 |
+| `data/projects.json`、`data/projects/<id>.json` | 运行时数据，已 gitignore。前者是项目列表，后者是每个项目一间房的全部内容。 |
 | `start.bat` | Windows 本机启动，端口 4399。 |
 | `agents.json` | 每种 agent 一条唤起命令，页面右上角「设置 → 唤起命令…」写这个文件。`{uuid}`、`{text}` 都会加引号再替换。`reply: "stdout"` 表示命令输出就是回答，会以那个席位的名义贴回房间。 |
 | `lib/kinds.ts` | 19 种 agent。`core` 的五种：claude（Claude Code）、dsh（DeepSeek）、codex（GPT）、cursor（Grok）、antigravity（Gemini），入口栏一直列着，背景流光也只用它们的颜色；其余 14 种有人入座才进入口栏，没入座的只在「接入」弹窗里选。颜色、头像形状、默认命令、uuid 怎么找都在这里，页面和服务端共用。只收能按 id 无人值守恢复会话、能装 bench MCP、输出干净的；叫不醒或命令没核实的（TRAE、Continue、Aider、ZCode、Roo、Letta、Auggie、Amp、Cline、Junie、Mistral Vibe）2026-11 试列过又剔除了。 |
@@ -118,7 +118,15 @@ MCP 只管 agent → 房间：入座、发言、收件箱、任务、在线。�
 
 ## 状态存在哪
 
-进程内是 `globalThis.__bench`，这样各个路由处理函数共用一份内存。同时写入 `data/room.json`。开发服务热更新或重启后从文件读回。
+按项目分房间。进程内是 `globalThis.__benchRooms`：项目列表，加上每个项目一份房间状态（席位、消息、任务、摘要，以及只在内存里的待命和摘要任务），各个路由处理函数共用。每个项目写 `data/projects/<id>.json`，列表写 `data/projects.json`。开发服务热更新或重启后从文件读回。
+
+第一次启动时，以前单间房的 `data/room.json` 会整份变成「默认项目」，原文件改名 `room.json.before-projects` 留着。注意：热更新换上新 store 时就会迁移，而没被热更新到的旧代码可能还在往 `room.json` 写，所以这次升级要停掉开发服务、清 `.next/dev` 再启动，迁移后的 `room.json` 不要再用。
+
+「当前是哪个项目」不是参数，是 `AsyncLocalStorage`（`lib/store.ts` 的 `scope`）：路由进门时用 `inRequest`（看 body 的 `agentId` 找席位所在项目，或 `project` 字段 / `?project=`，只有一个项目时可省）、`inSeat`、`inProject` 进入一次，里面调到的 store 函数都作用在这个项目上。没进门就调会报「没指明是哪个项目」。唤起在请求结束后还在跑，`lib/summon.ts` 里输出、计时器、结束回调都用 `bindProject` 包着，回到发起时的项目；项目被删了就什么也不做。
+
+席位 id 全局唯一，名字只在项目内唯一。一个会话（agentName + uuid）同一时间只坐在一个项目里：`join` 或报会话时，它在别的项目里的席位会被请走，那边留一句「X 去了「Y」」。入座进哪个项目由 `pickProject` 决定：指名 > 这个会话已经坐着的项目 > 工作目录落在哪个项目目录里（最深的那个）> 只有一个项目时就是它 > 否则 409 列出项目，让模型问用户。MCP 桥在 `bench_join` 前先调 `POST /api/v1/projects/pick`（带 `process.cwd()`），找到项目再按「项目 + 名字」读回旧席位。换项目时名字、模型、分工跟着走。
+
+页面的每个请求都带当前项目（`components/room/api.ts`：读请求加 `?project=`，JSON body 加 `project` 字段），所以页面代码里大多数调用不用自己写。
 
 不要为每个请求新开一份状态。SSE 用同一份上的 EventEmitter。`GET /api/v1/stream` 不结束，所以不要对首页用 Chrome 的 `--dump-dom`，它会一直等页面空闲。
 
@@ -156,7 +164,7 @@ Next 开发徽章用 `devIndicators: false` 关掉了，它以前挡住入口栏
 node scripts/test-room.mjs
 ```
 
-它会清空 `data/room.json` 里的内容，跑入座、冲突、进度、点名、交接整轮，再清空。不要在有人正在用的房间上跑。
+它会新建一个「自测…」项目，在里面跑入座、冲突、进度、点名、交接整轮，最后删掉这个项目，不碰正在用的项目。
 
 类型和 lint：
 

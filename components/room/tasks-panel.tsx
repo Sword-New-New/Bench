@@ -18,6 +18,11 @@ import {
 import { TASK_STATUS_LABEL } from "@/lib/status"
 import type { PublicAgent, Task, TaskStatus } from "@/lib/types"
 
+// Each status gets its own paper color; the tilt cycles so a stack of notes
+// doesn't line up.
+const TONE: Record<TaskStatus, string> = { open: "yellow", doing: "peach", blocked: "pink", done: "green" }
+const TILTS = ["a", "d", "c", "b"]
+
 const CHIP: Record<TaskStatus, string> = {
   open: "bg-sky-500/10 text-sky-700 dark:text-sky-300",
   doing: "bg-amber-500/12 text-amber-700 dark:text-amber-300",
@@ -59,15 +64,17 @@ export function TasksPanel({
 
   return (
     <div className="flex h-full min-h-0 flex-col">
-      <div className="flex items-baseline justify-between px-4 pt-4 pb-2">
+      <div className="flex items-baseline justify-between px-4 pt-3 pb-3">
         <h2 className="text-xs font-semibold tracking-wider text-muted-foreground uppercase">分工</h2>
         <span className="text-[11px] text-muted-foreground">
           {active.length} 进行中{done.length > 0 ? ` · ${done.length} 完成` : ""}
         </span>
       </div>
+      <div className="min-h-0 flex-1 overflow-y-auto px-1 pt-2 pb-6">
       {header}
       <form
-        className="mx-3 mb-3 space-y-2 rounded-xl border bg-card p-2"
+        className="note mx-3 mb-5 space-y-2 p-2.5"
+        data-tilt="a"
         onSubmit={(event) => {
           event.preventDefault()
           if (!title.trim()) return
@@ -81,11 +88,11 @@ export function TasksPanel({
           onChange={(event) => setTitle(event.target.value)}
           placeholder="新任务：这阶段要交出来的东西"
           aria-label="任务标题"
-          className="border-0 shadow-none focus-visible:ring-0 dark:bg-transparent"
+          className="border-0 bg-transparent px-1 shadow-none placeholder:text-current placeholder:opacity-55 focus-visible:ring-0 dark:bg-transparent"
         />
         <div className="flex gap-2">
           <Select items={items} value={owner} onValueChange={(value) => setOwner(value ?? "none")}>
-            <SelectTrigger className="w-full min-w-0 flex-1" aria-label="负责人">
+            <SelectTrigger className="w-full min-w-0 flex-1 border-current/15 bg-white/40 dark:bg-black/15" aria-label="负责人">
               <SelectValue placeholder="先不指定" />
             </SelectTrigger>
             <SelectContent>
@@ -101,15 +108,16 @@ export function TasksPanel({
           </Button>
         </div>
       </form>
-      <div className="min-h-0 flex-1 space-y-2 overflow-y-auto px-3 pb-4">
+      <div className="space-y-5 px-3">
         {tasks.length === 0 ? (
-          <div className="rounded-xl border border-dashed px-3 py-4 text-xs leading-5 text-muted-foreground">
+          <div className="rounded-sm border border-dashed border-foreground/15 px-3 py-4 text-xs leading-5 text-muted-foreground">
             还没有分工。建一条任务并指定负责人，或在对话里 @名字 把活递过去。同一阶段只留一个负责人。
           </div>
         ) : null}
-        {active.map((task) => (
+        {active.map((task, index) => (
           <TaskCard
             key={task.id}
+            tilt={TILTS[index % TILTS.length]}
             task={task}
             agents={agents}
             highlight={highlightId === task.id}
@@ -123,10 +131,11 @@ export function TasksPanel({
             <summary className="cursor-pointer px-1 text-xs text-muted-foreground">
               已完成 {done.length}
             </summary>
-            <div className="mt-2 space-y-2">
-              {done.map((task) => (
+            <div className="mt-4 space-y-5">
+              {done.map((task, index) => (
                 <TaskCard
                   key={task.id}
+                  tilt={TILTS[(index + 1) % TILTS.length]}
                   task={task}
                   agents={agents}
                   highlight={highlightId === task.id}
@@ -139,11 +148,13 @@ export function TasksPanel({
           </details>
         ) : null}
       </div>
+      </div>
     </div>
   )
 }
 
 function TaskCard({
+  tilt,
   task,
   agents,
   highlight,
@@ -151,6 +162,7 @@ function TaskCard({
   onAskHandoff,
   onStatus,
 }: {
+  tilt: string
   task: Task
   agents: PublicAgent[]
   highlight: boolean
@@ -162,9 +174,9 @@ function TaskCard({
   return (
     <article
       id={`task-${task.id}`}
-      className={`rounded-xl border bg-card px-3 py-2.5 transition-shadow ${
-        highlight ? "ring-2 ring-ring" : ""
-      } ${task.status === "done" ? "opacity-70" : ""}`}
+      data-tone={TONE[task.status]}
+      data-tilt={tilt}
+      className={`note px-3 pt-3 pb-2.5 ${highlight ? "ring-2 ring-ring" : ""} ${task.status === "done" ? "opacity-75" : ""}`}
     >
       <div className="flex items-start justify-between gap-2">
         <h3 className="text-sm leading-5 font-medium">{task.title}</h3>
@@ -178,7 +190,7 @@ function TaskCard({
         {task.createdByName} 建立
       </p>
       {task.brief && task.status !== "done" ? (
-        <dl className="mt-2 space-y-1 rounded-lg bg-muted/60 px-2 py-1.5 text-[11px] leading-5">
+        <dl className="mt-2 space-y-1 rounded-sm bg-white/35 px-2 py-1.5 text-[11px] leading-5 dark:bg-black/15">
           <div className="text-muted-foreground">{task.brief.by} 的交接单</div>
           {(
             [
@@ -195,7 +207,7 @@ function TaskCard({
         </dl>
       ) : null}
       {task.history.length > 0 ? (
-        <ol className="mt-2 space-y-0.5 border-l pl-2 text-[11px] leading-5 text-muted-foreground">
+        <ol className="mt-2 space-y-0.5 border-l border-current/20 pl-2 text-[11px] leading-5 text-muted-foreground">
           {task.history.slice(-3).map((event, index) => (
             <li key={`${event.at}-${index}`} className="line-clamp-2">
               {event.actor} {event.action}
@@ -210,6 +222,7 @@ function TaskCard({
             type="button"
             size="xs"
             variant="outline"
+            className="border-current/20 bg-transparent hover:bg-white/40 dark:border-current/20 dark:bg-transparent dark:hover:bg-black/15"
             disabled={busy}
             onClick={() => onStatus(task, "done")}
           >
@@ -219,6 +232,7 @@ function TaskCard({
             type="button"
             size="xs"
             variant="outline"
+            className="border-current/20 bg-transparent hover:bg-white/40 dark:border-current/20 dark:bg-transparent dark:hover:bg-black/15"
             disabled={busy}
             onClick={() => onStatus(task, "block")}
           >
@@ -227,7 +241,7 @@ function TaskCard({
           {others.length > 0 ? (
             <DropdownMenu>
               <DropdownMenuTrigger
-                className="inline-flex h-6 items-center rounded-md border px-2 text-xs hover:bg-muted"
+                className="inline-flex h-6 items-center rounded-md border border-current/20 px-2 text-xs hover:bg-white/40 dark:hover:bg-black/15"
                 disabled={busy}
               >
                 交给

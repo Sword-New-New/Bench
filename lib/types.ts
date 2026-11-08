@@ -128,7 +128,10 @@ export type Run = {
   id: string
   agentId: string
   agentName: string
-  purpose: "reply" | "summary"
+  purpose: "reply" | "summary" | "private"
+  // A private run: what the user said and what it answered.
+  ask?: string
+  answer?: string
   state: "running" | "done" | "failed"
   startedAt: number
   endedAt?: number

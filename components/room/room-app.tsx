@@ -16,6 +16,7 @@ import { clearSummarySnooze, SummaryCard, SummaryNudge } from "@/components/room
 import { DEBUG_MENU, DebugMenu, NO_DEBUG, withDebug, type DebugView } from "@/components/room/debug-menu"
 import { TasksPanel } from "@/components/room/tasks-panel"
 import { Thread } from "@/components/room/thread"
+import { WhisperDialog } from "@/components/room/whisper-dialog"
 import { api, type AdapterInfo } from "@/components/room/api"
 import { Button } from "@/components/ui/button"
 import {
@@ -54,6 +55,7 @@ export function RoomApp() {
   const [joinOpen, setJoinOpen] = useState(false)
   const [joinKind, setJoinKind] = useState<string | null>(null)
   const [runId, setRunId] = useState<string | null>(null)
+  const [whisperId, setWhisperId] = useState<string | null>(null)
   const [adaptersOpen, setAdaptersOpen] = useState(false)
   const [adapterName, setAdapterName] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
@@ -213,8 +215,8 @@ export function RoomApp() {
   return (
     <main className="relative isolate flex h-dvh flex-col">
       <Ambient />
-      <div className="shrink-0 px-2 pt-2">
-      <header className="raised flex h-12 items-center gap-3 rounded-2xl pr-2 pl-3">
+      <div className="shrink-0 px-3 pt-2 lg:px-4">
+      <header className="flex h-12 items-center gap-3 pr-1 pl-1">
         <Mark />
         <div className="min-w-0">
           <h1 className="text-[15px] leading-tight font-semibold">并坐</h1>
@@ -283,7 +285,7 @@ export function RoomApp() {
       </div>
 
       {!room ? (
-        <div className="grid min-h-0 flex-1 gap-2 p-2 lg:grid-cols-[272px_1fr_320px]">
+        <div className="grid min-h-0 flex-1 gap-4 p-3 lg:grid-cols-[264px_1fr_300px] lg:px-4 lg:pt-1 lg:pb-4">
           {["入口", "对话", "分工"].map((label) => (
             <div key={label} className="frost animate-pulse rounded-2xl p-4 text-sm text-muted-foreground">
               正在打开{label}
@@ -291,7 +293,7 @@ export function RoomApp() {
           ))}
         </div>
       ) : (
-        <div className="grid min-h-0 flex-1 grid-rows-[minmax(0,1fr)] pt-2 lg:grid-cols-[272px_minmax(0,1fr)_320px] lg:gap-2 lg:p-2">
+        <div className="grid min-h-0 flex-1 grid-rows-[minmax(0,1fr)] pt-2 lg:grid-cols-[264px_minmax(0,1fr)_300px] lg:gap-4 lg:px-4 lg:pt-1 lg:pb-4">
           <aside className={`${tab === "people" ? "block" : "hidden"} frost h-full min-h-0 overflow-hidden lg:block lg:rounded-2xl`}>
             <Roster
               agents={agents}
@@ -307,6 +309,16 @@ export function RoomApp() {
               }}
               onLeave={setLeaving}
               onOpenRun={setRunId}
+              onWhisper={(agent) => setWhisperId(agent.id)}
+              onStop={(agent) =>
+                void run(async () => {
+                  const result = await api<{ dropped: number }>(`/api/v1/agents/${agent.id}`, {
+                    method: "POST",
+                    body: JSON.stringify({ as: "human", action: "stop" }),
+                  })
+                  toast.success(`${agent.name} 停下了${result.dropped > 0 ? `，排队的 ${result.dropped} 条也取消了` : ""}`)
+                })
+              }
               onJoin={(kind) => {
                 setJoinKind(kind ?? null)
                 setJoinOpen(true)
@@ -384,6 +396,8 @@ export function RoomApp() {
                 const text = draft.trim()
                 if (!text) return
                 const replyTo = reply?.id
+                // Named seats that are busy get this after what they're doing.
+                const queued = agents.filter((agent) => agent.runId && text.includes(`@${agent.name}`))
                 void run(async () => {
                   await api("/api/v1/say", {
                     method: "POST",
@@ -391,11 +405,18 @@ export function RoomApp() {
                   })
                   setDraft("")
                   setReply(null)
+                  if (queued.length > 0) {
+                    const first = queued[0]
+                    toast.message(`${queued.map((agent) => agent.name).join("、")} 正在忙，这条排在它手上的事后面`, {
+                      description: "着急的话单独和它说，会先打断它来回你",
+                      action: { label: "单独说", onClick: () => setWhisperId(first.id) },
+                    })
+                  }
                 })
               }}
             />
           </section>
-          <aside className={`${tab === "tasks" ? "block" : "hidden"} frost h-full min-h-0 overflow-hidden lg:block lg:rounded-2xl`}>
+          <aside className={`${tab === "tasks" ? "block" : "hidden"} h-full min-h-0 overflow-hidden lg:block`}>
             <TasksPanel
               tasks={room.tasks}
               agents={agents}
@@ -485,6 +506,11 @@ export function RoomApp() {
         }
       />
 
+      <WhisperDialog
+        agent={agents.find((agent) => agent.id === whisperId) ?? null}
+        onClose={() => setWhisperId(null)}
+        onOpenRun={setRunId}
+      />
       <RunPanel runId={runId} onClose={() => setRunId(null)} />
 
       <JoinDialog

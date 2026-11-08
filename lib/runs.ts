@@ -107,3 +107,7 @@ export function getRun(id: string) {
 export function activeRun(agentId: string) {
   return runs().findLast((run) => run.agentId === agentId && run.state === "running") ?? null
 }
+
+export function listRuns(agentId: string, purpose: Run["purpose"]) {
+  return runs().filter((run) => run.agentId === agentId && run.purpose === purpose)
+}

@@ -42,7 +42,18 @@ const MAX_HOPS = 3
 // while it runs are batched into the next run instead of being dropped.
 // `summary`: the user asked this seat for a room summary; it runs before the
 // next batch of messages.
-type Lane = { running: boolean; pending: string[]; hops: number; summary?: boolean }
+// `stop`: ends the command running now, if any. `carry`: the room messages a
+// run was answering when someone interjected; the next run takes them up again.
+// `whisper`: what the user said to this seat alone, run before anything else.
+type Lane = {
+  running: boolean
+  pending: string[]
+  hops: number
+  summary?: boolean
+  stop?: () => void
+  carry?: string
+  whisper?: string
+}
 
 type SummonGlobal = typeof globalThis & {
   __benchSummonBound?: boolean
@@ -157,7 +168,7 @@ function launch(
   command: string,
   run: Run,
   live: (line: string) => void,
-  done: (result: { out: string; failure?: string }) => void,
+  done: (result: { out: string; failure?: string; stopped?: boolean }) => void,
 ) {
   const parser = createParser()
   let pending = ""
@@ -175,18 +186,22 @@ function launch(
       }
     }
   }
+  let stopped = false
   const finish = (code: number | null, failure?: string) => {
     if (finished) return
     finished = true
+    lane(agent.id).stop = undefined
     clearTimeout(timer)
     clearInterval(quiet)
     if (pending) take(pending)
     const why = failure ?? (code !== 0 ? tail(err, 160) || `退出码 ${code}` : undefined)
-    done({ out: parser.answer(), failure: why })
+    done(stopped ? { out: "", stopped } : { out: parser.answer(), failure: why })
   }
 
+  // Its own process group, so stopping it also ends what the shell started.
   const child = spawn(command, {
     shell: true,
+    detached: true,
     cwd: process.cwd(),
     stdio: ["ignore", "pipe", "pipe"],
     env: {
@@ -198,8 +213,20 @@ function launch(
       BENCH_SESSION: agent.session,
     },
   })
+  const kill = () => {
+    try {
+      if (child.pid) process.kill(-child.pid, "SIGTERM")
+    } catch {
+      child.kill("SIGTERM")
+    }
+  }
+  lane(agent.id).stop = () => {
+    stopped = true
+    kill()
+    finish(null)
+  }
   const timer = setTimeout(() => {
-    child.kill("SIGTERM")
+    kill()
     finish(null, "超过 15 分钟没结束，已停掉")
   }, RUN_LIMIT_MS)
   let quiet: NodeJS.Timeout | undefined
@@ -276,16 +303,27 @@ function run(agentId: string) {
     queue.summary = false
     return
   }
+  if (queue.whisper !== undefined) {
+    const text = queue.whisper
+    queue.whisper = undefined
+    answerWhisper(agent, text)
+    return
+  }
   if (queue.summary) {
     queue.summary = false
     writeSummary(agent, adapter)
     return
   }
-  if (queue.pending.length === 0) return
+  if (queue.pending.length === 0 && !queue.carry) return
 
   const seen = catchUp(agentId, CATCH_UP_CHARS)
   // Its inbox may already have shown it the mention; fall back to the queue.
-  const body = seen.text || queue.pending.join("\n\n")
+  const fresh = seen.text || queue.pending.join("\n\n")
+  const carried = queue.carry
+  queue.carry = undefined
+  const body = carried
+    ? `【刚才被打断、还没回的】\n${carried}${fresh ? `\n\n【之后的新消息】\n${fresh}` : ""}`
+    : fresh
   const command = commandFor(
     agent.agentName,
     agent.session,
@@ -299,10 +337,17 @@ function run(agentId: string) {
   queue.running = true
   const log = startRun(agentId, agent.name, "reply")
   const seat = busy(agentId, "被点到了，正在回复")
-  launch(agent, command, log, seat.live, ({ out, failure }) => {
+  launch(agent, command, log, seat.live, ({ out, failure, stopped }) => {
     queue.running = false
     const still = agentState(agentId)
-    if (failure) {
+    if (stopped) {
+      // Stopped for an interjection: pick these messages up again after it.
+      if (queue.whisper !== undefined) queue.carry = body
+      endRun(log, "failed", queue.whisper !== undefined ? "被单独插话打断，回完接着做" : "被你停下了")
+      seat.settle()
+      run(agentId)
+      return
+    } else if (failure) {
       postSystem(`唤起 ${agent.name} 没成功：${failure}`)
     } else if (adapter.reply === "stdout" && still && out) {
       try {
@@ -331,12 +376,15 @@ function writeSummary(agent: NonNullable<ReturnType<typeof agentState>>, adapter
   startSummaryJob(agent.id, prompt.upToSeq)
   const log = startRun(agent.id, agent.name, "summary")
   const seat = busy(agent.id, "在写房间摘要")
-  launch(agent, command, log, seat.live, ({ out, failure }) => {
+  launch(agent, command, log, seat.live, ({ out, failure, stopped }) => {
     queue.running = false
-    endRun(log, failure ? "failed" : "done", failure ? `没成功：${failure}` : undefined)
+    endRun(log, failure || stopped ? "failed" : "done", stopped ? "被停下了" : failure ? `没成功：${failure}` : undefined)
     seat.settle()
     endSummaryJob(agent.id)
-    if (failure) {
+    if (stopped) {
+      // An interjection asks for the summary again afterwards; a plain stop drops it.
+      if (queue.whisper !== undefined) queue.summary = true
+    } else if (failure) {
       postSystem(`请 ${agent.name} 写摘要没成功：${failure}`)
     } else if (byStdout) {
       try {
@@ -349,6 +397,81 @@ function writeSummary(agent: NonNullable<ReturnType<typeof agentState>>, adapter
     }
     run(agent.id)
   })
+}
+
+// Something the user says to one seat alone. It doesn't go into the room and
+// the answer doesn't either: both are kept on the run, and the 「单独说」
+// dialog lists them.
+function whisperPrompt(text: string, interrupted: boolean) {
+  return [
+    "【并坐房间里的 jinbao 单独对你说】",
+    "这句话没有发到群里，只有你看得到；你的回答也只给他看，不会贴进群聊，不要用 bench_say 发到群里。",
+    interrupted ? "你刚才手上的事被这句话打断了。先回应这句；回完之后房间会把你没回完的消息重新交给你，接着做就行。" : "",
+    "",
+    text,
+    "",
+    "（回答直接输出就行。）",
+  ]
+    .filter((line, index) => line || index > 1)
+    .join("\n")
+}
+
+function answerWhisper(agent: NonNullable<ReturnType<typeof agentState>>, text: string) {
+  const queue = lane(agent.id)
+  const interrupted = Boolean(queue.carry) || queue.summary === true
+  const command = commandFor(agent.agentName ?? "", agent.session ?? "", whisperPrompt(text, interrupted))
+  if (!command) return
+  queue.running = true
+  const log = startRun(agent.id, agent.name, "private")
+  log.ask = text
+  const seat = busy(agent.id, "在回你单独说的话")
+  launch(agent, command, log, seat.live, ({ out, failure, stopped }) => {
+    queue.running = false
+    if (!stopped && !failure) log.answer = out.slice(0, 4000)
+    endRun(log, failure || stopped ? "failed" : "done", stopped ? "被停下了" : failure ? `没成功：${failure}` : undefined)
+    seat.settle()
+    run(agent.id)
+  })
+}
+
+function wakeable(agentId: string) {
+  const agent = agentState(agentId)
+  if (!agent) throw new ApiError(404, "这个席位不在了")
+  if (isStandby(agent.id)) throw new ApiError(409, `${agent.name} 正挂在 bench_wait 里自己守着房间，直接在群里 @ 它`)
+  if (!agent.agentName || !agent.session || !adapterFor(agent.agentName)) {
+    throw new ApiError(400, `${agent.name} 叫不醒，没法单独说`)
+  }
+  return agent
+}
+
+// Say something to one seat alone. If it is busy, what it is doing is stopped
+// and taken up again after it answers.
+export function whisper(agentId: string, text: string) {
+  const agent = wakeable(agentId)
+  const clean = text.trim()
+  if (!clean) throw new ApiError(400, "说点什么")
+  if (clean.length > 4000) throw new ApiError(400, "太长了，4000 字以内")
+  const queue = lane(agent.id)
+  if (queue.whisper !== undefined) throw new ApiError(409, `上一句还没交给 ${agent.name}，稍等`)
+  queue.whisper = clean
+  const interrupted = queue.running
+  if (interrupted) queue.stop?.()
+  else run(agent.id)
+  return { interrupted }
+}
+
+// Stop what a seat is running now and drop what was queued after it.
+export function stopAgent(agentId: string) {
+  const agent = agentState(agentId)
+  if (!agent) throw new ApiError(404, "这个席位不在了")
+  const queue = lane(agentId)
+  if (!queue.stop) throw new ApiError(409, `${agent.name} 现在没在跑`)
+  const dropped = queue.pending.length
+  queue.pending = []
+  queue.carry = undefined
+  queue.summary = false
+  queue.stop()
+  return { dropped }
 }
 
 // The user picked this seat to write the room summary.

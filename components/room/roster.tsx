@@ -1,5 +1,5 @@
 import { useState } from "react"
-import { AtSign, ChevronRight, Ellipsis, Loader2, Plus, Settings2 } from "lucide-react"
+import { AtSign, Ellipsis, Loader2, MessageCircle, Plus, Settings2, Square } from "lucide-react"
 
 import { Button } from "@/components/ui/button"
 import {
@@ -26,6 +26,9 @@ type Props = {
   onFocus: (id: string | null) => void
   onLeave: (agent: PublicAgent) => void
   onOpenRun: (runId: string) => void
+  onStop: (agent: PublicAgent) => void
+  // Say something to this seat alone, outside the room.
+  onWhisper: (agent: PublicAgent) => void
   onConfigure: (name: string | null) => void
   // kind: open the join dialog with that agent already picked.
   onJoin: (kind?: string) => void
@@ -58,7 +61,6 @@ export function Roster(props: Props) {
   // The five core kinds always get a row; any other kind once it has a seat.
   const seated = new Set(agents.map((agent) => kindOf(agent)?.id))
   const shown = KINDS.filter((kind) => kind.core || seated.has(kind.id))
-  const spare = KINDS.filter((kind) => !kind.core && !seated.has(kind.id))
 
   return (
     <div className="flex h-full min-h-0 flex-col">
@@ -74,29 +76,6 @@ export function Roster(props: Props) {
           const seats = agents.filter((agent) => kindOf(agent)?.id === kind.id)
           return <KindGroup key={kind.id} kind={kind} seats={seats} state={reach(kind, seats, adapters)} {...props} />
         })}
-
-        {spare.length > 0 ? (
-          <details className="group/more pt-2">
-            <summary className="flex cursor-pointer list-none items-center gap-1 rounded-lg px-2 py-1 text-xs text-muted-foreground hover:bg-sidebar-accent/70">
-              <ChevronRight className="size-3.5 transition-transform group-open/more:rotate-90" />
-              还能接的 agent（{spare.length}）
-            </summary>
-            <div className="mt-1 flex flex-wrap gap-1 px-2">
-              {spare.map((kind) => (
-                <button
-                  key={kind.id}
-                  type="button"
-                  className="pill chip flex items-center gap-1.5 rounded-full px-2.5 py-1 text-xs"
-                  title={`${kind.harness} · 点开看怎么接`}
-                  onClick={() => props.onJoin(kind.id)}
-                >
-                  <span className="size-1.5 rounded-full" style={{ background: kind.color }} />
-                  {kind.label}
-                </button>
-              ))}
-            </div>
-          </details>
-        ) : null}
 
         {others.length > 0 ? (
           <section className="pt-3">
@@ -217,16 +196,38 @@ function SeatRow({ agent, ...props }: Props & { agent: PublicAgent }) {
         )}
       </button>
       {agent.runId ? (
-        // Woken right now: the line follows its current step; click to watch.
-        <button
-          type="button"
-          className="flex w-full items-center gap-1 text-left text-xs text-sky-700 hover:underline dark:text-sky-300"
-          title="看它这次在做什么"
-          onClick={() => agent.runId && props.onOpenRun(agent.runId)}
-        >
-          <Loader2 className="size-3 shrink-0 animate-spin" />
-          <span className="truncate">{agent.doing || "正在回复"}</span>
-        </button>
+        <>
+          {/* Woken right now: the line follows its current step; click to watch. */}
+          <button
+            type="button"
+            className="flex w-full items-center gap-1 text-left text-xs text-sky-700 hover:underline dark:text-sky-300"
+            title="看它这次在做什么"
+            onClick={() => agent.runId && props.onOpenRun(agent.runId)}
+          >
+            <Loader2 className="size-3 shrink-0 animate-spin" />
+            <span className="truncate">{agent.doing || "正在回复"}</span>
+          </button>
+          <span className="mt-1 flex gap-1">
+            <button
+              type="button"
+              className="pill chip flex items-center gap-1 rounded-full px-2 py-0.5 text-[11px]"
+              title="单独对它说一句：先停下手上的事回你，回完接着做"
+              onClick={() => props.onWhisper(agent)}
+            >
+              <MessageCircle className="size-3" />
+              插话
+            </button>
+            <button
+              type="button"
+              className="pill chip flex items-center gap-1 rounded-full px-2 py-0.5 text-[11px] text-muted-foreground hover:text-foreground"
+              title="停掉这次唤起，排在后面的也一起取消"
+              onClick={() => props.onStop(agent)}
+            >
+              <Square className="size-2.5 fill-current" />
+              停止
+            </button>
+          </span>
+        </>
       ) : null}
       </div>
       <DropdownMenu>
@@ -241,6 +242,18 @@ function SeatRow({ agent, ...props }: Props & { agent: PublicAgent }) {
             <AtSign />
             点名 {agent.name}
           </DropdownMenuItem>
+          {agent.callable && !agent.demo ? (
+            <DropdownMenuItem onClick={() => props.onWhisper(agent)}>
+              <MessageCircle />
+              单独说…
+            </DropdownMenuItem>
+          ) : null}
+          {agent.runId ? (
+            <DropdownMenuItem onClick={() => props.onStop(agent)}>
+              <Square />
+              停下这次唤起
+            </DropdownMenuItem>
+          ) : null}
           <DropdownMenuItem onClick={() => props.onFocus(focused ? null : agent.id)}>
             {focused ? "看全部对话" : "只看和他有关的"}
           </DropdownMenuItem>

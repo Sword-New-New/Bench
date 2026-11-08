@@ -73,7 +73,7 @@ export function RunPanel({ runId, onClose }: { runId: string | null; onClose: ()
           </DialogTitle>
           <DialogDescription>
             {run
-              ? `${run.purpose === "summary" ? "写房间摘要" : "回复点名"} · ${
+              ? `${run.purpose === "summary" ? "写房间摘要" : run.purpose === "private" ? "单独说" : "回复点名"} · ${
                   state === "running" ? "进行中" : state === "done" ? "完成" : "没成功"
                 } · ${took} · ${tools} 次工具调用`
               : error || "正在读取…"}

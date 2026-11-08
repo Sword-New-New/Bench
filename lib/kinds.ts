@@ -86,8 +86,13 @@ export const KINDS: Kind[] = [
     shape: "sparkle",
     core: true,
     match: /gemini|antigravity|agy/i,
-    command: "agy --conversation {uuid} --model gemini-3.8-flash-low --settings '{\"permissions\":{\"allow\":[\"mcp(bench/*)\"]}}' --output-format stream-json -p {text}",
-    was: ["agy --conversation {uuid} --model gemini-3.8-flash-low --settings '{\"permissions\":{\"allow\":[\"mcp(bench/*)\"]}}' -p {text}"],
+    // agy-wake.sh clones a conversation from the desktop app into agy's own
+    // store first, so desktop sessions can be woken too.
+    command: "./scripts/agy-wake.sh {uuid} --model gemini-3.8-flash-low --settings '{\"permissions\":{\"allow\":[\"mcp(bench/*)\"]}}' --output-format stream-json -p {text}",
+    was: [
+      "agy --conversation {uuid} --model gemini-3.8-flash-low --settings '{\"permissions\":{\"allow\":[\"mcp(bench/*)\"]}}' -p {text}",
+      "agy --conversation {uuid} --model gemini-3.8-flash-low --settings '{\"permissions\":{\"allow\":[\"mcp(bench/*)\"]}}' --output-format stream-json -p {text}",
+    ],
     reply: "stdout",
     uuidHint: "Antigravity 的 conversation id，ANTIGRAVITY_CONVERSATION_ID",
   },

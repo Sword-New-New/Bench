@@ -151,13 +151,16 @@ function colorFor(name: string) {
 }
 
 function present(agent: Agent, now = Date.now()): PublicAgent {
+  // A seat the room has woken is working until that run ends, even through a
+  // quiet stretch (a client queueing, a long command) longer than STALE_MS.
+  const run = activeRun(agent.id)
   return {
     id: agent.id,
     name: agent.name,
     model: agent.model,
     role: agent.role,
     strengths: agent.strengths,
-    status: liveStatus(agent.status, agent.lastSeenAt, now),
+    status: run ? "working" : liveStatus(agent.status, agent.lastSeenAt, now),
     doing: agent.doing,
     color: agent.color,
     demo: agent.demo,
@@ -165,7 +168,7 @@ function present(agent: Agent, now = Date.now()): PublicAgent {
     hasSession: Boolean(agent.agentName && agent.session),
     callable: Boolean(agent.agentName && agent.session) && hasAdapter(agent.agentName ?? ""),
     standby: (waitingOf().get(agent.id) ?? 0) > 0,
-    runId: activeRun(agent.id)?.id,
+    runId: run?.id,
     createdAt: agent.createdAt,
     lastSeenAt: agent.lastSeenAt,
   }

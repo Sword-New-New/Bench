@@ -111,7 +111,7 @@ function StepIcon({ step }: { step: RunStep }) {
   )
 }
 
-function StepRow({ step, start }: { step: RunStep; start: number }) {
+export function StepRow({ step, start }: { step: RunStep; start: number }) {
   const [open, setOpen] = useState(false)
   const more = Boolean(step.input || (step.output && step.output !== step.title))
   return (

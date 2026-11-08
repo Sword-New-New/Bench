@@ -167,6 +167,15 @@ function streams(command: string) {
   return /stream-json|--json\b|claude-code\.sh|codex-wake\.sh/.test(command)
 }
 
+// Failures whose cause is known get said in plain words instead of the
+// client's own error line.
+function explain(agentName: string | undefined, failure: string) {
+  if (agentName === "antigravity" && /trajectory .*not found/.test(failure)) {
+    return "agy 和 Antigravity 桌面端的会话记录里都找不到它报的这个会话（~/.gemini/antigravity-cli、~/.gemini/antigravity 的 conversations 下）。会话可能被删了，或者入座时报错了 id，让它重新入座一次。"
+  }
+  return failure
+}
+
 function tail(text: string, max: number) {
   const clean = text.trim().replace(/\s+/g, " ")
   return clean.length > max ? `…${clean.slice(-max)}` : clean
@@ -369,7 +378,7 @@ function run(agentId: string) {
       run(agentId)
       return
     } else if (failure) {
-      postSystem(`唤起 ${agent.name} 没成功：${failure}`)
+      postSystem(`唤起 ${agent.name} 没成功：${explain(agent.agentName, failure)}`)
     } else if (adapter.reply === "stdout" && still && out) {
       try {
         // Posted while the run is still open, so the message links to it.

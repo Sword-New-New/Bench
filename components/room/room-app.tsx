@@ -1,6 +1,6 @@
 "use client"
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react"
+import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react"
 import { ListTodo, MessageSquare, Monitor, Moon, Plug, Settings, Sun, TerminalSquare, Users } from "lucide-react"
 import { useTheme } from "next-themes"
 import { toast } from "sonner"
@@ -45,6 +45,35 @@ import type { Message, PublicAgent, RoomSnapshot, Task } from "@/lib/types"
 
 type TabId = "chat" | "people" | "tasks"
 
+// 「摘要 / 详细」 for the thread, remembered in this browser.
+const DETAIL_KEY = "bench-thread-detail"
+const DETAIL_EVENT = "bench-thread-detail"
+
+// Kept here too, for when the browser won't let the page store anything.
+let detailNow = false
+
+function detailSaved() {
+  try {
+    const saved = localStorage.getItem(DETAIL_KEY)
+    return saved === null ? detailNow : saved === "1"
+  } catch {
+    return detailNow
+  }
+}
+
+function onDetailChange(callback: () => void) {
+  window.addEventListener(DETAIL_EVENT, callback)
+  return () => window.removeEventListener(DETAIL_EVENT, callback)
+}
+
+function showDetail(value: boolean) {
+  detailNow = value
+  try {
+    localStorage.setItem(DETAIL_KEY, value ? "1" : "0")
+  } catch {}
+  window.dispatchEvent(new Event(DETAIL_EVENT))
+}
+
 export function RoomApp() {
   const [actual, setRoom] = useState<RoomSnapshot | null>(null)
   const [debug, setDebug] = useState<DebugView>(NO_DEBUG)
@@ -61,6 +90,7 @@ export function RoomApp() {
   const [joinKind, setJoinKind] = useState<string | null>(null)
   const [runId, setRunId] = useState<string | null>(null)
   const [whisperId, setWhisperId] = useState<string | null>(null)
+  const detail = useSyncExternalStore(onDetailChange, detailSaved, () => false)
   const [spawn, setSpawn] = useState<{ kind: string; from: PublicAgent | null } | null>(null)
   const [adaptersOpen, setAdaptersOpen] = useState(false)
   const [adapterName, setAdapterName] = useState<string | null>(null)
@@ -348,6 +378,8 @@ export function RoomApp() {
               <p className="mx-3 rounded-xl bg-destructive/10 px-4 py-2 text-xs text-destructive">{error} 正在重试。</p>
             ) : null}
             <Thread
+              detail={detail}
+              onDetail={showDetail}
               messages={visibleMessages}
               agents={agents}
               names={names}

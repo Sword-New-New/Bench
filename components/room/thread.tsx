@@ -3,6 +3,7 @@ import { ArrowRight, ListTree, Reply, X } from "lucide-react"
 
 import { Avatar, MessageBody, seatLook } from "@/components/room/bits"
 import { DOCK_EVENT } from "@/components/room/composer"
+import { RunTrail } from "@/components/room/run-trail"
 import { clock } from "@/lib/status"
 import type { Message, PublicAgent } from "@/lib/types"
 
@@ -22,7 +23,12 @@ export function Thread({
   onOpenTask,
   onOpenRun,
   onExample,
+  detail,
+  onDetail,
 }: {
+  // 「详细」: each wake's steps show in the thread too (only on this page).
+  detail: boolean
+  onDetail: (detail: boolean) => void
   messages: Message[]
   agents: PublicAgent[]
   names: string[]
@@ -75,6 +81,23 @@ export function Thread({
     return () => host.removeEventListener(DOCK_EVENT, pin)
   }, [])
 
+  // In 「详细」 the steps of a running wake keep growing; stay at the bottom.
+  const content = useRef<HTMLDivElement>(null)
+  useEffect(() => {
+    const node = scroller.current
+    const inner = content.current
+    if (!node || !inner) return
+    const observer = new ResizeObserver(() => {
+      if (stick.current && !gliding.current) node.scrollTop = node.scrollHeight
+    })
+    observer.observe(inner)
+    return () => observer.disconnect()
+  }, [])
+
+  // Wakes still going whose reply isn't in yet.
+  const posted = new Set(messages.map((message) => message.runId).filter(Boolean))
+  const live = detail ? agents.filter((agent) => agent.runId && !posted.has(agent.runId)) : []
+
   return (
     <div className="relative flex min-h-0 flex-1 flex-col">
       {focusName ? (
@@ -89,6 +112,28 @@ export function Thread({
           </button>
         </div>
       ) : null}
+      <div className="absolute top-2 right-3 z-10 flex rounded-full p-0.5 pill" role="radiogroup" aria-label="群聊显示">
+        {(
+          [
+            [false, "摘要"],
+            [true, "详细"],
+          ] as const
+        ).map(([value, label]) => (
+          <button
+            key={label}
+            type="button"
+            role="radio"
+            aria-checked={detail === value}
+            title={value ? "把每个模型做了什么也展开在群聊里，只有你看得到" : "群聊里只放回答"}
+            className={`rounded-full px-2.5 py-0.5 text-[11px] transition-colors ${
+              detail === value ? "bg-foreground text-background" : "text-muted-foreground hover:text-foreground"
+            }`}
+            onClick={() => onDetail(value)}
+          >
+            {label}
+          </button>
+        ))}
+      </div>
       <div
         ref={scroller}
         className="min-h-0 flex-1 overflow-y-auto"
@@ -102,7 +147,7 @@ export function Thread({
         }}
         aria-live="polite"
       >
-        <div className="mx-auto flex max-w-3xl flex-col gap-1 px-4 pt-6 pb-[calc(var(--dock,8rem)+1rem)] md:px-6">
+        <div ref={content} className="mx-auto flex max-w-3xl flex-col gap-1 px-4 pt-6 pb-[calc(var(--dock,8rem)+1rem)] md:px-6">
           {!talked ? <Welcome onExample={onExample} /> : null}
           {messages.map((message, index) => (
             <MessageRow
@@ -115,7 +160,11 @@ export function Thread({
               onReply={onReply}
               onOpenTask={onOpenTask}
               onOpenRun={onOpenRun}
+              detail={detail}
             />
+          ))}
+          {live.map((agent) => (
+            <LiveRun key={agent.id} agent={agent} />
           ))}
         </div>
       </div>
@@ -155,7 +204,9 @@ function MessageRow({
   onReply,
   onOpenTask,
   onOpenRun,
+  detail,
 }: {
+  detail: boolean
   message: Message
   previous?: Message
   messages: Message[]
@@ -268,13 +319,14 @@ function MessageRow({
           </p>
         ) : null}
         {reply ? <Quote message={reply} align="start" /> : null}
+        {detail && message.runId ? <RunTrail runId={message.runId} answer={message.text} /> : null}
         <div
           className="bubble rounded-2xl rounded-tl-md bg-card/85 px-3.5 py-2"
           style={{ "--halo": look.color } as CSSProperties}
         >
           <MessageBody text={message.text} names={names} />
         </div>
-        {message.runId ? (
+        {message.runId && !detail ? (
           // How it got there: the tool calls of the wake that wrote this.
           <button
             type="button"
@@ -287,6 +339,25 @@ function MessageRow({
         ) : null}
       </div>
       {replyButton}
+    </article>
+  )
+}
+
+// 「详细」: a seat that is working right now, with its steps as they come.
+function LiveRun({ agent }: { agent: PublicAgent }) {
+  const look = seatLook(agent)
+  return (
+    <article className="mt-4 flex gap-3">
+      <div className="w-8 shrink-0">
+        <Avatar name={agent.name} color={look.color} label={look.label} kind={look.kind} status="working" />
+      </div>
+      <div className="min-w-0 max-w-[min(85%,40rem)] flex-1">
+        <p className="mb-1 flex flex-wrap items-baseline gap-x-2 text-xs">
+          <span className="font-semibold">{agent.name}</span>
+          <span className="text-sky-700 dark:text-sky-300">正在做</span>
+        </p>
+        {agent.runId ? <RunTrail runId={agent.runId} /> : null}
+      </div>
     </article>
   )
 }

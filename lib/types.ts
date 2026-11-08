@@ -17,6 +17,8 @@ export type PublicAgent = {
   agentName: string
   hasSession: boolean
   callable: boolean
+  // Blocked in bench_wait right now: a message for it is delivered at once.
+  standby: boolean
   createdAt: number
   lastSeenAt: number
 }

@@ -1,7 +1,7 @@
 import { spawn } from "node:child_process"
 
 import { adapterFor, commandFor, summonPath } from "@/lib/adapters"
-import { agentState, onMessage, postSystem, pulseAgent, sayAs, summonCandidates } from "@/lib/store"
+import { agentState, isStandby, onMessage, postSystem, pulseAgent, sayAs, summonCandidates } from "@/lib/store"
 import type { Message } from "@/lib/types"
 
 const NOTE_GAP_MS = 30_000
@@ -165,6 +165,9 @@ function wake(message: Message) {
       }
       continue
     }
+    // A seat on standby picks the message up from its own wait loop; waking it
+    // with a command would start a second run on the same session.
+    if (isStandby(agent.id)) continue
     if (!agent.agentName || !agent.session) {
       if (cooled(`${agent.id}:session`, NOTE_GAP_MS)) {
         postSystem(`${agent.name} 被点到了，但还没报 agent 和 uuid，叫不醒`)

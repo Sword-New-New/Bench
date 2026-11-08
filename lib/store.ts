@@ -34,7 +34,7 @@ const UUID_RE = /^[A-Za-z0-9._-]{1,128}$/
 const STATUSES = new Set<AgentStatus>(["idle", "working", "blocked", "offline"])
 const TASK_STATUSES = new Set<TaskStatus>(["open", "doing", "blocked", "done"])
 
-type Agent = Omit<PublicAgent, "hasSession" | "callable" | "status" | "agentName"> & {
+type Agent = Omit<PublicAgent, "hasSession" | "callable" | "standby" | "status" | "agentName"> & {
   token: string
   status: AgentStatus
   agentName?: string
@@ -52,6 +52,11 @@ type State = {
 type Runtime = {
   state: State
   bus: EventEmitter
+  // In-memory only. waiting: seats blocked in a wait call right now.
+  // standby: seats that run a wait loop, until this time; the room delivers
+  // to them through the loop instead of waking them with a command.
+  waiting?: Map<string, number>
+  standby?: Map<string, number>
 }
 
 const globalStore = globalThis as typeof globalThis & { __bench?: Runtime }
@@ -139,6 +144,7 @@ function present(agent: Agent, now = Date.now()): PublicAgent {
     agentName: agent.agentName ?? "",
     hasSession: Boolean(agent.agentName && agent.session),
     callable: Boolean(agent.agentName && agent.session) && hasAdapter(agent.agentName ?? ""),
+    standby: (waitingOf().get(agent.id) ?? 0) > 0,
     createdAt: agent.createdAt,
     lastSeenAt: agent.lastSeenAt,
   }
@@ -201,6 +207,18 @@ function findAgent(id: string) {
 
 function resolveAgent(ref: string) {
   return runtime().state.agents.find((agent) => agent.id === ref || agent.name === ref)
+}
+
+function waitingOf() {
+  return (runtime().waiting ??= new Map())
+}
+
+function standbyOf() {
+  return (runtime().standby ??= new Map())
+}
+
+export function isStandby(id: string) {
+  return (standbyOf().get(id) ?? 0) > Date.now()
 }
 
 export function agentState(id: string): Readonly<Agent> | undefined {
@@ -680,6 +698,7 @@ export function removeAgent(id: string, silent = false) {
     }
   }
   state.agents = state.agents.filter((item) => item.id !== agent.id)
+  standbyOf().delete(agent.id)
   if (!silent) {
     appendMessage({
       kind: "system",
@@ -707,8 +726,69 @@ export function leave(input: unknown) {
   return removeAgent(actor.id)
 }
 
+const WAIT_DEFAULT_MS = 50_000
+const WAIT_MAX_MS = 15 * 60_000
+// After a wait returns the agent is busy answering; keep treating it as on
+// standby this long so the room queues for the next wait instead of waking it.
+const STANDBY_GRACE_MS = 10 * 60_000
+
+// Long poll: resolve when a message for this seat lands after `after`, or on
+// timeout. Returns the same shape as inbox plus `timedOut`.
+export async function waitFor(input: unknown, signal?: AbortSignal) {
+  const body = asRecord(input)
+  const agentId = asString(body.agentId)
+  const token = asString(body.token)
+  if (!agentId || !token) throw new ApiError(401, "等待要带 agentId 和 token")
+  const agent = requireAgent(agentId, token)
+  const afterRaw = body.after ?? 0
+  const after = typeof afterRaw === "number" ? afterRaw : Number(afterRaw)
+  if (!Number.isFinite(after) || after < 0) throw new ApiError(400, "after 要是一个不小于 0 的数字")
+  const timeoutRaw = Number(body.timeoutMs ?? WAIT_DEFAULT_MS)
+  const timeoutMs = Math.min(WAIT_MAX_MS, Math.max(1_000, Number.isFinite(timeoutRaw) ? timeoutRaw : WAIT_DEFAULT_MS))
+  const id = agent.id
+  standbyOf().set(id, Date.now() + timeoutMs + STANDBY_GRACE_MS)
+
+  const pending = () =>
+    runtime().state.messages.some((message) => message.seq > after && isForAgent(message, id, runtime().state.messages))
+  const reply = (timedOut: boolean) => ({ ...inbox({ agentId, token, after }), timedOut })
+  if (pending()) return reply(false)
+
+  const waiting = waitingOf()
+  waiting.set(id, (waiting.get(id) ?? 0) + 1)
+  bumpRev()
+  commit()
+  const timedOut = await new Promise<boolean>((resolve) => {
+    let done = false
+    const finish = (value: boolean) => {
+      if (done) return
+      done = true
+      clearTimeout(timer)
+      stop()
+      signal?.removeEventListener("abort", onAbort)
+      resolve(value)
+    }
+    const stop = onMessage((message) => {
+      if (message.seq > after && isForAgent(message, id, runtime().state.messages)) finish(false)
+    })
+    const timer = setTimeout(() => finish(true), timeoutMs)
+    const onAbort = () => finish(true)
+    signal?.addEventListener("abort", onAbort)
+  })
+  const left = (waiting.get(id) ?? 1) - 1
+  if (left > 0) waiting.set(id, left)
+  else waiting.delete(id)
+  if (!findAgent(id)) throw new ApiError(404, "这个席位不在了")
+  if (signal?.aborted) {
+    bumpRev()
+    commit()
+    return { timedOut: true, aborted: true }
+  }
+  return reply(timedOut)
+}
+
 export function resetRoom() {
   runtime().state = emptyState()
+  standbyOf().clear()
   commit()
   return snapshot()
 }

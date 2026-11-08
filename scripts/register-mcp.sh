@@ -22,6 +22,15 @@ case "$kind" in
     bin="$(command -v codex || echo /usr/lib/chatgpt/resources/codex)"
     "$bin" mcp remove bench >/dev/null 2>&1 || true
     "$bin" mcp add bench -- "$node" "$script" --agent codex
+    # bench_wait blocks up to ~9 minutes; Codex's default tool timeout is 60 s.
+    "$node" -e '
+      const fs = require("node:fs")
+      const file = process.argv[1]
+      const text = fs.readFileSync(file, "utf8")
+      const next = text.replace(/(\[mcp_servers\.bench\]\n(?:(?!\[)[^\n]*\n)*)/, (block) =>
+        /tool_timeout_sec/.test(block) ? block : block.replace(/\n*$/, "\ntool_timeout_sec = 600\n\n"))
+      fs.writeFileSync(file, next)
+    ' "${CODEX_HOME:-$HOME/.codex}/config.toml"
     ;;
   antigravity)
     bin="$(command -v agy || echo "$HOME/.local/bin/agy")"
@@ -65,6 +74,7 @@ case "$kind" in
         transport: stdio
         command: "$node"
         args: ["$script", "--agent", "dsh"]
+        toolCallTimeoutMs: 600000
 EOF
       echo "已写入 $patch"
     done

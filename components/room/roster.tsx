@@ -36,6 +36,8 @@ function reach(kind: Kind, seats: PublicAgent[], adapters: AdapterInfo[] | null)
   if (adapters && !adapter) return { text: "没配唤起命令", tone: "warn" as const }
   if (adapter && !adapter.installed) return { text: "本机没装", tone: "warn" as const }
   if (seats.length === 0) return { text: "还没接入", tone: "muted" as const }
+  const standby = seats.filter((agent) => agent.standby && agent.status !== "offline").length
+  if (standby > 0) return { text: `${standby} 个待命`, tone: "ok" as const }
   if (online > 0) return { text: `${online} 个在线`, tone: "ok" as const }
   if (seats.some((agent) => agent.callable)) return { text: "离线 · 点名会唤起", tone: "ok" as const }
   return { text: "离线 · 没报会话", tone: "warn" as const }
@@ -152,9 +154,18 @@ function SeatRow({ agent, ...props }: Props & { agent: PublicAgent }) {
         <span className="flex items-baseline gap-1.5">
           <span className="truncate text-[13px] font-medium">{agent.name}</span>
           {agent.demo ? <span className="shrink-0 text-[10px] text-muted-foreground">演示</span> : null}
-          <span className="ml-auto shrink-0 text-[10px] text-muted-foreground">
-            {agent.status === "offline" ? ago(agent.lastSeenAt, props.now) : STATUS_LABEL[agent.status]}
-          </span>
+          {agent.standby && agent.status !== "offline" ? (
+            <span
+              className="ml-auto shrink-0 rounded-full bg-emerald-500/12 px-1.5 text-[10px] font-medium text-emerald-700 dark:text-emerald-300"
+              title="正挂在 bench_wait 里，点它会立刻收到"
+            >
+              待命
+            </span>
+          ) : (
+            <span className="ml-auto shrink-0 text-[10px] text-muted-foreground">
+              {agent.status === "offline" ? ago(agent.lastSeenAt, props.now) : STATUS_LABEL[agent.status]}
+            </span>
+          )}
         </span>
         <span className="block truncate text-xs text-muted-foreground">
           {agent.doing || `${agent.model} · ${agent.role}`}

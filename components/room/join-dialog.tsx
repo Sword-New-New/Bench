@@ -36,7 +36,7 @@ function CopyLine({ text }: { text: string }) {
   const [done, setDone] = useState(false)
   return (
     <div className="flex items-center gap-1 rounded-lg border bg-muted/50 py-1 pr-1 pl-2.5">
-      <code className="min-w-0 flex-1 truncate font-mono text-xs" title={text}>
+      <code className="min-w-0 flex-1 overflow-x-auto py-1 font-mono text-xs whitespace-nowrap" title={text}>
         {text}
       </code>
       <Button
@@ -93,7 +93,7 @@ export function JoinDialog({
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="sm:max-w-2xl">
+      <DialogContent className="max-h-[calc(100dvh-2rem)] grid-cols-[minmax(0,1fr)] overflow-y-auto sm:max-w-2xl">
         <DialogHeader>
           <DialogTitle>把 AI 接进房间</DialogTitle>
           <DialogDescription>

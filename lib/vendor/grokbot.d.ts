@@ -25,7 +25,17 @@ export type GrokBotOptions = {
   eyeSize?: number
 }
 
+export type GrokBotShape = {
+  name: string
+  label: string
+  /** Outline as x, y pairs, one per ray from the centre. */
+  pts: Float32Array
+  /** Where the eyes sit looking straight ahead: x, y, scale. */
+  eye: [number, number, number]
+}
+
 declare class GrokBot {
+  static SHAPES: Record<string, GrokBotShape>
   constructor(host: Element, options?: GrokBotOptions)
   state: GrokBotState
   setState(state: GrokBotState): this

@@ -23,8 +23,44 @@ const STATE: Record<AgentStatus, GrokBotState> = {
   offline: "sleeping",
 }
 
-// The shape a bot squishes into while the pointer is on its row.
-const HOVER_SHAPE = "pill"
+// The shape a bot squishes into while the pointer is on its row. grokbot.js's
+// own "pill" is thin and steeply tilted; Grok Bot's hover capsule is chubbier
+// (about 0.6 as tall as wide) and nearly level, so we add that shape.
+const HOVER_SHAPE = "capsule"
+
+function registerCapsule() {
+  if (GrokBot.SHAPES[HOVER_SHAPE]) return
+  const radius = 0.6
+  const half = 1 - radius
+  const tilt = (-6 * Math.PI) / 180
+  const inside = (x: number, y: number) => {
+    // Undo the tilt, then the distance to the centre segment against the radius.
+    const u = x * Math.cos(tilt) + y * Math.sin(tilt)
+    const v = -x * Math.sin(tilt) + y * Math.cos(tilt)
+    return Math.hypot(u - Math.min(Math.max(u, -half), half), v) < radius
+  }
+  // Same sampling as grokbot.js: one ray per point from the centre, starting
+  // straight up, so this outline morphs point for point into the others.
+  const count = GrokBot.SHAPES.circle.pts.length / 2
+  const pts = new Float32Array(count * 2)
+  for (let i = 0; i < count; i++) {
+    const angle = -Math.PI / 2 + (Math.PI * 2 * i) / count
+    const dx = Math.cos(angle)
+    const dy = Math.sin(angle)
+    let lo = 0
+    let hi = 1.5
+    for (let step = 0; step < 20; step++) {
+      const mid = (lo + hi) / 2
+      if (inside(dx * mid, dy * mid)) lo = mid
+      else hi = mid
+    }
+    pts[i * 2] = dx * hi
+    pts[i * 2 + 1] = dy * hi
+  }
+  GrokBot.SHAPES[HOVER_SHAPE] = { name: HOVER_SHAPE, label: "Capsule", pts, eye: [0.16, -0.06, 0.95] }
+}
+
+registerCapsule()
 
 // How far the eyes may look, as a fraction of grokbot.js's full range. The
 // pointer is usually far off to the side along a wide row; at full range the

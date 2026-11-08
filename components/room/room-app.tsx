@@ -1,7 +1,7 @@
 "use client"
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react"
-import { ListTodo, MessageSquare, Moon, Plug, Sun, Users } from "lucide-react"
+import { ListTodo, MessageSquare, Monitor, Moon, Plug, Sun, Users } from "lucide-react"
 import { useTheme } from "next-themes"
 import { toast } from "sonner"
 
@@ -23,6 +23,13 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog"
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuRadioGroup,
+  DropdownMenuRadioItem,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu"
 import { Label } from "@/components/ui/label"
 import { Textarea } from "@/components/ui/textarea"
 import type { Message, PublicAgent, RoomSnapshot, Task } from "@/lib/types"
@@ -47,7 +54,7 @@ export function RoomApp() {
   const [note, setNote] = useState("")
   const [highlight, setHighlight] = useState<string | null>(null)
   const [adapters, setAdapters] = useState<AdapterInfo[] | null>(null)
-  const { resolvedTheme, setTheme } = useTheme()
+  const { theme, setTheme } = useTheme()
   const composerRef = useRef<HTMLTextAreaElement>(null)
   const pullRef = useRef<() => void>(() => {})
 
@@ -205,15 +212,27 @@ export function RoomApp() {
             <span className={`size-1.5 rounded-full ${live ? "bg-emerald-500" : "animate-pulse bg-amber-500"}`} />
             {room ? `${seated} 在线 · ${working} 在做` : "正在打开"}
           </span>
-          <Button
-            type="button"
-            variant="ghost"
-            size="icon-sm"
-            aria-label="切换深浅色"
-            onClick={() => setTheme(resolvedTheme === "dark" ? "light" : "dark")}
-          >
-            {now > 0 && resolvedTheme === "dark" ? <Sun /> : <Moon />}
-          </Button>
+          <DropdownMenu>
+            <DropdownMenuTrigger render={<Button type="button" variant="ghost" size="icon-sm" aria-label="深浅色" />}>
+              {now > 0 && theme === "dark" ? <Moon /> : now > 0 && theme === "light" ? <Sun /> : <Monitor />}
+            </DropdownMenuTrigger>
+            <DropdownMenuContent align="end" className="min-w-32">
+              <DropdownMenuRadioGroup value={theme ?? "system"} onValueChange={(value) => setTheme(value)}>
+                <DropdownMenuRadioItem value="light" closeOnClick>
+                  <Sun />
+                  浅色
+                </DropdownMenuRadioItem>
+                <DropdownMenuRadioItem value="dark" closeOnClick>
+                  <Moon />
+                  深色
+                </DropdownMenuRadioItem>
+                <DropdownMenuRadioItem value="system" closeOnClick>
+                  <Monitor />
+                  跟随系统
+                </DropdownMenuRadioItem>
+              </DropdownMenuRadioGroup>
+            </DropdownMenuContent>
+          </DropdownMenu>
           <Button type="button" size="sm" className="rounded-full" onClick={() => setJoinOpen(true)}>
             <Plug />
             接入说明

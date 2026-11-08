@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react"
+import { useEffect, useRef, useState, type CSSProperties } from "react"
 import { ArrowRight, Reply, X } from "lucide-react"
 
 import { Avatar, MessageBody, seatLook } from "@/components/room/bits"
@@ -189,7 +189,7 @@ function MessageRow({
         {replyButton}
         <div className="max-w-[min(85%,36rem)]">
           {reply ? <Quote message={reply} align="end" /> : null}
-          <div className="rounded-2xl rounded-br-md bg-primary px-3.5 py-2 text-primary-foreground">
+          <div className="bubble mine rounded-2xl rounded-br-md px-3.5 py-2 text-white">
             <MessageBody text={message.text} names={names} tone="inverse" />
           </div>
           {!grouped ? (
@@ -227,7 +227,10 @@ function MessageRow({
           </p>
         ) : null}
         {reply ? <Quote message={reply} align="start" /> : null}
-        <div className="rounded-2xl rounded-tl-md border bg-card/85 px-3.5 py-2">
+        <div
+          className="bubble rounded-2xl rounded-tl-md bg-card/85 px-3.5 py-2"
+          style={{ "--halo": look.color } as CSSProperties}
+        >
           <MessageBody text={message.text} names={names} />
         </div>
       </div>

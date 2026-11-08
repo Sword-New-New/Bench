@@ -16,7 +16,8 @@ const KINDS = {
   // waitSec: how long one bench_wait blocks, kept under each client's tool-call
   // timeout (register-mcp.sh raises Codex's and DeepSeek's to 600 s).
   claude: { label: "Claude", env: "CLAUDE_CODE_SESSION_ID", hint: "Claude Code 的 session id", waitSec: 540 },
-  codex: { label: "GPT", env: "CODEX_THREAD_ID", hint: "Codex 的 thread id", waitSec: 540 },
+  // Codex does not pass CODEX_THREAD_ID on to MCP servers, only to its shell.
+  codex: { label: "GPT", env: "CODEX_THREAD_ID", hint: "Codex 的 thread id（在 shell 里 echo $CODEX_THREAD_ID）", waitSec: 540 },
   cursor: { label: "Grok", env: "", hint: "cursor-agent 的 chat id（cursor-agent ls 能看到）", waitSec: 50 },
   antigravity: { label: "Gemini", env: "", hint: "Antigravity 的 conversation id", waitSec: 50 },
   dsh: { label: "DeepSeek", env: "", hint: "dsh-agent resume 用的会话 id", waitSec: 540 },
@@ -46,7 +47,10 @@ function detectUuid() {
   return value && UUID_RE.test(value) ? value : ""
 }
 
-// ---- seat state, one file per kind + session ----
+// ---- seat state, one file per kind + session, and one per kind + name ----
+// The name file lets a new MCP process (a resumed session, or one that only
+// learns its session id later) take its seat back instead of hitting
+// "name already taken".
 
 const stateDir = path.join(process.env.XDG_STATE_HOME || path.join(os.homedir(), ".local", "state"), "bench-mcp")
 let uuid = detectUuid()
@@ -56,8 +60,11 @@ function stateFile() {
   return uuid ? path.join(stateDir, `${kind}-${uuid}.json`) : ""
 }
 
-function loadSeat() {
-  const file = stateFile()
+function nameFile(name) {
+  return path.join(stateDir, `${kind}-name-${Buffer.from(name).toString("hex")}.json`)
+}
+
+function loadSeat(file = stateFile()) {
   if (!file) return null
   try {
     const parsed = JSON.parse(readFileSync(file, "utf8"))
@@ -68,17 +75,18 @@ function loadSeat() {
 }
 
 function saveSeat() {
-  const file = stateFile()
-  if (!file || !seat) return
+  if (!seat) return
   mkdirSync(stateDir, { recursive: true, mode: 0o700 })
-  const tmp = `${file}.tmp`
-  writeFileSync(tmp, JSON.stringify(seat), { mode: 0o600 })
-  renameSync(tmp, file)
+  for (const file of [stateFile(), nameFile(seat.name)]) {
+    if (!file) continue
+    const tmp = `${file}.tmp`
+    writeFileSync(tmp, JSON.stringify(seat), { mode: 0o600 })
+    renameSync(tmp, file)
+  }
 }
 
 function dropSeat() {
-  const file = stateFile()
-  if (file) rmSync(file, { force: true })
+  for (const file of [stateFile(), seat ? nameFile(seat.name) : ""]) if (file) rmSync(file, { force: true })
   seat = null
   stopHeartbeat()
 }
@@ -292,7 +300,7 @@ async function join(args) {
     if (!UUID_RE.test(given)) throw new RoomError(400, "uuid 只能是字母、数字、点、下划线或短横线")
     if (given !== uuid) {
       uuid = given
-      seat = loadSeat()
+      seat = loadSeat() ?? seat
     }
   }
   const name = (typeof args.name === "string" && args.name.trim()) || seat?.name || `${spec.label}-${(uuid || Math.random().toString(16).slice(2)).slice(0, 4)}`
@@ -304,9 +312,10 @@ async function join(args) {
     ...(uuid ? { agentName: kind, uuid } : {}),
   }
   // A new name means a new seat; the old one stays until someone asks it to leave.
+  const known = seat?.name === name ? seat : loadSeat(nameFile(name))
   let result
   try {
-    result = await call("/api/v1/join", seat && seat.name === name ? { ...body, token: seat.token } : body)
+    result = await call("/api/v1/join", known ? { ...body, token: known.token } : body)
   } catch (error) {
     if (error instanceof RoomError && error.status === 409) {
       throw new RoomError(409, `${name} 这个名字已经有人在用了，换一个名字再 bench_join。`)
@@ -315,7 +324,7 @@ async function join(args) {
   }
   const room = await call("/api/v1/room")
   // A new seat starts reading from now; old history is there via bench_inbox all.
-  seat = { agentId: result.agent.id, token: result.token, name: result.agent.name, cursor: seat?.cursor ?? room.seq }
+  seat = { agentId: result.agent.id, token: result.token, name: result.agent.name, cursor: known?.cursor ?? room.seq }
   saveSeat()
   startHeartbeat()
   const session = uuid

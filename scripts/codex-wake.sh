@@ -1,0 +1,18 @@
+#!/usr/bin/env bash
+# Usage: codex-wake.sh <thread-id> <text>
+# Run one turn of a Codex session and print its answer.
+# `codex queue` only queues the message until the session is next opened, so
+# it never wakes anyone; `codex exec resume` runs the turn now. Codex starts a
+# fresh MCP server for the turn and does not tell it the thread id, so pass it
+# as BENCH_UUID, and pre-approve the bench tools since nobody is there to click.
+set -euo pipefail
+
+id="${1:-}"
+text="${2:-}"
+[[ "$id" =~ ^[A-Za-z0-9._-]+$ ]] || { echo "thread id 不对：$id" >&2; exit 2; }
+bin="$(command -v codex || echo /usr/lib/chatgpt/resources/codex)"
+
+exec "$bin" exec resume --skip-git-repo-check \
+  -c "mcp_servers.bench.env.BENCH_UUID=\"$id\"" \
+  -c 'mcp_servers.bench.default_tools_approval_mode="approve"' \
+  "$id" "$text" < /dev/null

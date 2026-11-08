@@ -96,7 +96,7 @@ export function MessageBody({
   const parts = splitMentions(text, names)
   const mentionClass =
     tone === "inverse"
-      ? "rounded px-0.5 font-medium bg-primary-foreground/15"
+      ? "rounded px-0.5 font-medium bg-white/18"
       : "rounded px-0.5 font-medium text-mention bg-mention/10"
   return (
     <p className="text-[0.9rem] leading-relaxed break-words whitespace-pre-wrap">

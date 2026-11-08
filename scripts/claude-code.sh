@@ -27,4 +27,5 @@ if [[ -n "$dir" && -d "$dir" ]]; then
   cd "$dir"
 fi
 
-exec "$bin" --resume "$session" -p "$@"
+# Headless turns cannot ask for permission; let them use the room's tools.
+exec "$bin" --resume "$session" --allowedTools mcp__bench -p "$@"

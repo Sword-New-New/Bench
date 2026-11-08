@@ -1,7 +1,7 @@
 "use client"
 
 import { useState } from "react"
-import { Check, ChevronsUpDown, FolderOpen, Loader2, Plus, Settings2 } from "lucide-react"
+import { Check, ChevronsUpDown, FolderOpen, FolderSearch, Loader2, Plus, Settings2 } from "lucide-react"
 import { toast } from "sonner"
 
 import { api } from "@/components/room/api"
@@ -114,6 +114,7 @@ export function ProjectDialog({
   const [dir, setDir] = useState("")
   const [sending, setSending] = useState(false)
   const [confirming, setConfirming] = useState(false)
+  const [browsing, setBrowsing] = useState(false)
 
   // Fresh fields each time it opens.
   const [shown, setShown] = useState<string | null>(null)
@@ -141,6 +142,22 @@ export function ProjectDialog({
       toast.error(error instanceof Error ? error.message : "没存上")
     } finally {
       setSending(false)
+    }
+  }
+
+  // The desktop's own folder picker, opened by the room.
+  const browse = async () => {
+    setBrowsing(true)
+    try {
+      const result = await api<{ dir: string | null }>("/api/v1/folder", {
+        method: "POST",
+        body: JSON.stringify({ as: "human", start: dir.trim() }),
+      })
+      if (result.dir) setDir(result.dir)
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "没打开选目录的窗口")
+    } finally {
+      setBrowsing(false)
     }
   }
 
@@ -189,15 +206,21 @@ export function ProjectDialog({
           </div>
           <div className="space-y-1.5">
             <Label htmlFor="project-dir">项目目录（可不填）</Label>
-            <div className="relative">
-              <FolderOpen className="pointer-events-none absolute top-1/2 left-2.5 size-3.5 -translate-y-1/2 text-muted-foreground" />
-              <Input
-                id="project-dir"
-                value={dir}
-                onChange={(event) => setDir(event.target.value)}
-                placeholder="/home/you/project"
-                className="pl-8 font-mono text-xs"
-              />
+            <div className="flex gap-2">
+              <div className="relative min-w-0 flex-1">
+                <FolderOpen className="pointer-events-none absolute top-1/2 left-2.5 size-3.5 -translate-y-1/2 text-muted-foreground" />
+                <Input
+                  id="project-dir"
+                  value={dir}
+                  onChange={(event) => setDir(event.target.value)}
+                  placeholder="/home/you/project"
+                  className="pl-8 font-mono text-xs"
+                />
+              </div>
+              <Button type="button" variant="outline" className="shrink-0" disabled={browsing} onClick={browse}>
+                {browsing ? <Loader2 className="animate-spin" /> : <FolderSearch />}
+                {browsing ? "在选…" : "浏览…"}
+              </Button>
             </div>
             <p className="text-[11px] leading-4 text-muted-foreground">
               在这个目录里干活的 AI 入座时没说项目名，会自动进这个项目；房间开新会话也默认开在这里。

@@ -124,9 +124,11 @@ MCP 只管 agent → 房间：入座、发言、收件箱、任务、在线。�
 
 「当前是哪个项目」不是参数，是 `AsyncLocalStorage`（`lib/store.ts` 的 `scope`）：路由进门时用 `inRequest`（看 body 的 `agentId` 找席位所在项目，或 `project` 字段 / `?project=`，只有一个项目时可省）、`inSeat`、`inProject` 进入一次，里面调到的 store 函数都作用在这个项目上。没进门就调会报「没指明是哪个项目」。唤起在请求结束后还在跑，`lib/summon.ts` 里输出、计时器、结束回调都用 `bindProject` 包着，回到发起时的项目；项目被删了就什么也不做。
 
-席位 id 全局唯一，名字只在项目内唯一。一个会话（agentName + uuid）同一时间只坐在一个项目里：`join` 或报会话时，它在别的项目里的席位会被请走，那边留一句「X 去了「Y」」。入座进哪个项目由 `pickProject` 决定：指名 > 这个会话已经坐着的项目 > 工作目录落在哪个项目目录里（最深的那个）> 只有一个项目时就是它 > 否则 409 列出项目，让模型问用户。MCP 桥在 `bench_join` 前先调 `POST /api/v1/projects/pick`（带 `process.cwd()`），找到项目再按「项目 + 名字」读回旧席位。换项目时名字、模型、分工跟着走。
+席位 id 全局唯一，名字只在项目内唯一。一个会话（agentName + uuid）同一时间只坐在一个项目里：`join` 或报会话时，它在别的项目里的席位会被请走，那边留一句「X 去了「Y」」。入座进哪个项目由 `pickProject` 决定：指名 > 这个会话已经坐着的项目 > 工作目录落在哪个项目目录里（最深的那个）> 只有一个项目时就是它 > 否则 400 列出项目，让模型问用户（不用 409：旧版桥会把 409 当成「名字被占」）。MCP 桥在 `bench_join` 前先调 `POST /api/v1/projects/pick`（带 `process.cwd()`），找到项目再按「项目 + 名字」读回旧席位。换项目时名字、模型、分工跟着走。
 
 页面的每个请求都带当前项目（`components/room/api.ts`：读请求加 `?project=`，JSON body 加 `project` 字段），所以页面代码里大多数调用不用自己写。
+
+项目设置里的「浏览…」调 `POST /api/v1/folder`：房间在桌面上开 zenity 的选目录窗口，等人选完把完整路径交回（浏览器给不出目录的完整路径，所以只能由房间来开）。房间是 `env -i` 起的也行，`DISPLAY`、`XAUTHORITY`、DBus 地址缺了会按本机桌面补上。取消返回 `{dir: null}`；同时只开一个窗口，开着时再点是 409；没装 zenity 是 501，提示直接填路径。
 
 不要为每个请求新开一份状态。SSE 用同一份上的 EventEmitter。`GET /api/v1/stream` 不结束，所以不要对首页用 Chrome 的 `--dump-dom`，它会一直等页面空闲。
 

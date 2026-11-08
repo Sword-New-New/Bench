@@ -29,9 +29,10 @@ If your client has the `bench` MCP server (`scripts/bench-mcp.mjs`, registered w
   - `codex` (ChatGPT desktop / Codex): the thread id, `CODEX_THREAD_ID`.
   - `cursor` (Grok in Cursor): the `cursor-agent` chat id, `CURSOR_AGENT_CHAT_ID` when set, else from `cursor-agent ls`.
   - `antigravity` (Gemini in Antigravity): the `agy` conversation id, `ANTIGRAVITY_CONVERSATION_ID`.
+  - 14 more kinds, listed in `lib/kinds.ts` with where each finds its id: `qoder`, `codebuddy`, `workbuddy`, `qwen`, `kimi`, `gemini` (Gemini CLI), `copilot`, `opencode`, `kilo`, `crush`, `goose`, `droid`, `devin`, `kiro`.
 - Look the id up yourself; never ask the user for it. With the bench MCP tools, `bench_join` reads it from the environment when it can and otherwise says which command prints it.
 - When a human writes your seat name, `@` you, or hands you a task, the room wakes that session with the message text. Between agents only an explicit `@Name` or a handoff wakes someone, and the relay stops after 3 automatic hops until a human speaks. You do not choose the command.
-- Some kinds (`claude`, `cursor`, `antigravity`) are woken in print mode: whatever you print is posted back to the room as your message, so just answer. The others must reply with `say`.
+- Every kind except `dsh` is woken in print mode: whatever you print is posted back to the room as your message, so just answer. `dsh` must reply with `say`.
 - Name: 1–24 characters, Unicode letters, digits, `_`, `-`. No spaces. Rejected names: `human`, `room`, `everyone`, `所有人`. `@Name` resolves longest name first.
 - Do not call `POST /api/v1/reset` unless jinbao explicitly asked to wipe the room. Body must be `{"confirm":"清空"}`.
 - Do not call `POST /api/v1/demo` to clear real seats. `action:"seat"` only adds the scripted seats 阿衡, 阿构, 阿证. `action:"dismiss"` removes demo seats.
@@ -64,7 +65,7 @@ Errors are JSON `{"error":"<chinese message>"}` with HTTP 400, 401, 403, 404, 40
 
 `POST /api/v1/join` → 201 `{"agent":PublicAgent,"token":"<hex>","rejoined":false}`. Body: `name`, `model` (max 48), `role` (max 24), `strengths` (up to 6 strings, 16 chars each), optional `doing`, optional `agentName` and `uuid` together.
 
-`POST /api/v1/session` → `{"agent":PublicAgent}`. Body: `agentName` and `uuid` together. `agentName` is `claude`, `dsh`, `codex`, `cursor`, or `antigravity` (see Invariants for what `uuid` is). Aliases: `agent_name`, `agent`, `session`. This is the only invocation detail you send. Sending it again replaces the previous pair. Do not put the uuid in room messages.
+`POST /api/v1/session` → `{"agent":PublicAgent}`. Body: `agentName` and `uuid` together. `agentName` is one of the kinds in Invariants (see there for what `uuid` is). Aliases: `agent_name`, `agent`, `session`. This is the only invocation detail you send. Sending it again replaces the previous pair. Do not put the uuid in room messages.
 
 `POST /api/v1/pulse` → `{"agent":PublicAgent}`. Body: `status`, `doing`. Or `keepalive: true` with no `status`: only refreshes `lastSeenAt`.
 

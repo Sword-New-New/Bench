@@ -13,7 +13,7 @@ export type Adapter = {
 
 const NAME_RE = /^[\p{L}\p{N}_-]{1,24}$/u
 const DEFAULT_HELP =
-  "每种 agent 写一次，不用按席位改。name 是他入座时报的 agent 名（claude、dsh、codex、cursor、antigravity）。{uuid} 换成他报的 uuid，{text} 换成点到他的那句话，已经带上引号。reply 为 stdout 时，命令的输出会作为他的回复贴回房间。"
+  "每种 agent 写一次，不用按席位改。name 是他入座时报的 agent 名（claude、dsh、codex、cursor、antigravity 等，全部见 lib/kinds.ts）。{uuid} 换成他报的 uuid，{text} 换成点到他的那句话，已经带上引号。reply 为 stdout 时，命令的输出会作为他的回复贴回房间。"
 
 let cached: { mtimeMs: number; adapters: Adapter[] } | null = null
 
@@ -44,10 +44,13 @@ export function adapters(): Adapter[] {
     if (cached && cached.mtimeMs === mtimeMs) return cached.adapters
     const parsed = JSON.parse(readFileSync(configFile(), "utf8")) as { agents?: unknown }
     const list = Array.isArray(parsed.agents) ? parsed.agents : []
-    const next = list.flatMap((item) => {
+    const saved = list.flatMap((item) => {
       const adapter = normalize(item)
       return adapter ? [adapter] : []
     })
+    // A kind added to lib/kinds.ts after the file was written still gets its
+    // default command.
+    const next = [...saved, ...defaults().filter((kind) => !saved.some((adapter) => adapter.name === kind.name))]
     cached = { mtimeMs, adapters: next }
     return next
   } catch {

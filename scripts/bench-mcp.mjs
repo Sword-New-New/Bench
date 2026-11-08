@@ -38,6 +38,43 @@ const KINDS = {
     waitSec: 50,
   },
   dsh: { label: "DeepSeek", env: ["DSH_SESSION_ID"], find: "在 shell 里运行 echo $DSH_SESSION_ID（形如 session-…）", waitSec: 540 },
+  // The rest were added from each tool's docs (2026-11) and not all tried
+  // live; most don't hand MCP servers a session variable, so
+  // `find` points at their own session list.
+  qoder: {
+    label: "Qoder",
+    env: ["QODER_SESSION_ID"],
+    find: "在 shell 里运行 echo $QODER_SESSION_ID；是空的就运行 ls -t ~/.qoder/projects/*/*.jsonl | head -1，文件名就是 id",
+    waitSec: 50,
+  },
+  codebuddy: {
+    label: "CodeBuddy",
+    env: ["CODEBUDDY_SESSION_ID"],
+    find: "在 shell 里运行 echo $CODEBUDDY_SESSION_ID；是空的就运行 codebuddy ps",
+    waitSec: 50,
+  },
+  workbuddy: {
+    label: "WorkBuddy",
+    env: ["CODEBUDDY_SESSION_ID"],
+    find: "在 shell 里运行 echo $CODEBUDDY_SESSION_ID；是空的就运行 ls -t ~/.workbuddy/projects/*/*.jsonl | head -1，文件名就是 id",
+    waitSec: 50,
+  },
+  qwen: { label: "Qwen", env: [], find: "在对话里运行 /stats 看会话 id，或看 ~/.qwen 下这次会话的文件名", waitSec: 50 },
+  kimi: { label: "Kimi", env: [], find: "运行 ls -t ~/.kimi-code/sessions/*/ | head，找这次的会话文件夹名", waitSec: 50 },
+  gemini: { label: "Gemini CLI", env: ["GEMINI_SESSION_ID"], find: "运行 gemini --list-sessions，找这次会话的 id", waitSec: 50 },
+  copilot: {
+    label: "Copilot",
+    env: ["COPILOT_AGENT_SESSION_ID"],
+    find: "在 shell 里运行 echo $COPILOT_AGENT_SESSION_ID；是空的就运行 ls -t ~/.copilot/session-state | head -1",
+    waitSec: 50,
+  },
+  opencode: { label: "OpenCode", env: [], find: "运行 opencode session list --format json -n 5，找这次的 ses_ 开头的 id", waitSec: 50 },
+  kilo: { label: "Kilo", env: [], find: "运行 kilo session list --format json，找这次会话的 id", waitSec: 50 },
+  crush: { label: "Crush", env: [], find: "运行 crush session last --json", waitSec: 50 },
+  goose: { label: "goose", env: ["AGENT_SESSION_ID"], find: "在 shell 里运行 echo $AGENT_SESSION_ID；是空的就运行 goose session list --format json", waitSec: 50 },
+  droid: { label: "Droid", env: [], find: "在对话里用 /sessions 看这次会话的 id", waitSec: 50 },
+  devin: { label: "Devin", env: [], find: "运行 devin list --format json，找这次的会话", waitSec: 50 },
+  kiro: { label: "Kiro", env: [], find: "运行 kiro-cli chat --list-sessions，或在对话里用 /session-id", waitSec: 50 },
 }
 const UUID_RE = /^[A-Za-z0-9._-]{1,128}$/
 const HEARTBEAT_MS = 20_000

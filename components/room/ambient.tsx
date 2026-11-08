@@ -16,7 +16,7 @@ const LIGHTS = [
 export function Ambient() {
   return (
     <div className="ambient" aria-hidden="true">
-      {KINDS.map((kind, index) => {
+      {KINDS.filter((kind) => kind.core).map((kind, index) => {
         const light = LIGHTS[index % LIGHTS.length]
         return (
           <span

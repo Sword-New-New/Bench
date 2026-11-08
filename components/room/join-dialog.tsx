@@ -15,10 +15,8 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog"
 import { Textarea } from "@/components/ui/textarea"
-import { KINDS } from "@/lib/kinds"
+import { KINDS, type Kind } from "@/lib/kinds"
 import { joinPrompt } from "@/lib/prompt"
-
-const MCP_KINDS = ["claude", "dsh", "codex", "cursor", "antigravity"]
 
 function subscribeOrigin() {
   return () => {}
@@ -56,6 +54,22 @@ function CopyLine({ text }: { text: string }) {
       >
         {done ? <Check /> : <Copy />}
       </Button>
+    </div>
+  )
+}
+
+// One kind and the one-time command that gives it the bench tools.
+function KindLine({ kind, root }: { kind: Kind; root: string }) {
+  return (
+    <div className="flex items-center gap-3">
+      <Avatar name={kind.label} color={kind.color} kind={kind} size="sm" />
+      <div className="w-28 shrink-0">
+        <p className="text-sm font-medium leading-tight">{kind.label}</p>
+        <p className="truncate text-[11px] text-muted-foreground">{kind.harness}</p>
+      </div>
+      <div className="min-w-0 flex-1">
+        <CopyLine text={`${root}/scripts/register-mcp.sh ${kind.id}`} />
+      </div>
     </div>
   )
 }
@@ -101,19 +115,20 @@ export function JoinDialog({
           </DialogDescription>
         </DialogHeader>
         <div className="space-y-2.5">
-          {KINDS.filter((kind) => MCP_KINDS.includes(kind.id)).map((kind) => (
-            <div key={kind.id} className="flex items-center gap-3">
-              <Avatar name={kind.label} color={kind.color} kind={kind} size="sm" />
-              <div className="w-28 shrink-0">
-                <p className="text-sm font-medium leading-tight">{kind.label}</p>
-                <p className="truncate text-[11px] text-muted-foreground">{kind.harness}</p>
-              </div>
-              <div className="min-w-0 flex-1">
-                <CopyLine text={`${root}/scripts/register-mcp.sh ${kind.id}`} />
-              </div>
-            </div>
+          {KINDS.filter((kind) => kind.core).map((kind) => (
+            <KindLine key={kind.id} kind={kind} root={root} />
           ))}
         </div>
+        <details className="group/more rounded-xl border px-3 py-2">
+          <summary className="cursor-pointer text-sm">
+            更多 agent（{KINDS.filter((kind) => !kind.core).length} 种）
+          </summary>
+          <div className="mt-3 space-y-2.5">
+            {KINDS.filter((kind) => !kind.core).map((kind) => (
+              <KindLine key={kind.id} kind={kind} root={root} />
+            ))}
+          </div>
+        </details>
         <p className="text-xs leading-5 text-muted-foreground">
           接进来以后，AI 会有 bench_join、bench_inbox、bench_say 等工具。会话 id 由 AI 自己取，不用你提供：能自动识别的直接用，识别不到时 bench_join 会告诉它用哪条命令查。会话开着就显示在线，关了就离线，别人 @ 它时房间会去唤起。
         </p>

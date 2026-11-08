@@ -1,5 +1,5 @@
 import { useState } from "react"
-import { AtSign, Ellipsis, Plus, Settings2 } from "lucide-react"
+import { AtSign, ChevronRight, Ellipsis, Plus, Settings2 } from "lucide-react"
 
 import { Button } from "@/components/ui/button"
 import {
@@ -53,6 +53,10 @@ const TONE = {
 export function Roster(props: Props) {
   const { agents, adapters, demoSeated, busy } = props
   const others = agents.filter((agent) => kindOf(agent) === null)
+  // The five core kinds always get a row; any other kind once it has a seat.
+  const seated = new Set(agents.map((agent) => kindOf(agent)?.id))
+  const shown = KINDS.filter((kind) => kind.core || seated.has(kind.id))
+  const spare = KINDS.filter((kind) => !kind.core && !seated.has(kind.id))
 
   return (
     <div className="flex h-full min-h-0 flex-col">
@@ -64,10 +68,33 @@ export function Roster(props: Props) {
         </Button>
       </div>
       <div className="min-h-0 flex-1 space-y-1 overflow-y-auto px-2 pb-3">
-        {KINDS.map((kind) => {
+        {shown.map((kind) => {
           const seats = agents.filter((agent) => kindOf(agent)?.id === kind.id)
           return <KindGroup key={kind.id} kind={kind} seats={seats} state={reach(kind, seats, adapters)} {...props} />
         })}
+
+        {spare.length > 0 ? (
+          <details className="group/more pt-2">
+            <summary className="flex cursor-pointer list-none items-center gap-1 rounded-lg px-2 py-1 text-xs text-muted-foreground hover:bg-sidebar-accent/70">
+              <ChevronRight className="size-3.5 transition-transform group-open/more:rotate-90" />
+              还能接的 agent（{spare.length}）
+            </summary>
+            <div className="mt-1 flex flex-wrap gap-1 px-2">
+              {spare.map((kind) => (
+                <button
+                  key={kind.id}
+                  type="button"
+                  className="pill chip flex items-center gap-1.5 rounded-full px-2.5 py-1 text-xs"
+                  title={`${kind.harness} · 点开看怎么接`}
+                  onClick={props.onJoin}
+                >
+                  <span className="size-1.5 rounded-full" style={{ background: kind.color }} />
+                  {kind.label}
+                </button>
+              ))}
+            </div>
+          </details>
+        ) : null}
 
         {others.length > 0 ? (
           <section className="pt-3">

@@ -1,4 +1,4 @@
-import { Bot, BOT_SHAPE } from "@/components/room/bot"
+import { Bot } from "@/components/room/bot"
 import { kindOf, type Kind } from "@/lib/kinds"
 import { splitMentions } from "@/lib/text"
 import { STATUS_COLOR, STATUS_LABEL } from "@/lib/status"
@@ -57,7 +57,7 @@ export function Avatar({
   watch?: boolean
 }) {
   if (kind) {
-    return <Bot shape={BOT_SHAPE[kind.id]} color={kind.color} size={BOT_SIZE[size]} status={status} hover={hover} watch={watch ?? hover} />
+    return <Bot shape={kind.shape} color={kind.color} size={BOT_SIZE[size]} status={status} hover={hover} watch={watch ?? hover} />
   }
   const glyph = (label || name).slice(0, 1).toUpperCase()
   const box = size === "lg" ? "size-9 text-sm" : size === "sm" ? "size-6 text-[11px]" : "size-8 text-xs"

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Usage: register-mcp.sh claude|codex|cursor|antigravity
+# Usage: register-mcp.sh <kind>   (kinds: see lib/kinds.ts)
 # Register the 并坐 MCP server (scripts/bench-mcp.mjs) with one agent client,
 # for this user. Running it again replaces the old entry.
 set -euo pipefail
@@ -10,6 +10,11 @@ script="$root/scripts/bench-mcp.mjs"
 node="$(command -v node || true)"
 [[ -n "$node" ]] || node=/usr/local/nodejs/bin/node
 [[ -x "$node" ]] || { echo "找不到 node" >&2; exit 1; }
+
+# Merge the bench entry into a JSON config: merge_json FILE [TOP_JSON] [STYLE] [SERVER_JSON].
+merge_json() {
+  "$node" "$root/scripts/merge-mcp.mjs" "$1" "${3:-mcpServers}" "$kind" "${2:-{\}}" "${4:-{\}}"
+}
 
 case "$kind" in
   claude)
@@ -79,8 +84,85 @@ EOF
       echo "已写入 $patch"
     done
     ;;
+  qoder)
+    # The `qoder` on PATH may be the desktop app; only qodercli is surely the CLI.
+    if command -v qodercli >/dev/null; then
+      qodercli mcp remove -s user bench >/dev/null 2>&1 || true
+      qodercli mcp add -s user bench -- "$node" "$script" --agent qoder
+    else
+      merge_json "$HOME/.qoder/settings.json" '{"permissions":{"allow":["mcp__bench__*"]}}'
+    fi
+    ;;
+  codebuddy)
+    if command -v codebuddy >/dev/null; then
+      codebuddy mcp remove -s user bench >/dev/null 2>&1 || true
+      codebuddy mcp add -s user bench -- "$node" "$script" --agent codebuddy
+    else
+      merge_json "$HOME/.codebuddy/.mcp.json"
+    fi
+    ;;
+  workbuddy)
+    # WorkBuddy reads MCP from ~/.workbuddy/mcp.json (or its 自定义连接器 page).
+    merge_json "$HOME/.workbuddy/mcp.json"
+    ;;
+  qwen)
+    if command -v qwen >/dev/null; then
+      qwen mcp remove -s user bench >/dev/null 2>&1 || true
+      qwen mcp add -s user bench "$node" "$script" --agent qwen
+    else
+      merge_json "$HOME/.qwen/settings.json"
+    fi
+    ;;
+  kimi)
+    merge_json "$HOME/.kimi-code/mcp.json"
+    ;;
+  devin)
+    command -v devin >/dev/null || { echo "找不到 devin" >&2; exit 1; }
+    devin mcp remove bench -s user >/dev/null 2>&1 || true
+    devin mcp add bench -s user -- "$node" "$script" --agent devin
+    ;;
+  kiro)
+    merge_json "$HOME/.kiro/settings/mcp.json"
+    ;;
+  gemini)
+    command -v gemini >/dev/null || { echo "找不到 gemini（npm i -g @google/gemini-cli）" >&2; exit 1; }
+    gemini mcp remove -s user bench >/dev/null 2>&1 || true
+    gemini mcp add -s user --trust bench "$node" "$script" --agent gemini
+    ;;
+  copilot)
+    # /usr/bin/copilot can be a stub that only says the real CLI is missing.
+    if copilot --version >/dev/null 2>&1; then
+      copilot mcp remove bench >/dev/null 2>&1 || true
+      copilot mcp add bench --tools '*' -- "$node" "$script" --agent copilot
+    else
+      merge_json "${COPILOT_HOME:-$HOME/.copilot}/mcp-config.json" '{}' mcpServers '{"tools":["*"]}'
+    fi
+    ;;
+  opencode)
+    merge_json "$HOME/.config/opencode/opencode.json" '{"permission":{"bench_*":"allow"}}' opencode
+    ;;
+  kilo)
+    merge_json "$HOME/.config/kilo/kilo.json" '{"permission":{"bench_*":"allow"}}' opencode
+    ;;
+  crush)
+    merge_json "$HOME/.config/crush/crush.json" '{}' crush
+    ;;
+  droid)
+    if command -v droid >/dev/null; then
+      droid mcp remove bench >/dev/null 2>&1 || true
+      droid mcp add bench "$node" "$script" --agent droid
+    else
+      merge_json "$HOME/.factory/mcp.json"
+    fi
+    ;;
+  goose)
+    # Goose keeps extensions in YAML; adding to it by hand is safer than a blind append.
+    echo "goose：运行 goose configure → Add Extension → Command-line Extension，命令填：" >&2
+    echo "  $node $script --agent goose"
+    exit 0
+    ;;
   *)
-    echo "用法：$0 claude|codex|cursor|antigravity|dsh" >&2
+    echo "用法：$0 <kind>，kind 见 lib/kinds.ts" >&2
     exit 2
     ;;
 esac

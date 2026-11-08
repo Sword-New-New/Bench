@@ -3,18 +3,7 @@
 import { useEffect, useRef } from "react"
 
 import GrokBot, { type GrokBotState } from "@/lib/vendor/grokbot"
-import type { KindId } from "@/lib/kinds"
 import type { AgentStatus } from "@/lib/types"
-
-// Each kind gets its own body shape, so they tell apart at a glance even
-// before you read the color.
-export const BOT_SHAPE: Record<KindId, string> = {
-  claude: "gear",
-  dsh: "drop",
-  codex: "flower",
-  cursor: "pebble",
-  antigravity: "sparkle",
-}
 
 const STATE: Record<AgentStatus, GrokBotState> = {
   idle: "idle",

@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react"
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react"
 import { File, Folder, Paperclip, Send, X } from "lucide-react"
 import { toast } from "sonner"
 
@@ -57,6 +57,7 @@ export function Composer({
 }) {
   const [picked, setPicked] = useState(false)
   const [dragging, setDragging] = useState(false)
+  const chips = useChipOrder()
   const uploading = files.some((item) => item.uploading)
 
   // Pasted or dropped: shown at once, then swapped for the saved copy.
@@ -125,6 +126,7 @@ export function Composer({
     const picked = reachable.length > 0 ? reachable : seats.slice(0, 1)
     return picked.map((seat) => ({ kind, seat, label: picked.length > 1 ? seat.name : kind.label }))
   })
+  const ordered = chips.sort(targets)
 
   function insert(name: string) {
     onChange(value.replace(/@([\p{L}\p{N}_-]*)$/u, `@${name} `))
@@ -256,12 +258,16 @@ export function Composer({
           </DropdownMenu>
           <div className="-my-1.5 flex min-w-0 flex-1 items-center overflow-x-auto py-1.5">
             <span className="shrink-0 px-1 text-xs text-muted-foreground">发给</span>
-            {targets.map(({ kind, seat, label }) => (
+            {ordered.map(({ kind, seat, label }) => (
               <Pick
                 key={seat.id}
                 gone={hasMention(value, seat.name)}
-                title={`@${seat.name}`}
+                title={`@${seat.name} · 拖动可以换位置`}
+                lifted={chips.draggingId === seat.id}
+                slotRef={chips.slot(seat.id)}
+                dragHandlers={chips.handlers(seat.id, ordered.map((item) => item.seat.id))}
                 onPick={() => {
+                  if (chips.justDragged()) return
                   onChange(toggleMention(value, seat.name))
                   inputRef.current?.focus()
                 }}
@@ -313,18 +319,26 @@ function Pick({
   gone,
   title,
   onPick,
+  lifted,
+  slotRef,
+  dragHandlers,
   children,
 }: {
   gone: boolean
   title: string
   onPick: () => void
+  // Being dragged to a new place in the row.
+  lifted?: boolean
+  slotRef?: (node: HTMLDivElement | null) => void
+  dragHandlers?: React.HTMLAttributes<HTMLButtonElement>
   children: React.ReactNode
 }) {
   return (
     <div
+      ref={slotRef}
       className={`grid shrink-0 transition-[grid-template-columns,opacity] duration-300 ease-[cubic-bezier(.2,.9,.3,1)] motion-reduce:transition-none ${
         gone ? "grid-cols-[0fr] opacity-0" : "grid-cols-[1fr] opacity-100"
-      }`}
+      } ${lifted ? "relative z-10" : ""}`}
       inert={gone}
     >
       {/* Room above and below for the chip's shadow, which the collapse clips. */}
@@ -333,10 +347,11 @@ function Pick({
           <button
             type="button"
             title={title}
-            className={`pill chip flex items-center gap-1 rounded-full px-2.5 py-1 text-xs whitespace-nowrap ${
-              gone ? "scale-50" : "scale-100"
-            }`}
+            className={`pill chip flex items-center gap-1 rounded-full px-2.5 py-1 text-xs whitespace-nowrap select-none ${
+              dragHandlers ? "touch-pan-y" : ""
+            } ${gone ? "scale-50" : lifted ? "scale-110 cursor-grabbing shadow-lg ring-2 ring-primary/40" : "scale-100"}`}
             onClick={onPick}
+            {...dragHandlers}
           >
             {children}
           </button>
@@ -344,4 +359,142 @@ function Pick({
       </div>
     </div>
   )
+}
+
+const ORDER_KEY = "bench-chip-order"
+
+// How far a slide in progress has moved a chip sideways.
+function shiftOf(node: HTMLElement) {
+  const transform = getComputedStyle(node).transform
+  return transform && transform !== "none" ? new DOMMatrixReadOnly(transform).m41 : 0
+}
+const DRAG_START_PX = 6
+
+function loadOrder(): string[] {
+  try {
+    const saved: unknown = JSON.parse(localStorage.getItem(ORDER_KEY) ?? "[]")
+    return Array.isArray(saved) ? saved.filter((id): id is string => typeof id === "string") : []
+  } catch {
+    return []
+  }
+}
+
+// The quick-mention chips in the order you dragged them into, kept in this
+// browser by seat id (ids are unique across projects); seats it hasn't seen
+// keep their place after the ones it has. Dragging a chip past another's
+// middle swaps them, and the chips it passes slide over.
+function useChipOrder() {
+  // The chips only show once the room has loaded in the browser, so reading
+  // storage up front can't disagree with the server's render.
+  const [order, setOrder] = useState<string[]>(() => (typeof window === "undefined" ? [] : loadOrder()))
+  const [draggingId, setDraggingId] = useState<string | null>(null)
+  const drag = useRef<{ id: string; x: number; moved: boolean } | null>(null)
+  // The row's order as last rendered, which a drag reads as it moves.
+  const current = useRef<string[]>([])
+  const dropped = useRef(0)
+  const slots = useRef(new Map<string, HTMLDivElement>())
+  const lefts = useRef(new Map<string, number>())
+
+  // Slide the chips that moved from where they were to where they are now.
+  // Places are read from the layout (offsetLeft), which a slide in progress
+  // doesn't shift; a chip still sliding from the last swap starts the next
+  // slide from wherever it is on screen, so quick swaps never add up.
+  useLayoutEffect(() => {
+    for (const [id, node] of slots.current) {
+      const now = node.offsetLeft
+      const before = lefts.current.get(id)
+      lefts.current.set(id, now)
+      if (before === undefined || Math.abs(before - now) < 1) continue
+      const from = before - now + shiftOf(node)
+      node.style.transition = "none"
+      node.style.transform = `translateX(${from}px)`
+      void node.offsetWidth
+      node.style.transition = "transform 200ms cubic-bezier(.2,.9,.3,1)"
+      node.style.transform = ""
+      const settle = () => {
+        node.style.transition = ""
+        node.removeEventListener("transitionend", settle)
+      }
+      node.addEventListener("transitionend", settle)
+    }
+  })
+
+  function save(next: string[]) {
+    try {
+      localStorage.setItem(ORDER_KEY, JSON.stringify(next.slice(0, 200)))
+    } catch {}
+  }
+
+  return {
+    draggingId,
+    sort<T extends { seat: { id: string } }>(items: T[]) {
+      const rank = (id: string) => {
+        const index = order.indexOf(id)
+        return index < 0 ? Number.MAX_SAFE_INTEGER : index
+      }
+      return items
+        .map((item, index) => ({ item, index }))
+        .sort((a, b) => rank(a.item.seat.id) - rank(b.item.seat.id) || a.index - b.index)
+        .map(({ item }) => item)
+    },
+    slot(id: string) {
+      return (node: HTMLDivElement | null) => {
+        if (node) slots.current.set(id, node)
+        else slots.current.delete(id)
+      }
+    },
+    // A drag ends with a click on the chip; that click isn't a pick.
+    justDragged() {
+      return Date.now() - dropped.current < 300
+    },
+    handlers(id: string, ids: string[]): React.HTMLAttributes<HTMLButtonElement> {
+      current.current = ids
+      return {
+        onPointerDown(event) {
+          if (event.button !== 0) return
+          const start = { id, x: event.clientX, moved: false }
+          drag.current = start
+          // Listened to on the window: a chip moved to a new place in the row
+          // is a node React moved, which loses any pointer capture.
+          const move = (moved: PointerEvent) => {
+            if (!start.moved) {
+              if (Math.abs(moved.clientX - start.x) < DRAG_START_PX) return
+              start.moved = true
+              setDraggingId(id)
+            }
+            const now = current.current
+            const others = now.filter((other) => other !== id)
+            const at = others.filter((other) => {
+              const node = slots.current.get(other)
+              if (!node) return false
+              // Where it sits in the row, not where a slide has it right now.
+              const box = node.getBoundingClientRect()
+              return box.width > 0 && box.left - shiftOf(node) + box.width / 2 < moved.clientX
+            }).length
+            const next = [...others.slice(0, at), id, ...others.slice(at)]
+            if (next.join() === now.join()) return
+            current.current = next
+            setOrder((old) => [...next, ...old.filter((other) => !next.includes(other))])
+          }
+          const end = (finished: Event) => {
+            window.removeEventListener("pointermove", move)
+            window.removeEventListener("pointerup", end)
+            window.removeEventListener("pointercancel", end)
+            drag.current = null
+            if (!start.moved) return
+            setDraggingId(null)
+            if (finished.type === "pointercancel") return
+            dropped.current = Date.now()
+            setOrder((old) => {
+              save(old)
+              return old
+            })
+          }
+          window.addEventListener("pointermove", move)
+          window.addEventListener("pointerup", end)
+          window.addEventListener("pointercancel", end)
+        },
+      }
+    },
+  }
 }

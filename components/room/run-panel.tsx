@@ -113,7 +113,23 @@ function StepIcon({ step }: { step: RunStep }) {
 
 export function StepRow({ step, start }: { step: RunStep; start: number }) {
   const [open, setOpen] = useState(false)
-  const more = Boolean(step.input || (step.output && step.output !== step.title))
+  // A title cut off by the panel's width opens too, even with nothing more
+  // behind it: something it said, short enough to be its own full text.
+  const titleRef = useRef<HTMLSpanElement>(null)
+  const [clipped, setClipped] = useState(false)
+  useEffect(() => {
+    const node = titleRef.current
+    if (!node) return
+    const measure = () => {
+      if (!node.classList.contains("truncate")) return
+      setClipped(node.scrollWidth > node.clientWidth + 1)
+    }
+    measure()
+    const observer = new ResizeObserver(measure)
+    observer.observe(node)
+    return () => observer.disconnect()
+  }, [step.title])
+  const more = Boolean(step.input || (step.output && step.output !== step.title) || clipped)
   return (
     <div className="rounded-lg border border-transparent hover:border-border">
       <button
@@ -126,7 +142,10 @@ export function StepRow({ step, start }: { step: RunStep; start: number }) {
         <span className="pt-0.5">
           <StepIcon step={step} />
         </span>
-        <span className={`min-w-0 flex-1 ${step.kind === "text" ? "text-muted-foreground" : "font-medium"} ${open ? "" : "truncate"}`}>
+        <span
+          ref={titleRef}
+          className={`min-w-0 flex-1 ${step.kind === "text" ? "text-muted-foreground" : "font-medium"} ${open ? "break-all whitespace-pre-wrap" : "truncate"}`}
+        >
           {step.title}
         </span>
         <span className="shrink-0 tabular-nums text-[10px] text-muted-foreground">+{seconds(start, step.at)}</span>

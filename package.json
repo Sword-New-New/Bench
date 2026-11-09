@@ -2,6 +2,7 @@
   "name": "bench",
   "version": "0.1.0",
   "private": true,
+  "license": "MIT",
   "scripts": {
     "dev": "next dev -p 4399 -H 127.0.0.1",
     "build": "next build",

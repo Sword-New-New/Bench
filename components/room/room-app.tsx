@@ -17,6 +17,7 @@ import { clearSummarySnooze, SUMMARY_DONE_DEMO, SummaryCard, SummaryNudge } from
 import { DEBUG_MENU, DebugMenu, NO_DEBUG, withDebug, type DebugView } from "@/components/room/debug-menu"
 import { TasksPanel } from "@/components/room/tasks-panel"
 import { EDIT_EVENT, LIVE_DEMO, Thread } from "@/components/room/thread"
+import { Tour, TOUR_JOIN, TOUR_START } from "@/components/room/tour"
 import { WhisperDialog } from "@/components/room/whisper-dialog"
 import { SpawnDialog } from "@/components/room/spawn-dialog"
 import { type Pending } from "@/components/room/attachments"
@@ -130,6 +131,15 @@ export function RoomApp() {
   const [focusId, setFocusId] = useState<string | null>(null)
   const [joinOpen, setJoinOpen] = useState(false)
   const [joinKind, setJoinKind] = useState<string | null>(null)
+  // The tour opens and closes the real 接入 dialog for its steps.
+  useEffect(() => {
+    const onTour = (event: Event) => {
+      setJoinKind(null)
+      setJoinOpen(Boolean((event as CustomEvent<boolean>).detail))
+    }
+    window.addEventListener(TOUR_JOIN, onTour)
+    return () => window.removeEventListener(TOUR_JOIN, onTour)
+  }, [])
   const [runId, setRunId] = useState<string | null>(null)
   const [whisperId, setWhisperId] = useState<string | null>(null)
   const detail = useSyncExternalStore(onDetailChange, detailSaved, () => false)
@@ -339,11 +349,12 @@ export function RoomApp() {
   return (
     <main className="relative isolate flex h-dvh flex-col">
       <Ambient />
+      <Tour />
       <div className="shrink-0 px-3 pt-2 lg:px-4">
       <header className="flex h-12 items-center gap-3 pr-1 pl-1">
         <Mark />
         <h1 className="sr-only">并坐</h1>
-        <div className="min-w-0">
+        <div className="min-w-0" data-tour="project">
           <ProjectMenu
             projects={projects ?? []}
             current={room?.project ?? projects?.find((item) => item.id === projectId) ?? null}
@@ -373,6 +384,7 @@ export function RoomApp() {
               onClearSummary={() => void run(() => debugCall({ action: "clearSummary", confirm: "清空摘要" }), "摘要清空了")}
               onSummaryDone={() => window.dispatchEvent(new Event(SUMMARY_DONE_DEMO))}
               onLiveDemo={() => window.dispatchEvent(new Event(LIVE_DEMO))}
+              onTour={() => window.dispatchEvent(new Event(TOUR_START))}
               onClearSnooze={() => {
                 clearSummarySnooze()
                 toast.success("「稍后提醒」清掉了")
@@ -380,7 +392,7 @@ export function RoomApp() {
             />
           ) : null}
           <DropdownMenu>
-            <DropdownMenuTrigger render={<Button type="button" variant="ghost" size="icon-sm" aria-label="设置" />}>
+            <DropdownMenuTrigger render={<Button type="button" variant="ghost" size="icon-sm" aria-label="设置" data-tour="settings" />}>
               <Settings />
             </DropdownMenuTrigger>
             <DropdownMenuContent align="end" className="min-w-44">
@@ -417,6 +429,7 @@ export function RoomApp() {
             type="button"
             size="sm"
             className="rounded-full"
+            data-tour="join"
             onClick={() => {
               setJoinKind(null)
               setJoinOpen(true)
@@ -439,7 +452,7 @@ export function RoomApp() {
         </div>
       ) : (
         <div className="grid min-h-0 flex-1 grid-rows-[minmax(0,1fr)] pt-2 lg:grid-cols-[264px_minmax(0,1fr)_300px] lg:gap-4 lg:px-4 lg:pt-1 lg:pb-4">
-          <aside className={`${tab === "people" ? "block" : "hidden"} frost h-full min-h-0 overflow-hidden lg:block lg:rounded-2xl`}>
+          <aside data-tour="roster" className={`${tab === "people" ? "block" : "hidden"} frost h-full min-h-0 overflow-hidden lg:block lg:rounded-2xl`}>
             <Roster
               agents={agents}
               adapters={adapters}
@@ -474,7 +487,7 @@ export function RoomApp() {
               }}
             />
           </aside>
-          <section className={`${tab === "chat" ? "flex" : "hidden"} relative h-full min-h-0 flex-col lg:flex`}>
+          <section data-tour="chat" className={`${tab === "chat" ? "flex" : "hidden"} relative h-full min-h-0 flex-col lg:flex`}>
             {error ? (
               <p className="mx-3 rounded-xl bg-destructive/10 px-4 py-2 text-xs text-destructive">{error} 正在重试。</p>
             ) : null}
@@ -563,7 +576,7 @@ export function RoomApp() {
               }}
             />
           </section>
-          <aside className={`${tab === "tasks" ? "block" : "hidden"} h-full min-h-0 overflow-hidden lg:block`}>
+          <aside data-tour="tasks" className={`${tab === "tasks" ? "block" : "hidden"} h-full min-h-0 overflow-hidden lg:block`}>
             <TasksPanel
               tasks={room.tasks}
               agents={agents}

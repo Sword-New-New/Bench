@@ -243,7 +243,7 @@ export function JoinDialog({
             选好要接的 AI，在终端里运行一次给出的命令，再在它的会话里说一句话入座。注册是每个 AI 一次，所有项目共用；进哪个项目看那句话。
           </DialogDescription>
         </DialogHeader>
-        <section className="space-y-2">
+        <section className="space-y-2" data-tour="j-pick">
           <div className="flex items-center gap-2">
             <h3 className="shrink-0 text-sm font-medium">1. 接哪几个？</h3>
             <div className="relative ml-auto w-44">
@@ -277,7 +277,7 @@ export function JoinDialog({
             </div>
           ) : null}
         </section>
-        <section className="space-y-2">
+        <section className="space-y-2" data-tour="j-register">
           <h3 className="text-sm font-medium">2. 运行一次注册命令</h3>
           {chosen.length > 0 ? (
             <>
@@ -297,7 +297,7 @@ export function JoinDialog({
             <p className="rounded-lg border border-dashed px-3 py-2.5 text-xs text-muted-foreground">先在上面选要接的 AI，可以多选。</p>
           )}
         </section>
-        <section className="space-y-2">
+        <section className="space-y-2" data-tour="j-say">
           <h3 className="text-sm font-medium">3. 在它的会话里说</h3>
           <CopyLine text={ask} />
           <p className="text-xs leading-5 text-muted-foreground">

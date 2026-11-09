@@ -23,6 +23,8 @@ export type GrokBotOptions = {
   extent?: number
   still?: boolean
   eyeSize?: number
+  /** false stops the idle tricks (spit, wink, surprise…). */
+  mischief?: boolean
 }
 
 export type GrokBotShape = {
@@ -45,6 +47,7 @@ declare class GrokBot {
   bounce(strength?: number): this
   blink(double?: boolean): this
   look(x: number, y: number, hold?: number): this
+  setExpression(name: string, instant?: boolean): this
   destroy(): void
 }
 

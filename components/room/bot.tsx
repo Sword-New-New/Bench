@@ -12,6 +12,26 @@ const STATE: Record<AgentStatus, GrokBotState> = {
   offline: "sleeping",
 }
 
+// A face that says what a seat is up to without the body moving: for small
+// bots sitting in a row (the project rail's bench), where status's spinning
+// and shape-shifting would be too much. Given a mood, the bot ignores status.
+//   worried: waiting on the user (a permit or a question), eyes wide, a drop of sweat
+//   busy:    working, focused eyes darting left and right
+//   happy:   done and waiting to be checked, eyes squeezed in a smile, blushing
+//   asleep:  offline, eyes shut
+export type BotMood = "worried" | "busy" | "happy" | "asleep"
+
+const MOOD: Record<BotMood, { state: GrokBotState; face?: string; gaze?: readonly [number, number] }> = {
+  // Looking down to the right, like the app icon.
+  worried: { state: "idle", face: "round", gaze: [0.55, 0.3] },
+  busy: { state: "idle", face: "focused", gaze: [0.6, 0.1] },
+  happy: { state: "idle", face: "happy", gaze: [0.2, -0.4] },
+  asleep: { state: "sleeping" },
+}
+
+// How long busy eyes stay on one side before darting to the other.
+const DART_MS = 650
+
 // The shape a bot squishes into while the pointer is on its row. grokbot.js's
 // own "pill" is thin and steeply tilted; Grok Bot's hover capsule is chubbier
 // (about 0.6 as tall as wide) and nearly level, so we add that shape.
@@ -77,6 +97,7 @@ export function Bot({
   status = "idle",
   hover = false,
   watch = hover,
+  mood,
 }: {
   shape: string
   color: string
@@ -84,17 +105,42 @@ export function Bot({
   status?: AgentStatus
   hover?: boolean
   watch?: boolean
+  mood?: BotMood
 }) {
   const host = useRef<HTMLSpanElement>(null)
   const bot = useRef<GrokBot | null>(null)
-  const state = STATE[status]
+  const state = mood ? MOOD[mood].state : STATE[status]
+  // Read when the character is built, so a still one is drawn in its mood.
+  const moodNow = useRef(mood)
+  useEffect(() => {
+    moodNow.current = mood
+  }, [mood])
 
   useEffect(() => {
     const node = host.current
     if (!node) return
     const still = window.matchMedia("(prefers-reduced-motion: reduce)").matches
-    const created = new GrokBot(node, { shape, color, size, state, still, eyeSize: 1.35 })
+    const first = moodNow.current
+    const created = new GrokBot(node, {
+      shape,
+      color,
+      size,
+      state,
+      still,
+      eyeSize: 1.35,
+      mischief: !first,
+      // A still one mustn't be caught mid-blink while it is settled below.
+      autonomous: !(still && first),
+    })
     bot.current = created
+    // Without motion grokbot draws a single frame as it is built, with its
+    // eyes at rest; settle them into the mood and draw that frame again.
+    if (still && first) {
+      const { face, gaze } = MOOD[first]
+      if (face) created.setExpression(face, true)
+      if (gaze) created.look(gaze[0], gaze[1], 1e9)
+      settle(created)
+    }
     return () => {
       created.destroy()
       bot.current = null
@@ -114,6 +160,24 @@ export function Bot({
     }
     current.setState(state)
   }, [state])
+
+  // The mood's face goes on after the state, which resets the eyes.
+  useEffect(() => {
+    const current = bot.current
+    if (!current || !mood) return
+    const { face, gaze } = MOOD[mood]
+    const still = window.matchMedia("(prefers-reduced-motion: reduce)").matches
+    if (face) current.setExpression(face, still)
+    if (gaze) current.look(gaze[0], gaze[1], 1e9)
+    if (still) settle(current)
+    if (mood !== "busy" || still) return
+    let side = 1
+    const dart = window.setInterval(() => {
+      side = -side
+      bot.current?.look(0.65 * side, 0.1, 1e9)
+    }, DART_MS)
+    return () => window.clearInterval(dart)
+  }, [mood, state, shape, color, size])
 
   useEffect(() => {
     const current = bot.current
@@ -136,5 +200,61 @@ export function Bot({
     return () => window.removeEventListener("pointermove", follow)
   }, [watch])
 
-  return <span ref={host} className="block shrink-0" style={{ width: size, height: size }} aria-hidden="true" />
+  const body = <span ref={host} className="block shrink-0" style={{ width: size, height: size }} aria-hidden="true" />
+  if (mood !== "worried" && mood !== "happy") return body
+  return (
+    <span className="relative block shrink-0" style={{ width: size, height: size }} aria-hidden="true">
+      {body}
+      {mood === "worried" ? <Sweat size={size} /> : <Blush shape={shape} size={size} />}
+    </span>
+  )
+}
+
+// Two pink cheeks under the eyes, so a smile isn't read as eyes shut asleep.
+function Blush({ shape, size }: { shape: string; size: number }) {
+  const [x, y, scale] = (GrokBot.SHAPES[shape] ?? GrokBot.SHAPES.circle).eye
+  // grokbot's units run from -1.12 to 1.12 across the box.
+  const px = (unit: number) => ((unit + 1.12) / 2.24) * size
+  const spread = 0.42 * scale
+  const r = Math.max(1.5, size * 0.055)
+  return (
+    <svg width={size} height={size} className="pointer-events-none absolute inset-0">
+      {[-1, 1].map((side) => (
+        <ellipse
+          key={side}
+          cx={px(x + 0.08 + side * spread)}
+          cy={px(y + 0.2)}
+          rx={r * 1.5}
+          ry={r}
+          fill="#ff5c8a"
+          opacity="0.55"
+        />
+      ))}
+    </svg>
+  )
+}
+
+// A drop of sweat on the left cheek (the eyes look right), the same as on the
+// app icon. It slides down a little and comes back, unless motion is off.
+function Sweat({ size }: { size: number }) {
+  const width = Math.max(5, Math.round(size * 0.2))
+  return (
+    <svg
+      viewBox="0 0 10 14"
+      width={width}
+      height={Math.round(width * 1.4)}
+      className="bot-sweat pointer-events-none absolute"
+      style={{ left: size * 0.04, top: size * 0.3 }}
+    >
+      <path d="M5 0.6C5 0.6 0.8 6.2 0.8 9.1a4.2 4.2 0 0 0 8.4 0C9.2 6.2 5 0.6 5 0.6Z" fill="#7ab8ff" stroke="#3b82f6" strokeWidth="0.9" />
+      <ellipse cx="3.6" cy="9.4" rx="1" ry="1.5" fill="#fff" opacity="0.75" />
+    </svg>
+  )
+}
+
+// grokbot keeps its step to itself. A still character is stepped through a
+// second and a half at once so its springs reach the face, then drawn.
+function settle(bot: GrokBot) {
+  const step = (bot as unknown as { _update?: (dt: number, now: number) => void })._update
+  for (let frame = 1; frame <= 90; frame++) step?.call(bot, 1 / 60, frame / 60)
 }

@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react"
 import { ChevronDown, ChevronUp } from "lucide-react"
 
-import { Bot } from "@/components/room/bot"
+import { Bot, type BotMood } from "@/components/room/bot"
 import { kindOf, type Kind } from "@/lib/kinds"
 import { splitMentions } from "@/lib/text"
 import { STATUS_COLOR, STATUS_LABEL } from "@/lib/status"
@@ -41,6 +41,7 @@ export function Avatar({
   status,
   hover,
   watch,
+  mood,
 }: {
   name: string
   color: string
@@ -50,9 +51,11 @@ export function Avatar({
   status?: AgentStatus
   hover?: boolean
   watch?: boolean
+  // Only for bots (kind set): a face instead of status, see Bot.
+  mood?: BotMood
 }) {
   if (kind) {
-    return <Bot shape={kind.shape} color={kind.color} size={BOT_SIZE[size]} status={status} hover={hover} watch={watch ?? hover} />
+    return <Bot shape={kind.shape} color={kind.color} size={BOT_SIZE[size]} status={status} hover={hover} watch={watch ?? hover} mood={mood} />
   }
   const glyph = (label || name).slice(0, 1).toUpperCase()
   const box = size === "lg" ? "size-9 text-sm" : size === "sm" ? "size-6 text-[11px]" : "size-8 text-xs"

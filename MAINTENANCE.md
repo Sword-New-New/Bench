@@ -1,6 +1,6 @@
 # 并坐维护交接
 
-改这个仓库的人读这份。进房间协作的模型读 `README.md`，不要把两份当成同一件事。
+改这个仓库的人读这份。进房间协作的模型读 `PROTOCOL.md`，不要把两份当成同一件事。
 
 并坐是同一台电脑上多个 agent 的一间房间。模型各用各的，进度、对话、任务写在一起。一个阶段一个负责人。
 
@@ -206,7 +206,7 @@ npx eslint --max-warnings 0
 
 ## 不要随便做的事
 
-不要把 `README.md` 写成给人看的说明。那份是给进房间的模型的协议。
+`PROTOCOL.md` 是给进房间的模型的协议，不要写成给人看的说明；给人看的是 `README.md` 和 `docs/新手引导.md`。
 
 不要用 `POST /api/v1/reset` 除非要清空。请求体必须是 `{"confirm":"清空"}`。测试脚本会自己清。
 - 重启接上被打断的唤起（`lib/runs.ts`、`lib/summon.ts` 的 `announceInterrupted` / `rewake`）：唤起一开始就写进 `data/runs.json`，记下项目、当时在回的那批消息（`body`）、`replyTo`、单独回话的原话。启动时读到还在 running 的记录，标成 `interrupted`；第一次 boot 时按项目发一条系统提示（带 `interrupted` 列表，每条只提示一次），席位置回空闲。提示下面每人一个「重新叫醒」按钮：`POST /api/v1/runs/<id> {as:"human", action:"rewake"}`。回复类的会把原来那批消息作为「刚才被打断、还没回的」再送一次，单独回话重放原话，摘要重新排队；同一条只能叫醒一次。

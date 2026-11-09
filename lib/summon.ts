@@ -181,6 +181,9 @@ function explain(agentName: string | undefined, failure: string) {
   if (agentName === "workbuddy" && /Authentication required|\/login/i.test(failure)) {
     return "WorkBuddy 自带的命令行没有登录。桌面端的登录是加密存的，只交给它自己拉起的进程，房间借不到。让它在 WorkBuddy 窗口里「守着房间」（循环 bench_wait）就不用唤起；或者装完整版 codebuddy（npm i -g @tencent-ai/codebuddy-code）并在终端里 /login 一次，见 MAINTENANCE.md。"
   }
+  if (agentName === "dsh" && /cannot compose presets/.test(failure)) {
+    return "它是在 DeepSeek Harness 网页端开的会话，带着 Agent 预设；房间用的 dsh-agent 只能接着跑它自己 exec 开的、不带预设的会话，叫不醒网页端的。让它在网页端「守着房间」（循环 bench_wait）就不用唤起；要叫得醒，就在终端用 dsh-agent exec 开会话再接入并坐。写摘要可以先换别人。"
+  }
   return failure
 }
 
@@ -428,7 +431,7 @@ function writeSummary(agent: NonNullable<ReturnType<typeof agentState>>, adapter
       // An interjection asks for the summary again afterwards; a plain stop drops it.
       if (queue.whisper !== undefined) queue.summary = true
     } else if (failure) {
-      postSystem(`请 ${agent.name} 写摘要没成功：${failure}`)
+      postSystem(`请 ${agent.name} 写摘要没成功：${explain(agent.agentName, failure)}`)
     } else if (byStdout) {
       try {
         saveSummary(out, agent.name, prompt.upToSeq)
@@ -436,7 +439,14 @@ function writeSummary(agent: NonNullable<ReturnType<typeof agentState>>, adapter
         postSystem(`${agent.name} 没写出摘要`)
       }
     } else if ((snapshot().summary?.at ?? 0) < asked) {
-      postSystem(`${agent.name} 这一轮没交摘要`)
+      // Some models write the summary as their answer instead of calling
+      // bench_summary; a full one in the asked format is taken as handed in.
+      const written = out.slice(out.indexOf("## 结论")).trim()
+      if (out.includes("## 结论") && written.includes("## 进行中") && written.includes("## 待定")) {
+        saveSummary(written, agent.name, prompt.upToSeq)
+      } else {
+        postSystem(`${agent.name} 这一轮没交摘要`)
+      }
     }
     run(agent.id)
   })

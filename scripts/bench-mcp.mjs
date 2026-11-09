@@ -637,6 +637,23 @@ async function wait(args, signal) {
   ].join("\n")
 }
 
+// A woken seat calls bench tools while it works (bench_step and the like):
+// whatever called it since its run started rides back on the result, so it
+// hears it now and not after its turn (lib/summon.ts takeQueued). Not on
+// bench_permit, whose answer Claude Code parses, nor on the waiting and
+// seating tools, which deliver messages themselves.
+const NO_QUEUE = new Set(["bench_permit", "bench_wait", "bench_join", "bench_leave", "bench_inbox"])
+
+async function withQueued(name, text) {
+  if (!seat || NO_QUEUE.has(name)) return text
+  try {
+    const data = await seatCall("/api/v1/queue", {}, { timeoutMs: 3000 })
+    return data.text ? `${text}\n\n${data.text}` : text
+  } catch {
+    return text
+  }
+}
+
 async function runTool(name, args = {}, signal) {
   switch (name) {
     case "bench_wait":
@@ -807,7 +824,7 @@ async function handle(message) {
       const control = new AbortController()
       inflight.set(id, control)
       try {
-        const text = await runTool(params?.name, params?.arguments ?? {}, control.signal)
+        const text = await withQueued(params?.name, await runTool(params?.name, params?.arguments ?? {}, control.signal))
         if (!control.signal.aborted) reply({ content: [{ type: "text", text }] })
       } catch (error) {
         const text = error instanceof Error ? error.message : String(error)

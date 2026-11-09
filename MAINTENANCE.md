@@ -146,6 +146,14 @@ MCP 只管 agent → 房间：入座、发言、收件箱、任务、在线。�
 
 AI 在汇报里带音视频：被唤起时调 MCP 的 `bench_attach`（`paths`，对应 `POST /api/v1/attach`，即 store 里的 `pinAttachments`），把本机文件挂到这次唤起上，存在内存里（`globalThis.__benchPinned`，席位 id → `{runId, list}`）。这次唤起里它说的下一句话会把这些文件带出去：stdout 贴回的回答走 `sayAs`，进的也是 `say`；它自己发的 `bench_say` 也一样。不在唤起里调用回 409，这时直接用 `bench_say` 的 `attachments`（路径数组）。唤起提示里有一句用法。已经开着的 MCP 桥接是旧进程，要等那个会话下次启动才有 `bench_attach`。用真的 `claude -p` 验过：临时项目里开一个 Claude 会话，叫它挂 mp4，回答带着 `kind: "video"` 的附件发回来了。
 
+干活中途收到新消息（`lib/summon.ts` 的 `takeQueued`，`POST /api/v1/queue`）：一个席位正在回复时又被叫到，消息先进它 lane 的 `pending`。原来要等这轮结束才唤起下一轮，现在这轮当中就能取走：
+- Claude Code：每次回复唤起生成一个 `lane.key`，作为 `BENCH_RUN_KEY` 传给命令。`claude-code.sh` 见到它就加 `--settings`，挂上 PostToolUse 钩子 `scripts/bench-hook.mjs`。每次工具调用后，钩子拿钥匙来取，用 `additionalContext` 塞进这一轮，效果和在 Claude Code 窗口里边干边打字排队一样。
+- Codex：`codex-wake.sh` 现在改调 `scripts/codex-app.mjs`。它用 `codex app-server`（stdio JSON-RPC：initialize → thread/resume → turn/start）跑这一轮，每 2.5 秒拿 `BENCH_RUN_KEY` 问一次房间，有新消息就 `turn/steer` 插进正在跑的这一轮，和在 Codex 窗口里边干边打字一样。它把 app-server 的事件翻成 `codex exec --json` 那几种（agent_message、command_execution、mcp_tool_call、file_change、web_search、turn.completed），过程面板不用改。审批一律关掉（approvalPolicy never），server 发来的请求一律拒绝。`codex queue` 不行：实测它只把消息存着，等下次打开会话才处理，正在跑的 `codex exec` 读不到。设 `BENCH_CODEX_EXEC=1` 可以退回原来的 `codex exec resume`。用真 codex 0.167 验过：在房间里 @ 它跑三次 `sleep 12`，中途插一句暗号，送到后它这一轮的汇报里带着暗号，只回了一条。
+- 其他家：命令行没有中途输入的接口，靠 bench 桥接。它这轮里调任何 bench 工具（`bench_permit`、wait、join、leave、inbox 除外），桥接都用席位凭证来取一次，附在工具结果后面。
+- 取走时：内容用 `catchUp` 生成，席位的游标跟着往前走，下一轮不会重复。清空 `pending` 和 `trigger`，这轮结束就不再唤起。接力次数记进 `midHop`，答完时取最大值，「互相叫醒最多 N 轮」的上限照样生效。消息记上 `reached`，页面在它下面显示「已送到正在干活的 XX」；过程面板里也记一笔。
+- 用真的 `claude -p` 验过：它在跑三次 `sleep 20`，中间 @ 它报一个暗号，第一条 sleep 结束后就送到了，最后的回答里带着暗号，也只回了一条。
+- 钩子要等席位下次被唤起才挂上，正在跑的那一轮不受影响。
+
 项目设置里的「浏览…」调 `POST /api/v1/folder`：房间在桌面上开 zenity 的选目录窗口，等人选完把完整路径交回（浏览器给不出目录的完整路径，所以只能由房间来开）。房间是 `env -i` 起的也行，`DISPLAY`、`XAUTHORITY`、DBus 地址缺了会按本机桌面补上。取消返回 `{dir: null}`；同时只开一个窗口，开着时再点是 409；没装 zenity 是 501，提示直接填路径。
 
 不要为每个请求新开一份状态。SSE 用同一份上的 EventEmitter。`GET /api/v1/stream` 不结束，所以不要对首页用 Chrome 的 `--dump-dom`，它会一直等页面空闲。

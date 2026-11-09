@@ -1,4 +1,5 @@
 import { spawn } from "node:child_process"
+import { randomBytes } from "node:crypto"
 import { StringDecoder } from "node:string_decoder"
 
 import { adapterFor, commandFor, summonPath, type Adapter } from "@/lib/adapters"
@@ -14,6 +15,7 @@ import {
   catchUp,
   inProject,
   markInterruptedResumed,
+  markReached,
   postInterrupted,
   endSummaryJob,
   isStandby,
@@ -74,6 +76,13 @@ type Lane = {
   whisper?: string
   // The latest message that called this seat; the next reply answers it.
   trigger?: string
+  // While a reply run is going: the key its hook asks with (BENCH_RUN_KEY),
+  // the project and run log it belongs to, and the furthest relay hop of the
+  // messages it was handed mid-run (see takeQueued).
+  key?: string
+  project?: string
+  log?: Run
+  midHop?: number
 }
 
 type SummonGlobal = typeof globalThis & {
@@ -302,6 +311,8 @@ function launch(
       BENCH_AGENT: agent.agentName,
       BENCH_UUID: agent.session,
       BENCH_SESSION: agent.session,
+      // Lets a hook in the run fetch what calls the seat meanwhile (takeQueued).
+      ...(lane(agent.id).key ? { BENCH_RUN_KEY: lane(agent.id).key } : {}),
       // A session the room created: where its first wake starts it.
       ...(agent.workdir ? { BENCH_NEW_DIR: agent.workdir } : {}),
     },
@@ -433,9 +444,17 @@ function run(agentId: string) {
 
   queue.running = true
   const log = startRun(agentId, agent.name, "reply", { project: currentProject(), body, replyTo: trigger })
+  queue.key = randomBytes(12).toString("hex")
+  queue.project = currentProject()
+  queue.log = log
+  queue.midHop = undefined
   const seat = busy(agentId, "被点到了，正在回复")
   launch(agent, command, log, seat.live, ({ out, failure, stopped, lost }) => {
     queue.running = false
+    queue.key = undefined
+    queue.log = undefined
+    const reach = Math.max(hop, queue.midHop ?? 0)
+    queue.midHop = undefined
     const still = agentState(agentId)
     if (lost && !stopped) {
       postSystem(`${agent.name} 这次有一行输出太长（超过 8MB）没读，下面贴出的回答可能不完整，「查看过程」里能看到读到的部分`)
@@ -456,7 +475,7 @@ function run(agentId: string) {
       try {
         // Posted while the run is still open, so the message links to it.
         const said = sayAs({ type: "agent", id: still.id, name: still.name }, { text: out.slice(0, 4000) })
-        hops().set(said.message.id, hop + 1)
+        hops().set(said.message.id, reach + 1)
         if (hops().size > 500) hops().delete(hops().keys().next().value ?? "")
       } catch (error) {
         console.error(error)
@@ -585,6 +604,47 @@ export function stopAgent(agentId: string) {
   queue.summary = false
   queue.stop()
   return { dropped }
+}
+
+// Messages that call a seat while it is in a reply run wait in its lane for
+// the next run. A run that can take them now asks here: Claude Code's hook
+// after every tool call (scripts/bench-hook.mjs, by BENCH_RUN_KEY), or any
+// seat's bench bridge after one of its tools (by seat). They are handed over
+// with what else came in since, marked on the page, and wake nobody later.
+export function takeQueued(by: { key?: string; agentId?: string }) {
+  let agentId = by.agentId
+  if (by.key) {
+    for (const [id, item] of g().__benchLanes ?? []) if (item.key === by.key) agentId = id
+    if (!agentId) throw new ApiError(404, "这次唤起已经结束了")
+  }
+  if (!agentId) return { text: "", count: 0 }
+  const queue = lane(agentId)
+  if (!queue.running || !queue.key || !queue.project || queue.pending.length === 0) return { text: "", count: 0 }
+  const items = queue.pending
+  const log = queue.log
+  const text = inProject(queue.project, () => {
+    const seen = catchUp(agentId, CATCH_UP_CHARS)
+    markReached(items.map((item: { id: string }) => item.id), agentId)
+    return seen.text || items.map((item: { line: string }) => item.line).join("\n\n")
+  })
+  queue.pending = []
+  queue.trigger = undefined
+  queue.midHop = Math.max(queue.midHop ?? 0, queue.hops)
+  queue.hops = 0
+  if (log) {
+    putStep(log, {
+      id: `mid-${Date.now()}`,
+      at: Date.now(),
+      kind: "note",
+      title: `干活中途收到 ${items.length} 条叫它的新消息，已经送进这一轮`,
+      output: text,
+      state: "done",
+    })
+  }
+  return {
+    count: items.length,
+    text: `【并坐转来的新消息：你这轮还没做完，又有人找你】\n${text}\n\n（★ 是在叫你的。手上的事别丢，先判断它要不要你马上改方向：要停就停、要改就改，不急的做完再说。最后的回答里一并回应这些消息；回答还是挂在最早叫你的那条下面，要单独回某条就用 bench_say 的 replyTo 填它的 id。）`,
+  }
 }
 
 // The user picked this seat to write the room summary.

@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode } from "react"
-import { ArrowRight, Check, ChevronDown, ListTree, Reply, Undo2, X } from "lucide-react"
+import { ArrowRight, Check, ChevronDown, ListTree, Reply, Undo2, X, Zap } from "lucide-react"
 import { toast } from "sonner"
 
 import { api } from "@/components/room/api"
@@ -139,8 +139,9 @@ export function Thread({
     />
   )
 
-  // Wakes still going whose reply isn't in yet.
-  const posted = new Set(messages.map((message) => message.runId).filter(Boolean))
+  // Wakes still going whose reply isn't in yet. A question card (bench_ask)
+  // comes from the middle of a run, not its end, so it doesn't count.
+  const posted = new Set(messages.filter((message) => !message.ask).map((message) => message.runId).filter(Boolean))
   // In the order they started, so a tool call doesn't bump a seat to the top.
   const live = agents
     .filter((agent) => agent.runId && !posted.has(agent.runId))
@@ -389,6 +390,7 @@ function ChainLine({
         ) : null}
         {message.attachments?.length ? <MessageFiles files={message.attachments} folded={folded(fold)} /> : null}
         {message.ask ? <AskCard message={message} /> : null}
+        <Reached message={message} />
         <div className="mt-0.5 -ml-1 flex items-center gap-1">
           <FoldButton fold={fold} />
           {message.runId && !detail ? (
@@ -588,6 +590,7 @@ function MessageRow({
             </div>
           ) : null}
           {message.attachments?.length ? <MessageFiles files={message.attachments} align="end" folded={folded(fold)} /> : null}
+          <Reached message={message} align="end" />
           <div className="mt-1 flex items-center justify-end gap-2 text-[11px] text-muted-foreground">
             <FoldButton fold={fold} />
             <RecallButton message={message} />
@@ -641,6 +644,7 @@ function MessageRow({
         ) : null}
         {message.attachments?.length ? <MessageFiles files={message.attachments} folded={folded(fold)} /> : null}
         {message.ask ? <AskCard message={message} /> : null}
+        <Reached message={message} />
         <div className="mt-1 flex items-center gap-1">
           <FoldButton fold={fold} />
           {message.runId && !detail ? (
@@ -757,6 +761,25 @@ function RecalledLine({ message, inChain = false }: { message: Message; inChain?
 // While a long message is folded, its attachments fold with it.
 function folded(fold: { long: boolean; open: boolean; toggle: () => void }) {
   return fold.long && !fold.open ? fold.toggle : undefined
+}
+
+// Seats that were busy when this called them and got it in the middle of
+// their run (lib/summon.ts takeQueued), not after it.
+function Reached({ message, align = "start" }: { message: Message; align?: "start" | "end" }) {
+  const list = message.reached
+  if (!list?.length) return null
+  const names = list.map((item) => item.name).join("、")
+  return (
+    <p
+      className={`mt-1 flex animate-in items-center gap-1 text-[11px] text-emerald-700 duration-300 fade-in dark:text-emerald-400 ${
+        align === "end" ? "justify-end" : ""
+      }`}
+      title={`${names} 正在干活，这条在它这一轮中途就送进去了，不用等它做完`}
+    >
+      <Zap className="size-3" />
+      已送到正在干活的 {names}
+    </p>
+  )
 }
 
 // Seats whose run just ended stay a moment longer, so their card can fold

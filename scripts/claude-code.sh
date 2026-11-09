@@ -17,12 +17,20 @@ if [[ -z "$bin" || ! -x "$bin" ]]; then
   exit 127
 fi
 
+# Messages that call the seat while it works reach it mid-turn: after each
+# tool call this hook asks the room for them (lib/summon.ts takeQueued).
+here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+hook=()
+if [[ -n "${BENCH_RUN_KEY:-}" ]]; then
+  hook=(--settings "{\"hooks\":{\"PostToolUse\":[{\"matcher\":\"*\",\"hooks\":[{\"type\":\"command\",\"command\":\"node '$here/bench-hook.mjs'\",\"timeout\":5}]}]}}")
+fi
+
 file="$(ls "$HOME"/.claude/projects/*/"$session".jsonl 2>/dev/null | head -1 || true)"
 # A session the room is creating (「开新会话」) has no transcript until its
 # first turn: start it under that id, in the folder the room picked for it.
 if [[ -z "$file" && -n "${BENCH_NEW_DIR:-}" ]]; then
   cd "$BENCH_NEW_DIR"
-  exec "$bin" --session-id "$session" --allowedTools mcp__bench --disallowedTools AskUserQuestion --permission-prompt-tool mcp__bench__bench_permit --output-format stream-json --verbose -p "$@"
+  exec "$bin" --session-id "$session" "${hook[@]}" --allowedTools mcp__bench --disallowedTools AskUserQuestion --permission-prompt-tool mcp__bench__bench_permit --output-format stream-json --verbose -p "$@"
 fi
 if [[ -z "$file" ]]; then
   echo "找不到 Claude Code 会话 $session" >&2
@@ -78,4 +86,4 @@ esac
 # Permission prompts go the same way: bench_permit puts each on the page and
 # waits for the user's allow or deny (lib/permits.ts).
 # stream-json: one event per line, which the room turns into the 「过程」 panel.
-exec "$bin" --resume "$session" "${perm[@]}" --allowedTools mcp__bench --disallowedTools AskUserQuestion --permission-prompt-tool mcp__bench__bench_permit --output-format stream-json --verbose -p "$@"
+exec "$bin" --resume "$session" "${perm[@]}" "${hook[@]}" --allowedTools mcp__bench --disallowedTools AskUserQuestion --permission-prompt-tool mcp__bench__bench_permit --output-format stream-json --verbose -p "$@"

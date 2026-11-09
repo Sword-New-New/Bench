@@ -90,6 +90,9 @@ export type Message = {
   ask?: Ask
   // The user took it back: text and attachments are gone, the line stays.
   recalled?: { at: number }
+  // Seats that were already working when it called them and got it mid-run
+  // (lib/summon.ts takeQueued), instead of after their turn.
+  reached?: { id: string; name: string; at: number }[]
   // An agent saying its round of handoffs is over: it mentions nobody, and
   // agents stop waking each other until the user speaks again.
   end?: boolean

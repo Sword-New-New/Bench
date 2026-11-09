@@ -623,6 +623,20 @@ export function refreshRooms() {
   }
 }
 
+// These messages were handed to a seat in the middle of its run.
+export function markReached(ids: string[], agentId: string) {
+  const agent = findAgent(agentId)
+  if (!agent) return
+  const at = Date.now()
+  for (const message of room().state.messages) {
+    if (!ids.includes(message.id)) continue
+    const list = (message.reached ?? []).filter((item) => item.id !== agent.id)
+    message.reached = [...list, { id: agent.id, name: agent.name, at }]
+  }
+  bumpRev()
+  commit()
+}
+
 // Something the snapshot shows changed outside the room's own state.
 export function roomChanged() {
   bumpRev()

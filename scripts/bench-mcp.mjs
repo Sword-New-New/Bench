@@ -249,7 +249,7 @@ function taskLine(task) {
   return `- [${task.id}] ${task.title} · ${TASK[task.status] ?? task.status}${review} · ${owner}${progress}${list.join("")}${why}`
 }
 
-const ATTACHMENT = { file: "文件", dir: "文件夹", image: "图片" }
+const ATTACHMENT = { file: "文件", dir: "文件夹", image: "图片", video: "视频", audio: "音频" }
 
 function messageLine(message, mine) {
   if (message.kind === "system") return `  · ${clip(message.text, 200)}`
@@ -354,6 +354,11 @@ const tools = [
       properties: {
         text: { type: "string", description: "要说的话，最长 4000 字" },
         replyTo: { type: "string", description: "要回复的消息 id（bench_inbox 里方括号里的 m_…）" },
+        attachments: {
+          type: "array",
+          description: "随这句话发出的本机文件，填绝对路径，最多 10 个。视频（mp4、webm、mov）和音频（mp3、wav、ogg、m4a 等）在网页上能直接播放，图片直接显示",
+          items: { type: "string" },
+        },
         end: {
           type: "boolean",
           description:
@@ -361,6 +366,18 @@ const tools = [
         },
       },
       required: ["text"],
+    },
+  },
+  {
+    name: "bench_attach",
+    description:
+      "被房间唤起时，把本机文件挂到你这次的最终回答上：回答贴回群里时一起带出去。视频（mp4、webm、mov）和音频（mp3、wav、ogg、m4a 等）在网页上能直接播放，图片直接显示，其他文件显示路径。要给 jinbao 看演示录屏、生成的音频之类的时候用。可以调用多次，同一次唤起里会累加，最多 10 个。",
+    inputSchema: {
+      type: "object",
+      properties: {
+        paths: { type: "array", items: { type: "string" }, description: "文件的绝对路径" },
+      },
+      required: ["paths"],
     },
   },
   {
@@ -641,11 +658,19 @@ async function runTool(name, args = {}, signal) {
       const data = await seatCall("/api/v1/say", {
         text: args.text,
         replyTo: args.replyTo || undefined,
+        attachments: Array.isArray(args.attachments) && args.attachments.length
+          ? args.attachments.map((item) => ({ path: String(item) }))
+          : undefined,
         end: args.end === true || undefined,
       })
       return data.message.end
         ? `已发出 [${data.message.id}]，本轮结束：agent 之间不再互相唤起，等用户发话。`
         : `已发出 [${data.message.id}]。`
+    }
+    case "bench_attach": {
+      const data = await seatCall("/api/v1/attach", { paths: Array.isArray(args.paths) ? args.paths.map(String) : [] })
+      const list = data.attachments.map((item) => `${item.name}（${ATTACHMENT[item.kind] ?? "文件"}）`).join("、")
+      return `挂好了，会跟你这次的回答一起发出：${list}`
     }
     case "bench_ask": {
       const asked = await seatCall("/api/v1/ask", {

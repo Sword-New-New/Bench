@@ -43,7 +43,7 @@ export type Handoff = {
 // computer, so it travels as a path: picked from disk where it lies, or, for
 // something pasted or dropped, the copy the room saved under data/uploads.
 export type Attachment = {
-  kind: "file" | "dir" | "image"
+  kind: "file" | "dir" | "image" | "video" | "audio"
   name: string
   path: string
   size?: number

@@ -2,9 +2,25 @@
 
 import { useEffect, useState } from "react"
 import { createPortal } from "react-dom"
-import { ChevronLeft, ChevronRight, Copy, Download, File, Folder, Loader2, RotateCcw, RotateCw, X } from "lucide-react"
+import {
+  AudioLines,
+  ChevronLeft,
+  ChevronRight,
+  Copy,
+  Download,
+  File,
+  Film,
+  Folder,
+  Loader2,
+  RotateCcw,
+  RotateCw,
+  X,
+} from "lucide-react"
 
 import { api, inOpenProject } from "@/components/room/api"
+import { AudioCard } from "@/components/room/audio-card"
+import { VideoCard } from "@/components/room/video-card"
+import { mediaKind } from "@/lib/media"
 import type { Attachment } from "@/lib/types"
 
 // Files, folders and images going out with a message. Picked from disk they
@@ -18,7 +34,6 @@ export type Pending = Attachment & {
 }
 
 const UPLOAD_LIMIT = 25 * 1024 * 1024
-const IMAGE_RE = /\.(png|jpe?g|gif|webp|bmp|avif)$/i
 
 function base64(file: Blob) {
   return new Promise<string>((resolve, reject) => {
@@ -46,7 +61,7 @@ export async function pickPaths(pick: "files" | "dirs"): Promise<Pending[]> {
     body: JSON.stringify({ as: "human", pick }),
   })
   return result.paths.map((file) => ({
-    kind: pick === "dirs" ? "dir" : IMAGE_RE.test(file) ? "image" : "file",
+    kind: pick === "dirs" ? "dir" : (mediaKind(file) ?? "file"),
     name: file.split("/").filter(Boolean).pop() ?? file,
     path: file,
   }))
@@ -58,7 +73,8 @@ export function previewText(message: { text: string; attachments?: Attachment[] 
   if (message.text.trim()) return message.text
   const first = message.attachments?.[0]
   if (!first) return ""
-  const label = first.kind === "image" ? "[图片]" : first.kind === "dir" ? "[文件夹]" : "[文件]"
+  const label =
+    first.kind === "image" ? "[图片]" : first.kind === "audio" ? "[音频]" : first.kind === "video" ? "[视频]" : first.kind === "dir" ? "[文件夹]" : "[文件]"
   const more = (message.attachments?.length ?? 0) > 1 ? ` 等 ${message.attachments?.length} 个` : ""
   return `${label} ${first.name}${more}`
 }
@@ -260,10 +276,58 @@ function ImageViewer({
 }
 
 // Under a message: images as pictures, files and folders as their path.
-export function MessageFiles({ files, align = "start" }: { files: Attachment[]; align?: "start" | "end" }) {
+// A folded message keeps its attachments folded too: one small chip each, and
+// a click on any opens the message, players and pictures included.
+function FoldedFiles({ files, align, onOpen }: { files: Attachment[]; align: "start" | "end"; onOpen: () => void }) {
+  return (
+    <div className={`mt-1.5 flex flex-wrap gap-1.5 ${align === "end" ? "justify-end" : ""}`}>
+      {files.map((item) => (
+        <button
+          key={item.path}
+          type="button"
+          className="flex max-w-56 items-center gap-1.5 rounded-full border bg-background/60 py-0.5 pr-2.5 pl-1 text-xs hover:bg-muted"
+          title={`展开全文，看 ${item.name}`}
+          onClick={onOpen}
+        >
+          {item.kind === "image" ? (
+            // eslint-disable-next-line @next/next/no-img-element
+            <img src={imageUrl(item.path)} alt="" loading="lazy" className="size-5 shrink-0 rounded-full object-cover" />
+          ) : (
+            <span className="grid size-5 shrink-0 place-items-center rounded-full bg-muted">
+              {item.kind === "video" ? (
+                <Film className="size-3 text-muted-foreground" />
+              ) : item.kind === "audio" ? (
+                <AudioLines className="size-3 text-muted-foreground" />
+              ) : item.kind === "dir" ? (
+                <Folder className="size-3 text-muted-foreground" />
+              ) : (
+                <File className="size-3 text-muted-foreground" />
+              )}
+            </span>
+          )}
+          <span className="min-w-0 truncate">{item.name}</span>
+        </button>
+      ))}
+    </div>
+  )
+}
+
+export function MessageFiles({
+  files,
+  align = "start",
+  folded,
+}: {
+  files: Attachment[]
+  align?: "start" | "end"
+  // Set while the message is folded: opens it.
+  folded?: () => void
+}) {
   const images = files.filter((item) => item.kind === "image")
-  const others = files.filter((item) => item.kind !== "image")
+  const sounds = files.filter((item) => item.kind === "audio")
+  const videos = files.filter((item) => item.kind === "video")
+  const others = files.filter((item) => item.kind !== "image" && item.kind !== "audio" && item.kind !== "video")
   const [viewing, setViewing] = useState<number | null>(null)
+  if (folded) return <FoldedFiles files={files} align={align} onOpen={folded} />
   return (
     <div className={`mt-1.5 flex flex-col gap-1.5 ${align === "end" ? "items-end" : "items-start"}`}>
       {images.length > 0 ? (
@@ -290,6 +354,12 @@ export function MessageFiles({ files, align = "start" }: { files: Attachment[]; 
       {viewing !== null ? (
         <ImageViewer images={images} index={viewing} onIndex={setViewing} onClose={() => setViewing(null)} />
       ) : null}
+      {videos.map((item) => (
+        <VideoCard key={item.path} item={item} />
+      ))}
+      {sounds.map((item) => (
+        <AudioCard key={item.path} item={item} />
+      ))}
       {others.map((item) => (
         <button
           key={item.path}

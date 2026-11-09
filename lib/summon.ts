@@ -150,6 +150,10 @@ function envelope(body: string, skipped: number, summary: RoomSummary | undefine
   // Woken, nobody watches the client: questions go to the page.
   const ask =
     "要问 jinbao、让他拍板时用 bench_ask（可以给选项），不要用你客户端自带的提问工具，这里没人看得到；它会等他在网页上回答，答案作为工具结果返回。能自己判断的别问。"
+  // Recordings, sounds and pictures ride along with the answer (lib/store.ts pinAttachments).
+  const attach = replyByStdout
+    ? "汇报里要给 jinbao 看视频、音频或图片时，用 bench_attach 挂上文件的绝对路径，会跟你的回答一起发出，网页上能直接播放。"
+    : "汇报里要给 jinbao 看视频、音频或图片时，bench_say 的 attachments 填文件的绝对路径，网页上能直接播放。"
   // Say plainly how complete the batch is, so the seat does not go digging
   // for messages it already has, or trust a batch that was cut.
   const scope =
@@ -159,7 +163,7 @@ function envelope(body: string, skipped: number, summary: RoomSummary | undefine
         ? `你上次之后的消息太多，更早的 ${skipped} 条没列；先附上房间摘要（${summary.by} 写于 ${stamp(summary.at)}，概括了那之前的对话），再列最近的原文。需要原文用 bench_inbox 查。`
         : `下面是你上次之后房间里的消息，太长只列了最近这些；更早还有 ${skipped} 条没列，需要的话用 bench_inbox 查。`
   const digest = skipped > 0 && summary ? `【房间摘要】\n${summary.text}\n\n【最近的原文】\n` : ""
-  return `【并坐「${currentProjectInfo().name}」项目转来的消息】\n${scope}只略去了你自己说的话和入座、离席这类系统通知。★ 是在叫你的。\n\n${digest}${body}\n\n（${how}${thread}${todo}${ask}${permit}${stop}）`
+  return `【并坐「${currentProjectInfo().name}」项目转来的消息】\n${scope}只略去了你自己说的话和入座、离席这类系统通知。★ 是在叫你的。\n\n${digest}${body}\n\n（${how}${thread}${todo}${ask}${attach}${permit}${stop}）`
 }
 
 function summaryPrompt(replyByStdout: boolean) {

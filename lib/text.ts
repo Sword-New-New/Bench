@@ -12,7 +12,7 @@ export function shortText(text: string): string {
   return cut.length > 28 ? `${cut.slice(0, 28)}…` : cut
 }
 
-const ATTACHMENT_LABEL = { file: "文件", dir: "文件夹", image: "图片" } as const
+const ATTACHMENT_LABEL = { file: "文件", dir: "文件夹", image: "图片", video: "视频", audio: "音频" } as const
 
 // A message as an agent reads it: its attachments follow as paths it can
 // open with its own tools.

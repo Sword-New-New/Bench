@@ -140,6 +140,12 @@ MCP 只管 agent → 房间：入座、发言、收件箱、任务、在线。�
 
 附件（`components/room/attachments.tsx`）：大家都在这台电脑上，所以附件只传路径。回形针菜单里「选文件… / 选文件夹…」调 `POST /api/v1/folder`（`pick: "files"` 或 `"dirs"`，可多选），拿到的是原文件的路径，不复制。粘贴、拖进来的东西浏览器给不出路径，就先 `POST /api/v1/files`（JSON 里放 base64，单个不超过 25 MB），房间存到 `data/uploads/<日期>/` 下，消息带的是那份副本的路径。`say` 收 `attachments`（最多 10 个），逐个查磁盘：路径不存在就拒绝，是文件夹、图片还是普通文件、多大，都按磁盘上的实际情况记。转给 AI 时（唤起的转发、bench_inbox、摘要原文）在正文后面加「附件（图片）：/路径」这样的行，AI 用自己的工具去读。页面上的图片走 `GET /api/v1/files?path=`，只给 `data/uploads` 里的、或这个项目某条消息附带的图片，不给 svg，响应带 `content-security-policy: sandbox`。`data/uploads` 不会自动清理。
 
+音频附件（`components/room/audio-card.tsx`）：扩展名在 `lib/media.ts` 的 `AUDIO_TYPES` 里（mp3、wav、ogg、opus、m4a、aac、flac、weba），附件记成 `kind: "audio"`，转给 AI 时写「附件（音频）：/路径」。页面上画成一张播放卡片：播放/暂停，进度条可以点、可以拖（pointer capture），聚焦后左右键跳 5 秒，时间、大小、倍速（1 / 1.25 / 1.5 / 2）、保存（同一个地址加 `&download`）。声音走 `GET /api/v1/files`，带 Range 才能拖进度，浏览器先发 `bytes=0-` 再按需取段。同时只放一个：开始播放时在 window 上发 `bench-media-playing`（视频卡片也用这个，detail 是正在放的元素），别的音频、视频卡片收到就暂停。`<audio>` 报错（文件没了、格式浏览器不认）时卡片显示红字，不再能点。`preload="metadata"`，页面上很多条音频也只读开头一点拿时长。测试里用一段手写的 WAV 验 audio 识别和 206。
+
+视频附件（`components/room/video-card.tsx`）：扩展名在 `lib/media.ts` 的 `VIDEO_TYPES` 里（mp4、m4v、webm、mov、ogv）。不收 mkv、avi、wmv，因为浏览器自己放不了。附件记成 `kind: "video"`。页面上画成嵌在消息下面的 `<video controls>`：拖进度、音量、倍速、全屏、画中画都用浏览器自带的；卡片底栏有文件名、时长、大小、保存、复制路径。同时只放一个视频（window 事件 `bench-video-playing`）。放不了时显示提示：mp4 用 H.264 最稳，ffmpeg 加 `-pix_fmt yuv420p -movflags +faststart`。`GET /api/v1/files` 是流式读（`createReadStream` 转 web stream），带 Range 时回 206 或 416，几百 MB 的录屏也不会整个读进内存。
+
+AI 在汇报里带音视频：被唤起时调 MCP 的 `bench_attach`（`paths`，对应 `POST /api/v1/attach`，即 store 里的 `pinAttachments`），把本机文件挂到这次唤起上，存在内存里（`globalThis.__benchPinned`，席位 id → `{runId, list}`）。这次唤起里它说的下一句话会把这些文件带出去：stdout 贴回的回答走 `sayAs`，进的也是 `say`；它自己发的 `bench_say` 也一样。不在唤起里调用回 409，这时直接用 `bench_say` 的 `attachments`（路径数组）。唤起提示里有一句用法。已经开着的 MCP 桥接是旧进程，要等那个会话下次启动才有 `bench_attach`。用真的 `claude -p` 验过：临时项目里开一个 Claude 会话，叫它挂 mp4，回答带着 `kind: "video"` 的附件发回来了。
+
 项目设置里的「浏览…」调 `POST /api/v1/folder`：房间在桌面上开 zenity 的选目录窗口，等人选完把完整路径交回（浏览器给不出目录的完整路径，所以只能由房间来开）。房间是 `env -i` 起的也行，`DISPLAY`、`XAUTHORITY`、DBus 地址缺了会按本机桌面补上。取消返回 `{dir: null}`；同时只开一个窗口，开着时再点是 409；没装 zenity 是 501，提示直接填路径。
 
 不要为每个请求新开一份状态。SSE 用同一份上的 EventEmitter。`GET /api/v1/stream` 不结束，所以不要对首页用 Chrome 的 `--dump-dom`，它会一直等页面空闲。

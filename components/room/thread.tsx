@@ -387,7 +387,7 @@ function ChainLine({
             <MessageBody text={shown(message, agents)} names={names} fold={fold} />
           </div>
         ) : null}
-        {message.attachments?.length ? <MessageFiles files={message.attachments} /> : null}
+        {message.attachments?.length ? <MessageFiles files={message.attachments} folded={folded(fold)} /> : null}
         {message.ask ? <AskCard message={message} /> : null}
         <div className="mt-0.5 -ml-1 flex items-center gap-1">
           <FoldButton fold={fold} />
@@ -587,7 +587,7 @@ function MessageRow({
               <MessageBody text={shown(message, agents)} names={names} tone="inverse" fold={fold} />
             </div>
           ) : null}
-          {message.attachments?.length ? <MessageFiles files={message.attachments} align="end" /> : null}
+          {message.attachments?.length ? <MessageFiles files={message.attachments} align="end" folded={folded(fold)} /> : null}
           <div className="mt-1 flex items-center justify-end gap-2 text-[11px] text-muted-foreground">
             <FoldButton fold={fold} />
             <RecallButton message={message} />
@@ -639,7 +639,7 @@ function MessageRow({
             <MessageBody text={shown(message, agents)} names={names} fold={fold} />
           </div>
         ) : null}
-        {message.attachments?.length ? <MessageFiles files={message.attachments} /> : null}
+        {message.attachments?.length ? <MessageFiles files={message.attachments} folded={folded(fold)} /> : null}
         {message.ask ? <AskCard message={message} /> : null}
         <div className="mt-1 flex items-center gap-1">
           <FoldButton fold={fold} />
@@ -752,6 +752,11 @@ function RecalledLine({ message, inChain = false }: { message: Message; inChain?
       ) : null}
     </p>
   )
+}
+
+// While a long message is folded, its attachments fold with it.
+function folded(fold: { long: boolean; open: boolean; toggle: () => void }) {
+  return fold.long && !fold.open ? fold.toggle : undefined
 }
 
 // Seats whose run just ended stay a moment longer, so their card can fold

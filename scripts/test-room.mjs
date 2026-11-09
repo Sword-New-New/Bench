@@ -117,6 +117,34 @@ async function steps(stamp) {
   })
   assert(missing.status === 400, "不存在的附件应该被拒绝")
 
+  // A sound in a report: told by its extension, and served in byte ranges so
+  // the player can seek. A tenth of a second of silence as a WAV.
+  const samples = 800
+  const wav = Buffer.alloc(44 + samples * 2)
+  wav.write("RIFF", 0); wav.writeUInt32LE(36 + samples * 2, 4); wav.write("WAVEfmt ", 8)
+  wav.writeUInt32LE(16, 16); wav.writeUInt16LE(1, 20); wav.writeUInt16LE(1, 22)
+  wav.writeUInt32LE(8000, 24); wav.writeUInt32LE(16000, 28); wav.writeUInt16LE(2, 32); wav.writeUInt16LE(16, 34)
+  wav.write("data", 36); wav.writeUInt32LE(samples * 2, 40)
+  const sound = await request("/api/v1/files", {
+    method: "POST",
+    body: { as: "human", name: `自测${stamp}.wav`, type: "audio/wav", data: wav.toString("base64") },
+  })
+  assert(sound.status === 201 && sound.data.attachment.kind === "audio", `音频没认出来 ${sound.data.error || sound.status}`)
+  const report = await request("/api/v1/say", {
+    method: "POST",
+    body: { agentId: alpha.data.agent.id, token: alpha.data.token, text: "带音频的汇报", attachments: [{ path: sound.data.attachment.path }] },
+  })
+  assert(report.data.message?.attachments?.[0]?.kind === "audio", "席位发的音频附件没记成 audio")
+  const part = await fetch(`${origin}/api/v1/files?path=${encodeURIComponent(sound.data.attachment.path)}&project=${project}`, {
+    headers: { range: "bytes=40-43" },
+  })
+  const bytes = Buffer.from(await part.arrayBuffer())
+  assert(
+    part.status === 206 && part.headers.get("content-type") === "audio/wav" &&
+      part.headers.get("content-range") === `bytes 40-43/${wav.length}` && bytes.readUInt32LE(0) === samples * 2,
+    `音频不能按段取 ${part.status} ${part.headers.get("content-range")}`,
+  )
+
   // A feature's to-do list: steps go on with the task, are moved along one
   // at a time with who and when, and show up in the room.
   const todo = await request("/api/v1/tasks", {

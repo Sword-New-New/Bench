@@ -6,6 +6,7 @@ import { homedir } from "node:os"
 import path from "node:path"
 
 import { hasAdapter } from "@/lib/adapters"
+import { mediaKind } from "@/lib/media"
 import { ApiError, asRecord, asString } from "@/lib/http"
 import { hasFull, permitsFor } from "@/lib/permits"
 import { activeRun } from "@/lib/runs"
@@ -738,8 +739,6 @@ function actorFrom(input: unknown): Actor {
   throw new ApiError(400, "要带 agentId 和 token，或标明 as 为 human")
 }
 
-const IMAGE_RE = /\.(png|jpe?g|gif|webp|bmp|avif)$/i
-
 // Paths that exist on this computer, at most 10 to a message.
 function attachmentsOf(value: unknown): Attachment[] | undefined {
   if (value == null) return undefined
@@ -751,7 +750,7 @@ function attachmentsOf(value: unknown): Attachment[] | undefined {
     const stat = path.isAbsolute(file) ? statSync(file, { throwIfNoEntry: false }) : undefined
     if (!stat) throw new ApiError(400, `附件不存在：${file || "（没有路径）"}`)
     // What it is comes from the disk, not from what the caller said.
-    const kind = stat.isDirectory() ? "dir" : IMAGE_RE.test(file) ? "image" : "file"
+    const kind = stat.isDirectory() ? "dir" : (mediaKind(file) ?? "file")
     const name = clip(asString(entry.name) || path.basename(file), 120)
     return { kind, name, path: path.resolve(file), size: stat.isDirectory() ? undefined : stat.size } as Attachment
   })
@@ -1026,10 +1025,49 @@ export function touch(id: string) {
   commit()
 }
 
+// Files a woken seat pinned with bench_attach go out with the next thing it
+// says in that wake: its posted answer, or a bench_say. Kept in memory only.
+type Pinned = { runId: string; list: Attachment[] }
+type PinGlobal = typeof globalThis & { __benchPinned?: Map<string, Pinned> }
+
+function pinned() {
+  const store = globalThis as PinGlobal
+  store.__benchPinned ??= new Map()
+  return store.__benchPinned
+}
+
+export function pinAttachments(input: unknown) {
+  const body = asRecord(input)
+  const actor = actorFrom(body)
+  const agent = actor.type === "agent" ? findAgent(actor.id) : undefined
+  if (!agent) throw new ApiError(400, "只有席位能挂附件")
+  const run = activeRun(agent.id)
+  if (!run) throw new ApiError(409, "不在一次唤起里：直接用 bench_say 的 attachments 发")
+  const paths = Array.isArray(body.paths) ? body.paths : []
+  const added = attachmentsOf(paths.map((item) => ({ path: item }))) ?? []
+  if (added.length === 0) throw new ApiError(400, "paths 里至少给一个本机绝对路径")
+  const held = pinned().get(agent.id)
+  const before = held?.runId === run.id ? held.list : []
+  const list = [...before.filter((item) => !added.some((next) => next.path === item.path)), ...added]
+  if (list.length > 10) throw new ApiError(400, "一条消息最多带 10 个附件")
+  pinned().set(agent.id, { runId: run.id, list })
+  return { attachments: list }
+}
+
+function takePinned(agentId: string) {
+  const held = pinned().get(agentId)
+  if (!held) return []
+  pinned().delete(agentId)
+  return held.runId === activeRun(agentId)?.id ? held.list : []
+}
+
 export function say(input: unknown) {
   const body = asRecord(input)
   const actor = actorFrom(body)
-  const attachments = attachmentsOf(body.attachments)
+  const own = attachmentsOf(body.attachments) ?? []
+  const pins = actor.type === "agent" ? takePinned(actor.id) : []
+  const merged = [...pins.filter((item) => !own.some((next) => next.path === item.path)), ...own].slice(0, 10)
+  const attachments = merged.length ? merged : undefined
   const text = asString(body.text) ?? ""
   if (!text.trim() && !attachments) throw new ApiError(400, "消息是空的")
   const asked = asString(body.replyTo)
@@ -1420,7 +1458,7 @@ function withActor(actor: Actor, input: Record<string, unknown>) {
   return { ...input, agentId: agent.id, token: agent.token }
 }
 
-export function sayAs(actor: Actor, input: { text: string; replyTo?: string }) {
+export function sayAs(actor: Actor, input: { text: string; replyTo?: string; attachments?: { path: string }[] }) {
   return say(withActor(actor, input))
 }
 

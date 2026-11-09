@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, type CSSProperties, type ReactNode } from "react"
+import { useEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode } from "react"
 import { ArrowRight, Check, ChevronDown, ListTree, Reply, Undo2, X } from "lucide-react"
 import { toast } from "sonner"
 
@@ -754,8 +754,115 @@ function RecalledLine({ message, inChain = false }: { message: Message; inChain?
   )
 }
 
+// Seats whose run just ended stay a moment longer, so their card can fold
+// away instead of vanishing (`.live-leave`).
+const LEAVE_MS = 1450
+
+function useLeaving(agents: PublicAgent[]) {
+  const key = agents.map((agent) => agent.id).join(" ")
+  const [seen, setSeen] = useState({ key, agents })
+  const [gone, setGone] = useState<PublicAgent[]>([])
+  if (seen.key !== key) {
+    const still = new Set(agents.map((agent) => agent.id))
+    const left = seen.agents.filter((agent) => !still.has(agent.id))
+    setSeen({ key, agents })
+    if (left.length) setGone((list) => [...list.filter((agent) => !still.has(agent.id)), ...left])
+    else if (gone.some((agent) => still.has(agent.id))) setGone((list) => list.filter((agent) => !still.has(agent.id)))
+  } else if (agents.some((agent, index) => agent !== seen.agents[index])) {
+    // Same seats, fresher data: keep the last look of each for when it leaves.
+    setSeen({ key, agents })
+  }
+  useEffect(() => {
+    if (gone.length === 0) return
+    const timer = window.setTimeout(() => setGone([]), LEAVE_MS)
+    return () => window.clearTimeout(timer)
+  }, [gone])
+  return gone
+}
+
+function Leaving({ leaving, color, children }: { leaving: boolean; color: string; children: ReactNode }) {
+  return (
+    <div
+      className={`live-slot ${leaving ? "live-leave" : ""}`}
+      style={{ "--halo": color } as CSSProperties}
+      aria-hidden={leaving || undefined}
+    >
+      <div>
+        {children}
+        {leaving ? <i className="live-line" aria-hidden /> : null}
+      </div>
+    </div>
+  )
+}
+
+// The bubble's width follows what it says: a hidden copy at its natural width
+// is measured, and the bubble eases to that.
+function useNaturalWidth() {
+  const [node, measure] = useState<HTMLElement | null>(null)
+  const [width, setWidth] = useState<number>()
+  useEffect(() => {
+    if (!node) return
+    const update = () => setWidth(Math.ceil(node.getBoundingClientRect().width))
+    const observer = new ResizeObserver(update)
+    observer.observe(node)
+    update()
+    return () => observer.disconnect()
+  }, [node])
+  return { measure, width }
+}
+
+// Debug menu → a made-up seat runs through a short, a long and a short step,
+// then finishes, so the card's width easing and its exit can be watched.
+export const LIVE_DEMO = "bench-live-demo"
+const DEMO_STEPS = ["读 thread.tsx", "跑 npx tsc --noEmit -p . && npx eslint app components lib scripts", "写回复"]
+const DEMO_STEP_MS = 1800
+
+function useLiveDemo() {
+  const [step, setStep] = useState(-1)
+  useEffect(() => {
+    const timers: number[] = []
+    const play = () => {
+      timers.splice(0).forEach((timer) => window.clearTimeout(timer))
+      setStep(0)
+      for (let index = 1; index <= DEMO_STEPS.length; index++) {
+        timers.push(window.setTimeout(() => setStep(index < DEMO_STEPS.length ? index : -1), index * DEMO_STEP_MS))
+      }
+    }
+    window.addEventListener(LIVE_DEMO, play)
+    return () => {
+      window.removeEventListener(LIVE_DEMO, play)
+      timers.forEach((timer) => window.clearTimeout(timer))
+    }
+  }, [])
+  // One object per step: the exit keeps comparing seats by identity.
+  return useMemo(() => (step < 0 ? null : demoAgent(DEMO_STEPS[step])), [step])
+}
+
+function demoAgent(doing: string): PublicAgent {
+  const startedAt = Date.now()
+  return {
+    id: "demo-live",
+    name: "演示",
+    model: "",
+    role: "",
+    strengths: [],
+    status: "working",
+    doing,
+    color: "oklch(0.65 0.15 160)",
+    demo: true,
+    agentName: "demo",
+    hasSession: false,
+    callable: false,
+    standby: false,
+    runStartedAt: startedAt,
+    stepAt: startedAt,
+    createdAt: startedAt,
+    lastSeenAt: startedAt,
+  }
+}
+
 function LiveDrawer({
-  agents,
+  agents: real,
   detail,
   onOpenRun,
   onMention,
@@ -766,11 +873,22 @@ function LiveDrawer({
   onMention: (name: string) => void
 }) {
   const [open, setOpen] = useState(false)
+  const demo = useLiveDemo()
+  const agents = demo ? [...real, demo] : real
   const now = useNow(agents.length > 0)
-  if (agents.length === 0) return null
-  if (agents.length === 1) {
-    return <LiveRun agent={agents[0]} detail={detail} onOpenRun={onOpenRun} onMention={onMention} />
-  }
+  const gone = useLeaving(agents)
+  // Leaving cards keep their place and their element (same key, same
+  // wrapper), so the exit plays on what was on screen.
+  const leavingIds = new Set(gone.map((agent) => agent.id))
+  const runs = [...agents, ...gone]
+    .sort((a, b) => (a.runStartedAt ?? 0) - (b.runStartedAt ?? 0))
+    .map((agent) => (
+      <Leaving key={agent.id} leaving={leavingIds.has(agent.id)} color={seatLook(agent).color}>
+        <LiveRun agent={agent} detail={detail} onOpenRun={onOpenRun} onMention={onMention} />
+      </Leaving>
+    ))
+  if (agents.length === 0 && gone.length === 0) return null
+  if (agents.length <= 1) return <>{runs}</>
   return (
     <section className="mt-4">
       <button
@@ -814,11 +932,7 @@ function LiveDrawer({
         </span>
         <ChevronDown className={`size-4 shrink-0 text-muted-foreground transition-transform ${open ? "rotate-180" : ""}`} />
       </button>
-      <Reveal open={open}>
-        {agents.map((agent) => (
-          <LiveRun key={agent.id} agent={agent} detail={detail} onOpenRun={onOpenRun} onMention={onMention} />
-        ))}
-      </Reveal>
+      <Reveal open={open}>{runs}</Reveal>
     </section>
   )
 }
@@ -836,6 +950,28 @@ function LiveRun({
 }) {
   const look = seatLook(agent)
   const now = useNow(true)
+  const { measure, width } = useNaturalWidth()
+  // Twice: once to show (it truncates when there's no room), once unseen at
+  // its natural width to measure.
+  const inside = (shown: boolean) => (
+    <>
+      <span className="typing shrink-0" aria-hidden>
+        <i />
+        <i />
+        <i />
+      </span>
+      <span
+        key={shown ? agent.doing : undefined}
+        className={`min-w-0 truncate text-sm text-muted-foreground ${shown ? "animate-in duration-300 fade-in" : ""}`}
+      >
+        {agent.doing || "在想…"}
+      </span>
+      <span className="shrink-0 text-sm">
+        <Quiet agent={agent} now={now} />
+      </span>
+      <ListTree className="size-3.5 shrink-0 text-muted-foreground" aria-label={shown ? "查看过程" : undefined} />
+    </>
+  )
   return (
     <article className="mt-4 flex animate-in gap-3 duration-300 fade-in slide-in-from-bottom-1">
       <div className="w-8 shrink-0">
@@ -854,21 +990,21 @@ function LiveRun({
         ) : (
           <button
             type="button"
-            className="bubble working flex w-fit max-w-full items-center gap-2.5 rounded-2xl rounded-tl-md bg-card/85 px-3.5 py-2.5 text-left"
-            style={{ "--halo": look.color } as CSSProperties}
+            className={`bubble working flex max-w-full items-center gap-2.5 rounded-2xl rounded-tl-md bg-card/85 px-3.5 py-2.5 text-left transition-[width] duration-300 ease-out motion-reduce:transition-none ${
+              width ? "" : "w-fit"
+            }`}
+            style={{ "--halo": look.color, width } as CSSProperties}
             title="查看过程"
             onClick={() => agent.runId && onOpenRun(agent.runId)}
           >
-            <span className="typing shrink-0" aria-hidden>
-              <i />
-              <i />
-              <i />
+            {inside(true)}
+            <span
+              ref={measure}
+              className="pointer-events-none invisible absolute top-0 left-0 flex w-max items-center gap-2.5 px-3.5 py-2.5"
+              aria-hidden
+            >
+              {inside(false)}
             </span>
-            <span className="min-w-0 truncate text-sm text-muted-foreground">{agent.doing || "在想…"}</span>
-            <span className="shrink-0 text-sm">
-              <Quiet agent={agent} now={now} />
-            </span>
-            <ListTree className="size-3.5 shrink-0 text-muted-foreground" aria-label="查看过程" />
           </button>
         )}
       </div>

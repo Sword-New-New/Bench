@@ -16,7 +16,7 @@ import { PermitBar } from "@/components/room/permits"
 import { clearSummarySnooze, SUMMARY_DONE_DEMO, SummaryCard, SummaryNudge } from "@/components/room/summary"
 import { DEBUG_MENU, DebugMenu, NO_DEBUG, withDebug, type DebugView } from "@/components/room/debug-menu"
 import { TasksPanel } from "@/components/room/tasks-panel"
-import { EDIT_EVENT, Thread } from "@/components/room/thread"
+import { EDIT_EVENT, LIVE_DEMO, Thread } from "@/components/room/thread"
 import { WhisperDialog } from "@/components/room/whisper-dialog"
 import { SpawnDialog } from "@/components/room/spawn-dialog"
 import { type Pending } from "@/components/room/attachments"
@@ -372,6 +372,7 @@ export function RoomApp() {
               }
               onClearSummary={() => void run(() => debugCall({ action: "clearSummary", confirm: "清空摘要" }), "摘要清空了")}
               onSummaryDone={() => window.dispatchEvent(new Event(SUMMARY_DONE_DEMO))}
+              onLiveDemo={() => window.dispatchEvent(new Event(LIVE_DEMO))}
               onClearSnooze={() => {
                 clearSummarySnooze()
                 toast.success("「稍后提醒」清掉了")

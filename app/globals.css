@@ -573,3 +573,75 @@
   .summary-writing::after { animation: none; display: none; }
   .summary-check, .summary-check path { animation: none; stroke-dashoffset: 0; }
 }
+
+/* A 「正在做」 card whose run just ended switches off like an old CRT set:
+ * the picture squeezes from top and bottom into a glowing line through its
+ * middle, the line shrinks from both ends to a dot, the dot fades, and then
+ * the row closes so what is above drops down. 1.4s in all (LEAVE_MS in
+ * thread.tsx waits a little longer before dropping it). */
+.live-slot {
+  display: grid;
+  grid-template-rows: 1fr;
+}
+
+.live-slot > * {
+  min-height: 0;
+}
+
+.live-leave {
+  pointer-events: none;
+  animation: live-close 1.4s linear forwards;
+}
+
+.live-leave > * {
+  position: relative;
+  justify-self: start;
+  width: fit-content;
+  max-width: 100%;
+  overflow: hidden;
+}
+
+/* The card itself: squeezed flat and washed bright, gone by 40%. */
+.live-leave > * > article {
+  transform-origin: 50% 50%;
+  animation: live-squeeze 1.4s forwards;
+}
+
+/* The line it leaves; the card's mt-4 (16px) sits above its middle. */
+.live-line {
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: calc(50% + 8px);
+  height: 2px;
+  margin-top: -1px;
+  border-radius: 9999px;
+  background: linear-gradient(90deg, transparent, white 12%, white 88%, transparent);
+  box-shadow:
+    0 0 6px 1px color-mix(in oklch, var(--halo) 80%, white),
+    0 0 18px 3px color-mix(in oklch, var(--halo) 45%, transparent);
+  opacity: 0;
+  animation: live-line 1.4s forwards;
+}
+
+@keyframes live-squeeze {
+  0% { transform: scaleY(1); filter: brightness(1); opacity: 1; animation-timing-function: cubic-bezier(0.6, 0, 0.8, 0.6); }
+  34% { transform: scaleY(0.04); filter: brightness(2.2); opacity: 1; }
+  40%, 100% { transform: scaleY(0.02); filter: brightness(3); opacity: 0; }
+}
+
+@keyframes live-line {
+  0%, 28% { opacity: 0; transform: scaleX(1); }
+  36% { opacity: 1; transform: scaleX(1); animation-timing-function: cubic-bezier(0.5, 0, 0.75, 0.4); }
+  68% { opacity: 1; transform: scaleX(0.015); }
+  80%, 100% { opacity: 0; transform: scaleX(0.015); }
+}
+
+@keyframes live-close {
+  0%, 74% { grid-template-rows: 1fr; animation-timing-function: cubic-bezier(0.4, 0, 0.2, 1); }
+  100% { grid-template-rows: 0fr; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .live-leave { display: none; }
+}

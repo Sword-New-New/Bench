@@ -6,6 +6,10 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 URL="http://127.0.0.1:4399"
 SESSION="bench-dev"
 
+# Launched from the app menu or desktop, PATH has none of ~/.bashrc's additions.
+if ! command -v npm >/dev/null 2>&1 && [[ -x /usr/local/nodejs/bin/npm ]]; then
+  export PATH="/usr/local/nodejs/bin:$PATH"
+fi
 if ! command -v npm >/dev/null 2>&1; then
   nvm_node="$(ls -d "$HOME"/.nvm/versions/node/*/bin 2>/dev/null | sort -V | tail -1 || true)"
   if [[ -n "${nvm_node}" ]]; then

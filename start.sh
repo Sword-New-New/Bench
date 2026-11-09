@@ -28,6 +28,6 @@ if [[ ! -d node_modules ]]; then
   npm install || pause_exit
 fi
 
-echo "房间地址 $URL"
-(sleep 4 && xdg-open "$URL" >/dev/null 2>&1) &
+echo "房间地址 $URL（用带口令的链接打开）"
+(sleep 4 && node scripts/open-room.mjs) &
 exec npx next dev -p 4399 -H 127.0.0.1

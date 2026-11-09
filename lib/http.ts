@@ -1,3 +1,5 @@
+import { HUMAN_HEADER, isHumanKey } from "@/lib/human"
+
 export class ApiError extends Error {
   status: number
 
@@ -42,11 +44,19 @@ function guard(request: Request) {
 
 export async function readBody(request: Request): Promise<unknown> {
   guard(request)
+  let body: unknown
   try {
-    return await request.json()
+    body = await request.json()
   } catch {
     throw new ApiError(400, "需要 JSON 请求体")
   }
+  // Speaking for the user takes the key only the room page has (lib/human.ts).
+  if (typeof body === "object" && body !== null && (body as { as?: unknown }).as === "human") {
+    if (!isHumanKey(request.headers.get(HUMAN_HEADER))) {
+      throw new ApiError(403, "这个页面没有口令或口令不对：用 npm run open 或桌面上的「并坐」图标重新打开房间。agent 和脚本不能代用户操作")
+    }
+  }
+  return body
 }
 
 export function asRecord(value: unknown): Record<string, unknown> {

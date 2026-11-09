@@ -22,6 +22,39 @@ function withProject(body: BodyInit | null | undefined) {
   return body
 }
 
+// The key that makes a request the user's own (lib/human.ts). The page never
+// carries it: it comes in once as ?key=… on the link the launchers open
+// (scripts/open-room.mjs), is kept in this browser, and is taken out of the
+// address bar. Sent on every request; the room only checks it where the body
+// says as:"human".
+const KEY_STORE = "bench-human-key"
+let humanKey: string | undefined
+export function storedHumanKey(): string {
+  if (humanKey !== undefined) return humanKey
+  if (typeof window === "undefined") return ""
+  const url = new URL(window.location.href)
+  const given = url.searchParams.get("key")
+  if (given) {
+    try {
+      localStorage.setItem(KEY_STORE, given)
+    } catch {}
+    url.searchParams.delete("key")
+    window.history.replaceState(window.history.state, "", url.pathname + url.search + url.hash)
+    humanKey = given
+    return humanKey
+  }
+  try {
+    humanKey = localStorage.getItem(KEY_STORE) ?? ""
+  } catch {
+    humanKey = ""
+  }
+  return humanKey
+}
+function human(): Record<string, string> {
+  const key = storedHumanKey()
+  return key ? { "x-bench-human": key } : {}
+}
+
 export async function api<T>(path: string, init?: RequestInit): Promise<T> {
   const read = !init?.method || init.method === "GET"
   const res = await fetch(read ? inOpenProject(path) : path, {
@@ -30,6 +63,7 @@ export async function api<T>(path: string, init?: RequestInit): Promise<T> {
     cache: "no-store",
     headers: {
       ...(init?.body ? { "content-type": "application/json" } : {}),
+      ...human(),
       ...init?.headers,
     },
   })

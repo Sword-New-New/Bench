@@ -21,12 +21,9 @@ up() {
   curl -sf -o /dev/null --max-time 2 "$URL/"
 }
 
+# With the user's key in the address (scripts/open-room.mjs, lib/human.ts).
 open_room() {
-  if command -v xdg-open >/dev/null 2>&1; then
-    xdg-open "$URL" >/dev/null 2>&1 || true
-  elif command -v google-chrome >/dev/null 2>&1; then
-    google-chrome "$URL" >/dev/null 2>&1 || true
-  fi
+  node "$ROOT/scripts/open-room.mjs" >/dev/null 2>&1 || true
 }
 
 if up; then

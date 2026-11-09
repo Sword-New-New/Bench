@@ -4,10 +4,22 @@ const origin = (process.env.BENCH_URL || "http://127.0.0.1:4399").replace(/\/$/,
 // left alone. Every call names it.
 let project = ""
 
-async function request(pathname, { method = "GET", body } = {}) {
+// as:"human" needs the user's key (lib/human.ts). It is only in
+// data/human-key, never on the page: run this from the room's folder, or point
+// BENCH_KEY_FILE at the file.
+let humanKey = ""
+async function pageKey() {
+  const { readFileSync } = await import("node:fs")
+  const file = process.env.BENCH_KEY_FILE || `${process.cwd()}/data/human-key`
+  return readFileSync(file, "utf8").trim()
+}
+
+async function request(pathname, { method = "GET", body, key = true } = {}) {
   const res = await fetch(`${origin}${pathname}`, {
     method,
-    headers: body ? { "content-type": "application/json" } : undefined,
+    headers: body
+      ? { "content-type": "application/json", ...(key && body.as === "human" ? { "x-bench-human": humanKey } : {}) }
+      : undefined,
     body: body ? JSON.stringify(project ? { project, ...body } : body) : undefined,
   })
   const data = await res.json().catch(() => ({}))
@@ -20,6 +32,10 @@ function assert(condition, message) {
 
 async function main() {
   const stamp = Date.now().toString(36)
+  humanKey = await pageKey()
+  assert(/^[0-9a-f]{64}$/.test(humanKey), "data/human-key 里没有口令")
+  const page = await (await fetch(`${origin}/`)).text()
+  assert(!page.includes(humanKey), "首页里不该出现口令")
   const made = await request("/api/v1/projects", { method: "POST", body: { as: "human", name: `自测${stamp}` } })
   assert(made.status === 201, `建测试项目失败 ${made.status} ${made.data.error || ""}`)
   project = made.data.project.id
@@ -44,6 +60,22 @@ async function steps(stamp) {
     body: { name: `乙${stamp}`, model: "composer", role: "实现", strengths: ["界面"] },
   })
   assert(beta.status === 201, `乙入座失败 ${beta.data.error || beta.status}`)
+  // Speaking for the user takes the page's key: without it, or with a wrong
+  // one, an agent's curl can't post, approve permits or rename the user.
+  for (const [path, body] of [
+    ["/api/v1/say", { as: "human", text: "冒充用户" }],
+    ["/api/v1/permit", { as: "human", action: "elevate", agentId: alpha.data.agent.id, allow: true }],
+    ["/api/v1/user", { as: "human", name: "冒名" }],
+  ]) {
+    const bare = await request(path, { method: "POST", body, key: false })
+    assert(bare.status === 403, `不带口令的 as:human 应该被拒：${path} 得到 ${bare.status}`)
+  }
+  const forged = await fetch(`${origin}/api/v1/say`, {
+    method: "POST",
+    headers: { "content-type": "application/json", "x-bench-human": "0".repeat(64) },
+    body: JSON.stringify({ project, as: "human", text: "冒充用户" }),
+  })
+  assert(forged.status === 403, `口令不对的 as:human 应该被拒，得到 ${forged.status}`)
 
   const taken = await request("/api/v1/join", {
     method: "POST",

@@ -21,7 +21,7 @@ import { Tour, TOUR_JOIN, TOUR_START } from "@/components/room/tour"
 import { WhisperDialog } from "@/components/room/whisper-dialog"
 import { SpawnDialog } from "@/components/room/spawn-dialog"
 import { type Pending } from "@/components/room/attachments"
-import { api, inOpenProject, setOpenProject, type AdapterInfo } from "@/components/room/api"
+import { api, inOpenProject, setOpenProject, storedHumanKey, type AdapterInfo } from "@/components/room/api"
 import { ProjectDialog, ProjectMenu } from "@/components/room/project-menu"
 import { Button } from "@/components/ui/button"
 import {
@@ -143,6 +143,8 @@ export function RoomApp() {
   const [runId, setRunId] = useState<string | null>(null)
   const [whisperId, setWhisperId] = useState<string | null>(null)
   const detail = useSyncExternalStore(onDetailChange, detailSaved, () => false)
+  // No key in this browser: whatever the user does here is refused.
+  const keyless = useSyncExternalStore(noSubscribe, () => !storedHumanKey(), () => false)
   const [spawn, setSpawn] = useState<{ kind: string; from: PublicAgent | null } | null>(null)
   const [adaptersOpen, setAdaptersOpen] = useState(false)
   const [adapterName, setAdapterName] = useState<string | null>(null)
@@ -350,6 +352,11 @@ export function RoomApp() {
     <main className="relative isolate flex h-dvh flex-col">
       <Ambient />
       <Tour />
+      {keyless ? (
+        <p role="alert" className="shrink-0 bg-destructive px-4 py-2 text-center text-sm text-white">
+          这个页面没有口令，发消息、批准权限这些操作都会被拒。用 <code>npm run open</code> 或桌面上的「并坐」图标重新打开一次，之后就不用了。
+        </p>
+      ) : null}
       <div className="shrink-0 px-3 pt-2 lg:px-4">
       <header className="flex h-12 items-center gap-3 pr-1 pl-1">
         <Mark />
@@ -870,4 +877,9 @@ export function RoomApp() {
       </Dialog>
     </main>
   )
+}
+
+// The key never changes while the page is open (components/room/api.ts).
+function noSubscribe() {
+  return () => {}
 }

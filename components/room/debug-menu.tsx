@@ -18,8 +18,9 @@ import {
 } from "@/components/ui/dropdown-menu"
 import type { AgentStatus, PublicAgent, RoomSnapshot } from "@/lib/types"
 
-// Only in `next dev`; the debug route refuses in production as well.
-export const DEBUG_MENU = process.env.NODE_ENV === "development"
+// Off unless NEXT_PUBLIC_BENCH_DEBUG=1 (put it in .env.local) and only under
+// `next dev`. The debug route checks the same switch.
+export const DEBUG_MENU = process.env.NODE_ENV === "development" && process.env.NEXT_PUBLIC_BENCH_DEBUG === "1"
 
 // Overrides on what you see. They never touch the room itself.
 export type DebugView = {

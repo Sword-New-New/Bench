@@ -12,7 +12,8 @@ const NOTES: Record<string, () => string> = {
 
 export async function POST(request: Request) {
   try {
-    if (process.env.NODE_ENV === "production") throw new ApiError(404, "调试接口只在开发模式开着")
+    if (process.env.NODE_ENV === "production" || process.env.NEXT_PUBLIC_BENCH_DEBUG !== "1")
+      throw new ApiError(404, "调试接口没开：在 .env.local 里写 NEXT_PUBLIC_BENCH_DEBUG=1，并用 next dev 跑")
     await boot()
     const body = asRecord(await readBody(request))
     if (body.as !== "human") throw new ApiError(403, "调试接口只给人用")

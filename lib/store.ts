@@ -7,12 +7,17 @@ import path from "node:path"
 
 import { hasAdapter } from "@/lib/adapters"
 import { ApiError, asRecord, asString } from "@/lib/http"
+import { hasFull, permitsFor } from "@/lib/permits"
 import { activeRun } from "@/lib/runs"
 import { liveStatus } from "@/lib/status"
+import { isReviewStep } from "@/lib/review"
 import { mentionedAgentIds, mentionPattern, namedAgentIds, withAttachments } from "@/lib/text"
 import type {
+  Ask,
+  AskOption,
   Actor,
   Attachment,
+  InterruptedRun,
   AgentStatus,
   Message,
   Project,
@@ -90,6 +95,9 @@ type Room = {
   // to them through the loop instead of waking them with a command.
   waiting?: Map<string, number>
   standby?: Map<string, number>
+  // Questions whose asker is blocked in bench_ask right now: the answer goes
+  // back through that call, so it must not also wake the asker.
+  asking?: Set<string>
   // The seat writing a summary, and the seq its material ends at.
   summaryJob?: { agentId: string; upToSeq: number }
 }
@@ -421,6 +429,9 @@ function present(agent: Agent, now = Date.now()): PublicAgent {
     callable: Boolean(agent.agentName && agent.session) && hasAdapter(agent.agentName ?? ""),
     standby: (waitingOf().get(agent.id) ?? 0) > 0,
     runId: run?.id,
+    runStartedAt: run?.startedAt,
+    stepAt: run ? (run.steps.at(-1)?.at ?? run.startedAt) : undefined,
+    fullAccess: hasFull(agent.id) || undefined,
     createdAt: agent.createdAt,
     lastSeenAt: agent.lastSeenAt,
   }
@@ -461,6 +472,7 @@ export function snapshot(): RoomSnapshot {
     summaryDue: chars >= CATCH_UP_CHARS,
     summaryWriter: room().summaryJob?.agentId ?? null,
     relayClosed: room().state.relayClosed === true,
+    permits: permitsFor(room().id),
   }
 }
 
@@ -470,17 +482,25 @@ function summaryBase() {
 }
 
 function talkSince(after: number) {
-  return room().state.messages.filter((message) => message.seq > after && message.kind !== "system")
+  return room().state.messages.filter((message) => message.seq > after && message.kind !== "system" && !message.recalled)
 }
 
 // A message as an agent reads it: its id, so it can answer that one, and
 // what it was answering. The summary writer gets them without ids.
-function talkLine(message: Message, ids = true) {
+// `viewer`: the seat the line is for, which a verdict on its own task names as 你.
+function talkLine(message: Message, ids = true, viewer?: string) {
   const time = new Date(message.createdAt).toTimeString().slice(0, 5)
   const head = ids ? `${time} [${message.id}] ${message.authorName}` : `${time} ${message.authorName}`
   const answer = replyOf(message)
   const hint = answer ? `（回复${ids ? ` [${answer.id}]` : ""} ${answer.authorName}：${answer.gist}）` : ""
-  return `${head}${hint}：${withAttachments(message.text, message.attachments)}`
+  return `${head}${hint}：${withAttachments(message.text, message.attachments)}${verdictNote(message, ids, viewer)}`
+}
+
+function verdictNote(message: Message, ids: boolean, viewer?: string) {
+  const owner = message.verdict?.ownerId
+  if (!owner) return ""
+  const name = owner === viewer ? "你" : (findAgent(owner)?.name ?? "已离开的席位")
+  return ids ? `（负责人：${name}，席位 ${owner}，待办 ${message.verdict?.taskId}）` : `（负责人：${name}）`
 }
 
 // One line of a message, enough to tell which one is meant.
@@ -535,7 +555,16 @@ function structured(message: Message) {
     replyTo: message.replyTo,
     reply: replyOf(message),
     attachments: message.attachments,
+    ask: message.ask,
+    recalled: message.recalled ? true : undefined,
     taskId: message.taskId,
+    verdict: message.verdict && {
+      taskId: message.verdict.taskId,
+      state: message.verdict.state,
+      owner: message.verdict.ownerId
+        ? { id: message.verdict.ownerId, name: findAgent(message.verdict.ownerId)?.name ?? null }
+        : null,
+    },
     handoff: message.handoff,
     end: message.end,
   }
@@ -591,6 +620,12 @@ export function refreshRooms() {
       commit()
     })
   }
+}
+
+// Something the snapshot shows changed outside the room's own state.
+export function roomChanged() {
+  bumpRev()
+  emit()
 }
 
 function nextSeq() {
@@ -925,7 +960,7 @@ export function registerSession(input: unknown) {
 }
 
 export function summonCandidates(message: Message) {
-  if (message.kind === "system") return []
+  if (message.kind === "system" || message.recalled) return []
   const ids = new Set(namedAgentIds(message.text, room().state.agents))
   if (message.handoff?.toId) ids.add(message.handoff.toId)
   // The user replying to an agent calls it, no @ needed. Between agents a
@@ -936,6 +971,9 @@ export function summonCandidates(message: Message) {
     if (answered && findAgent(answered.authorId)) ids.add(answered.authorId)
   }
   ids.delete(message.authorId)
+  // An answer the asker is waiting for in bench_ask reaches it there.
+  const answered = message.authorId === "human" && message.replyTo ? room().state.messages.find((item) => item.id === message.replyTo) : undefined
+  if (answered?.ask?.answerId === message.id && answered.ask.handed) ids.delete(answered.authorId)
   const found: { id: string; name: string; agentName?: string; session?: string }[] = []
   for (const id of ids) {
     const agent = findAgent(id)
@@ -1024,12 +1062,161 @@ export function say(input: unknown) {
     runId: agent ? activeRun(agent.id)?.id : undefined,
   })
   if (agent) agent.lastSeenAt = Date.now()
+  if (actor.type === "human" && replyTo) answerAsk(replyTo, message)
   commit()
   runtime().bus.emit("message", message)
   return { message }
 }
 
+// ---- questions to the user (bench_ask) ----
+
+const ASK_WAIT_DEFAULT_MS = 10 * 60_000
+const ASK_WAIT_MAX_MS = 13 * 60_000
+
+function askingOf() {
+  return (room().asking ??= new Set())
+}
+
+function optionsOf(value: unknown): AskOption[] | undefined {
+  if (value === undefined) return undefined
+  if (!Array.isArray(value)) throw new ApiError(400, "options 要是一个数组")
+  const options = value
+    .map((item) => {
+      if (typeof item === "string") return { label: clip(item.trim(), 80) }
+      const record = asRecord(item)
+      const label = clip((asString(record.label) ?? "").trim(), 80)
+      const detail = clip((asString(record.detail) ?? asString(record.description) ?? "").trim(), 200)
+      return detail ? { label, detail } : { label }
+    })
+    .filter((item) => item.label)
+  if (options.length > 6) throw new ApiError(400, "选项最多 6 个")
+  if (new Set(options.map((item) => item.label)).size !== options.length) throw new ApiError(400, "选项不能重名")
+  return options.length ? options : undefined
+}
+
+// The user's reply to an open question is its answer.
+function answerAsk(questionId: string, reply: Message) {
+  const question = room().state.messages.find((item) => item.id === questionId)
+  if (!question?.ask || question.ask.state !== "open") return
+  question.ask = {
+    ...question.ask,
+    state: "answered",
+    answer: withAttachments(reply.text, reply.attachments),
+    answerId: reply.id,
+    answeredAt: reply.createdAt,
+    handed: askingOf().has(questionId) || undefined,
+  }
+  bumpRev()
+}
+
+// An agent puts a question to the user: it shows in the thread as a card to
+// answer, and the asker's seat says it is waiting.
+export function askUser(input: unknown) {
+  const body = asRecord(input)
+  const actor = actorFrom(body)
+  if (actor.type !== "agent") throw new ApiError(400, "只有入座的 agent 能提问")
+  const agent = findAgent(actor.id)
+  if (!agent) throw new ApiError(404, "这个席位不在了")
+  const text = clip((asString(body.text) ?? asString(body.question) ?? "").trim(), 2000)
+  if (!text) throw new ApiError(400, "问题是空的")
+  const options = optionsOf(body.options)
+  const ask: Ask = { state: "open", options, multi: options && body.multi === true ? true : undefined }
+  const woke = activeRun(agent.id)?.replyTo
+  const message = appendMessage({
+    kind: "chat",
+    authorId: agent.id,
+    authorName: agent.name,
+    authorModel: agent.model,
+    authorColor: agent.color,
+    authorDemo: agent.demo,
+    text,
+    mentions: [],
+    ask,
+    replyTo: woke && room().state.messages.some((item) => item.id === woke) ? woke : undefined,
+    runId: activeRun(agent.id)?.id,
+  })
+  agent.status = "blocked"
+  agent.doing = clip(`等 jinbao 回答：${text.replace(/\s+/g, " ")}`, 120)
+  agent.lastSeenAt = Date.now()
+  bumpRev()
+  commit()
+  runtime().bus.emit("message", message)
+  return { message }
+}
+
+// Block until the user answers that question, or the time is up. While this
+// waits, the answer doesn't wake the asker a second time.
+export async function awaitAnswer(input: unknown, signal?: AbortSignal) {
+  const body = asRecord(input)
+  const actor = actorFrom(body)
+  if (actor.type !== "agent") throw new ApiError(400, "只有入座的 agent 能等回答")
+  const id = asString(body.id) ?? ""
+  const question = () => room().state.messages.find((item) => item.id === id)
+  const first = question()
+  if (!first?.ask) throw new ApiError(404, "这个问题不在房间里了")
+  if (first.authorId !== actor.id) throw new ApiError(403, "只能等自己提的问题")
+  const raw = Number(body.timeoutMs ?? ASK_WAIT_DEFAULT_MS)
+  const timeoutMs = Math.min(ASK_WAIT_MAX_MS, Math.max(1_000, Number.isFinite(raw) ? raw : ASK_WAIT_DEFAULT_MS))
+  const result = () => {
+    const found = question()
+    return { state: found?.ask?.state ?? "gone", answer: found?.ask?.answer, answerId: found?.ask?.answerId }
+  }
+  if (first.ask.state !== "open") return { ...result(), timedOut: false }
+  const asking = askingOf()
+  asking.add(id)
+  const timedOut = await new Promise<boolean>((resolve) => {
+    let done = false
+    const finish = (value: boolean) => {
+      if (done) return
+      done = true
+      clearTimeout(timer)
+      stop()
+      signal?.removeEventListener("abort", onAbort)
+      resolve(value)
+    }
+    const stop = onMessage((message) => {
+      if (message.replyTo === id && question()?.ask?.state !== "open") finish(false)
+    })
+    const timer = setTimeout(() => finish(true), timeoutMs)
+    const onAbort = () => finish(true)
+    signal?.addEventListener("abort", onAbort)
+  })
+  asking.delete(id)
+  const agent = findAgent(actor.id)
+  if (agent && agent.status === "blocked" && agent.doing.startsWith("等 jinbao 回答")) {
+    agent.status = timedOut ? "idle" : "working"
+    agent.doing = timedOut ? "问了 jinbao，还没回答" : "收到 jinbao 的回答"
+    bumpRev()
+    commit()
+  }
+  return { ...result(), timedOut }
+}
+
 export const END_MARK = "【本轮结束】"
+
+// The user takes back one of their own messages. Its line stays in the thread
+// as 「jinbao 撤回了一条消息」; agents no longer see it anywhere. The text
+// comes back to the page that asked, so it can be edited and sent again.
+// Not a seat's: its own session still holds what it said, and the thread
+// would stop matching what it remembers.
+export function recall(input: unknown) {
+  const body = asRecord(input)
+  const actor = actorFrom(body)
+  if (actor.type !== "human") throw new ApiError(403, "只有 jinbao 能撤回")
+  const message = room().state.messages.find((item) => item.id === asString(body.id))
+  if (!message) throw new ApiError(404, "这条消息不在房间里了")
+  if (message.authorId !== "human") throw new ApiError(403, "只能撤回自己发的消息")
+  if (message.recalled) throw new ApiError(409, "这条已经撤回了")
+  const original = { text: message.text, attachments: message.attachments, replyTo: message.replyTo }
+  message.recalled = { at: Date.now() }
+  message.text = ""
+  message.mentions = []
+  message.attachments = undefined
+  message.ask = undefined
+  bumpRev()
+  commit()
+  return { message, original }
+}
 
 export function relayClosed() {
   return room().state.relayClosed === true
@@ -1047,6 +1234,33 @@ export function postSystem(text: string) {
   })
   commit()
   return message
+}
+
+// After a restart: the wakes it cut off, with a button each to wake them again.
+export function postInterrupted(text: string, interrupted: InterruptedRun[]) {
+  const message = appendMessage({
+    kind: "system",
+    authorId: "room",
+    authorName: "并坐",
+    authorColor: "#8a8175",
+    authorDemo: false,
+    text: clip(text, 500),
+    mentions: [],
+    interrupted,
+  })
+  commit()
+  return message
+}
+
+export function markInterruptedResumed(runId: string, at: number) {
+  for (const message of room().state.messages) {
+    const item = message.interrupted?.find((entry) => entry.runId === runId)
+    if (!item) continue
+    item.resumedAt = at
+    bumpRev()
+    commit()
+    return
+  }
 }
 
 function appendMessage(input: Omit<Message, "id" | "seq" | "createdAt">) {
@@ -1075,7 +1289,7 @@ export function inbox(input: unknown) {
   if (!Number.isFinite(after) || after < 0) {
     throw new ApiError(400, "after 要是一个不小于 0 的数字")
   }
-  const pending = room().state.messages.filter((message) => message.seq > after)
+  const pending = room().state.messages.filter((message) => message.seq > after && !message.recalled)
   const fresh = pending.slice(0, 100)
   const cursor = fresh.at(-1)?.seq ?? after
   agent.lastSeenAt = Date.now()
@@ -1105,14 +1319,15 @@ export function catchUp(id: string, limit: number) {
   if (!agent) return { text: "", skipped: 0 }
   const { messages, seq } = room().state
   const unseen = messages.filter(
-    (message) => message.seq > (agent.seenSeq ?? 0) && message.kind !== "system" && message.authorId !== id,
+    (message) =>
+      message.seq > (agent.seenSeq ?? 0) && message.kind !== "system" && message.authorId !== id && !message.recalled,
   )
   const lines: string[] = []
   let size = 0
   let index = unseen.length - 1
   for (; index >= 0; index--) {
     const message = unseen[index]
-    const line = (isForAgent(message, id, messages) ? "★ " : "") + talkLine(message)
+    const line = (isForAgent(message, id, messages) ? "★ " : "") + talkLine(message, true, id)
     if (lines.length > 0 && size + line.length > limit) break
     lines.unshift(line)
     size += line.length
@@ -1239,6 +1454,14 @@ function stepsFrom(value: unknown, by: string, now: number): TaskStep[] {
     .map((text) => ({ id: uid("s"), text: clip(text, 120), state: "todo", by, at: now, updatedAt: now }))
 }
 
+function moveStep(step: TaskStep, state: TaskStepState, by: string, now: number, note?: string) {
+  step.state = state
+  step.by = by
+  step.updatedAt = now
+  step.doneAt = state === "done" ? now : undefined
+  step.note = note
+}
+
 export function createTask(input: unknown) {
   const body = asRecord(input)
   const actor = actorFrom(body)
@@ -1304,6 +1527,9 @@ export function actOnTask(input: unknown) {
     task.status = "doing"
     task.history.push({ at: now, actor: actor.name, action: "认领", note: note || "接下来由我做" })
   } else if (action === "done") {
+    if (actor.type === "agent" && task.steps?.some((step) => isReviewStep(step) && step.state !== "done")) {
+      throw new ApiError(403, "这条还等 jinbao 验收：用 review 请他验收，他点通过才算完成")
+    }
     task.status = "done"
     task.history.push({ at: now, actor: actor.name, action: "完成", note: note || "这阶段做完了" })
   } else if (action === "block") {
@@ -1368,6 +1594,47 @@ export function actOnTask(input: unknown) {
     commit()
     runtime().bus.emit("message", message)
     return { task, message }
+  } else if (action === "review") {
+    // Done on the agent's side: the task waits for the user's sign-off.
+    if (task.status === "done") throw new ApiError(400, "这条已经完成了")
+    task.review = { state: "waiting", at: now, by: actor.name, note: note || undefined }
+    for (const step of task.steps ?? []) {
+      if (isReviewStep(step) && step.state !== "done") moveStep(step, "doing", actor.name, now)
+    }
+    task.history.push({ at: now, actor: actor.name, action: "请验收", note: note || "做完了，等 jinbao 验收" })
+  } else if (action === "pass" || action === "reject") {
+    if (actor.type !== "human") throw new ApiError(403, "验收只有 jinbao 能点：做完了用 review 请他验收")
+    if (task.status === "done") throw new ApiError(400, "这条已经完成了")
+    const pass = action === "pass"
+    if (!pass && !note) throw new ApiError(400, "打回要写一句原因，负责人照着改")
+    task.review = { state: pass ? "passed" : "rejected", at: now, by: actor.name, note: note || undefined }
+    for (const step of task.steps ?? []) {
+      if (isReviewStep(step)) moveStep(step, pass ? "done" : "todo", actor.name, now, note || (pass ? "验收通过" : undefined))
+    }
+    task.status = pass ? "done" : "doing"
+    task.history.push({ at: now, actor: actor.name, action: pass ? "验收通过" : "打回", note })
+    // Said in the room as the user. Sending it back calls the owner, who wakes
+    // and works from the reason; passing it calls nobody.
+    room().state.relayClosed = undefined
+    const owner = task.ownerId ? findAgent(task.ownerId) : undefined
+    const message = appendMessage({
+      kind: "chat",
+      authorId: actor.id,
+      authorName: actor.name,
+      authorColor: "#1f1a14",
+      authorDemo: false,
+      text: pass
+        ? `验收通过「${task.title}」${note ? `：${note}` : ""}`
+        : `${owner ? `@${owner.name} ` : ""}打回「${task.title}」：${note}`,
+      mentions: !pass && owner ? [owner.id] : [],
+      taskId: task.id,
+      verdict: { taskId: task.id, state: pass ? "passed" : "rejected", ownerId: task.ownerId ?? undefined },
+    })
+    task.updatedAt = now
+    task.seq = message.seq
+    commit()
+    runtime().bus.emit("message", message)
+    return { task, message }
   } else if (action === "step") {
     // The to-do list: add steps, and/or move one along. `step` is its number
     // (from 1) or id; `state` is todo, doing or done.
@@ -1387,11 +1654,10 @@ export function actOnTask(input: unknown) {
       if (!step) throw new ApiError(404, `没有第 ${String(ref)} 步`)
       const state = asString(body.state) as TaskStepState | undefined
       if (!state || !STEP_STATES.has(state)) throw new ApiError(400, "state 只能是 todo、doing 或 done")
-      step.state = state
-      step.by = actor.name
-      step.updatedAt = now
-      step.doneAt = state === "done" ? now : undefined
-      step.note = note || undefined
+      if (actor.type === "agent" && state === "done" && isReviewStep(step)) {
+        throw new ApiError(403, "验收这一步只有 jinbao 能勾：做完了用 bench_task_update 的 review 请他验收，他在右栏点通过或打回")
+      }
+      moveStep(step, state, actor.name, now, note || undefined)
       task.history.push({
         at: now,
         actor: actor.name,
@@ -1401,7 +1667,7 @@ export function actOnTask(input: unknown) {
       if (task.status === "open" && state !== "todo") task.status = "doing"
     }
   } else {
-    throw new ApiError(400, "action 只能是 claim、done、block、handoff 或 step")
+    throw new ApiError(400, "action 只能是 claim、done、block、handoff、step、review，或 jinbao 的 pass、reject")
   }
 
   task.updatedAt = now

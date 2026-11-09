@@ -22,7 +22,7 @@ file="$(ls "$HOME"/.claude/projects/*/"$session".jsonl 2>/dev/null | head -1 || 
 # first turn: start it under that id, in the folder the room picked for it.
 if [[ -z "$file" && -n "${BENCH_NEW_DIR:-}" ]]; then
   cd "$BENCH_NEW_DIR"
-  exec "$bin" --session-id "$session" --allowedTools mcp__bench --output-format stream-json --verbose -p "$@"
+  exec "$bin" --session-id "$session" --allowedTools mcp__bench --disallowedTools AskUserQuestion --permission-prompt-tool mcp__bench__bench_permit --output-format stream-json --verbose -p "$@"
 fi
 if [[ -z "$file" ]]; then
   echo "找不到 Claude Code 会话 $session" >&2
@@ -73,5 +73,9 @@ case "$mode" in
   acceptEdits|auto|plan|dontAsk) perm=(--permission-mode "$mode") ;;
 esac
 
+# Nobody is at a woken turn's terminal to answer AskUserQuestion: it is turned
+# off, and the turn asks the user through bench_ask, which the page shows.
+# Permission prompts go the same way: bench_permit puts each on the page and
+# waits for the user's allow or deny (lib/permits.ts).
 # stream-json: one event per line, which the room turns into the 「过程」 panel.
-exec "$bin" --resume "$session" "${perm[@]}" --allowedTools mcp__bench --output-format stream-json --verbose -p "$@"
+exec "$bin" --resume "$session" "${perm[@]}" --allowedTools mcp__bench --disallowedTools AskUserQuestion --permission-prompt-tool mcp__bench__bench_permit --output-format stream-json --verbose -p "$@"

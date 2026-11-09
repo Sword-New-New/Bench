@@ -99,6 +99,9 @@ export function createParser() {
   let plain = ""
   // Antigravity streams a reply as deltas under one step index.
   const deltas = new Map<number, string>()
+  // The stream said its turn is over; the answer is complete even if the
+  // process lingers (waiting on something it left running in the background).
+  let ended = false
   let n = 0
   const id = () => `s${++n}`
 
@@ -168,6 +171,7 @@ export function createParser() {
       })
     } else if (type === "result" || (typeof event.result === "string" && event.session_id)) {
       if (typeof event.result === "string") final = event.result
+      ended = true
     }
 
     // Codex: item.started / item.completed.
@@ -223,6 +227,10 @@ export function createParser() {
       } else if (event.item_type === "text") text(steps, str(event.text))
     } else if (type === "final") {
       final = str(event.text)
+      ended = true
+    } else if (type === "turn.completed") {
+      // Codex: the turn is over.
+      ended = true
     }
 
     // Antigravity: {"event": "step_update" | "result"}.
@@ -248,6 +256,7 @@ export function createParser() {
       }
     } else if (event.event === "result") {
       final = str(obj(event.result).response)
+      ended = true
     }
 
     // A new tool call starts a new stretch: what came before was progress.
@@ -264,7 +273,7 @@ export function createParser() {
     return (afterTools.join("\n\n") || final || lastText).trim()
   }
 
-  return { feed, answer }
+  return { feed, answer, ended: () => ended }
 }
 
 // What the seat line says while a step runs.

@@ -32,6 +32,8 @@ function debug(body: Record<string, unknown>) {
   }
   if (action === "forget") return debugForgetSeen(asString(body.agentId) ?? "")
   if (action === "clearSummary") {
+    // Wipes data: only with the word, so a script can't do it by accident.
+    if (body.confirm !== "清空摘要") throw new ApiError(400, "清空摘要要带 confirm: \"清空摘要\"")
     debugClearSummary()
     return snapshot()
   }

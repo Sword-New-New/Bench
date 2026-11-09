@@ -21,6 +21,12 @@ export type PublicAgent = {
   standby: boolean
   // The wake it is in the middle of; its steps are at /api/v1/runs/<id>.
   runId?: string
+  // When that wake started, and when its latest step began: the drawer keeps
+  // seats in the order they started, and says how long a step has been going.
+  runStartedAt?: number
+  stepAt?: number
+  // The user let it do anything for the rest of this wake.
+  fullAccess?: boolean
   createdAt: number
   lastSeenAt: number
 }
@@ -43,6 +49,27 @@ export type Attachment = {
   size?: number
 }
 
+// A question an agent put to the user with bench_ask, instead of its own
+// client's ask tool (a woken turn has nobody at its terminal). The user
+// answers by replying to it: a choice from the card, or words of their own.
+export type AskOption = {
+  label: string
+  detail?: string
+}
+
+export type Ask = {
+  options?: AskOption[]
+  // More than one option may be picked.
+  multi?: boolean
+  state: "open" | "answered"
+  answer?: string
+  answerId?: string
+  answeredAt?: number
+  // The asker was still waiting in bench_ask and got the answer there, so the
+  // reply did not wake it again.
+  handed?: boolean
+}
+
 export type Message = {
   id: string
   seq: number
@@ -60,9 +87,17 @@ export type Message = {
   // Posted during a wake: the steps that led to it.
   runId?: string
   attachments?: Attachment[]
+  ask?: Ask
+  // The user took it back: text and attachments are gone, the line stays.
+  recalled?: { at: number }
   // An agent saying its round of handoffs is over: it mentions nobody, and
   // agents stop waking each other until the user speaks again.
   end?: boolean
+  // The user's verdict on a task, said in the room. The owner goes by seat
+  // id: the page shows its current name, agents get the id.
+  verdict?: { taskId: string; state: "passed" | "rejected"; ownerId?: string }
+  // A room note after a restart: the wakes it cut off.
+  interrupted?: InterruptedRun[]
   createdAt: number
 }
 
@@ -97,6 +132,17 @@ export type Task = {
   brief?: TaskBrief
   // The to-do list of this feature: worked, and accepted, one step at a time.
   steps?: TaskStep[]
+  // The user's sign-off: an agent asks for it when the work is done, and only
+  // the user passes it or sends it back with a reason.
+  review?: TaskReview
+}
+
+export type TaskReview = {
+  state: "waiting" | "passed" | "rejected"
+  at: number
+  // Who asked for it, or what the user said sending it back.
+  by: string
+  note?: string
 }
 
 export type TaskStepState = "todo" | "doing" | "done"
@@ -138,6 +184,21 @@ export type Project = ProjectInfo & {
   lastAt: number
 }
 
+// A woken Claude Code turn waiting on the user: to run one tool, or for full
+// permission for the rest of its wake.
+export type PermitRequest = {
+  id: string
+  agentId: string
+  agentName: string
+  runId?: string
+  kind: "tool" | "full"
+  tool?: string
+  // What it would run or touch.
+  input?: string
+  reason?: string
+  at: number
+}
+
 export type RoomSnapshot = {
   project: ProjectInfo
   agents: PublicAgent[]
@@ -153,6 +214,8 @@ export type RoomSnapshot = {
   summaryWriter: string | null
   // An agent ended the round; agents wake nobody until the user speaks.
   relayClosed: boolean
+  // Permission prompts waiting on the user.
+  permits: PermitRequest[]
 }
 
 export type Actor = {
@@ -188,5 +251,23 @@ export type Run = {
   // A reply run: the message that woke the seat. What it says during the run
   // answers that message unless it names another.
   replyTo?: string
+  // The project it ran in, and for a reply run the room messages it was
+  // answering: enough to wake the seat again if the room stops mid-run.
+  project?: string
+  body?: string
+  // The room stopped while it ran; `resumedAt` once the user woke it again.
+  interrupted?: boolean
+  announced?: boolean
+  resumedAt?: number
   steps: RunStep[]
+}
+
+// A wake the room stopped in the middle of, listed so the user can wake it again.
+export type InterruptedRun = {
+  runId: string
+  agentId: string
+  agentName: string
+  purpose: Run["purpose"]
+  replyTo?: string
+  resumedAt?: number
 }

@@ -138,6 +138,32 @@ async function steps(stamp) {
   })
   assert(wrong.status === 404, "不存在的步骤应该 404")
 
+  // The sign-off is the user's: an agent asks for it, and only the user
+  // passes it or sends it back with a reason that calls the owner.
+  const taskPath = `/api/v1/tasks/${todo.data.task.id}`
+  const asAlpha = { agentId: alpha.data.agent.id, token: alpha.data.token }
+  const selfTick = await request(taskPath, { method: "POST", body: { ...asAlpha, action: "step", step: 3, state: "done" } })
+  assert(selfTick.status === 403, "agent 不该能自己勾验收那一步")
+  const selfDone = await request(taskPath, { method: "POST", body: { ...asAlpha, action: "done" } })
+  assert(selfDone.status === 403, "还没验收，agent 不该能把待办标完成")
+  const asked = await request(taskPath, { method: "POST", body: { ...asAlpha, action: "review", note: "右栏看效果" } })
+  assert(asked.status === 200 && asked.data.task.review?.state === "waiting" && asked.data.task.steps[2].state === "doing", `请验收失败 ${asked.data.error || asked.status}`)
+  const agentPass = await request(taskPath, { method: "POST", body: { ...asAlpha, action: "pass" } })
+  assert(agentPass.status === 403, "agent 不该能点验收通过")
+  const bare = await request(taskPath, { method: "POST", body: { as: "human", action: "reject" } })
+  assert(bare.status === 400, "打回不写原因应该被拒绝")
+  const sentBack = await request(taskPath, { method: "POST", body: { as: "human", action: "reject", note: "按钮太挤" } })
+  assert(sentBack.status === 200 && sentBack.data.task.review?.state === "rejected" && sentBack.data.task.status === "doing", `打回失败 ${sentBack.data.error || sentBack.status}`)
+  assert(sentBack.data.task.steps[2].state === "todo", "打回后验收那一步应该退回待做")
+  assert(sentBack.data.message?.mentions?.includes(alpha.data.agent.id) && sentBack.data.message.text.includes("按钮太挤"), "打回要带着原因叫负责人")
+  await request(taskPath, { method: "POST", body: { ...asAlpha, action: "review" } })
+  const passed = await request(taskPath, { method: "POST", body: { as: "human", action: "pass" } })
+  assert(passed.status === 200 && passed.data.task.status === "done" && passed.data.task.steps[2].state === "done", `验收通过失败 ${passed.data.error || passed.status}`)
+  assert(passed.data.message?.mentions?.length === 0 && passed.data.message.text.startsWith("验收通过") && passed.data.message.verdict?.ownerId === alpha.data.agent.id, "验收通过要在群里说一声、不叫人")
+  const verdicts = await request("/api/v1/messages", { method: "POST", body: { ...asAlpha, limit: 5 } })
+  const verdictLine = verdicts.data.messages?.find((item) => item.id === passed.data.message.id)
+  assert(verdictLine?.verdict?.owner?.id === alpha.data.agent.id && verdictLine.verdict.state === "passed", "bench_messages 里的验收消息要带负责人的席位 id")
+
   // Replies are data an agent can read: the inbox says what each line
   // answers, and /messages hands back a whole chain, structured.
   const question = await request("/api/v1/say", { method: "POST", body: { as: "human", text: "回复链的起点" } })
@@ -290,6 +316,125 @@ async function steps(stamp) {
     body: { as: "human", action: "done", note: "这阶段可以收了" },
   })
   assert(done.status === 200 && done.data.task.status === "done", "完成任务失败")
+
+  // Recall: the user takes a message back; the line stays, its words are gone
+  // and no agent sees it.
+  const secret = await request("/api/v1/say", { method: "POST", body: { as: "human", text: "撤回测试：口令 4399" } })
+  const secretId = secret.data.message.id
+  const notHuman = await request("/api/v1/recall", {
+    method: "POST",
+    body: { agentId: alpha.data.agent.id, token: alpha.data.token, id: secretId },
+  })
+  assert(notHuman.status === 403, "agent 不能撤回")
+  const agentSaid = await request("/api/v1/say", {
+    method: "POST",
+    body: { agentId: alpha.data.agent.id, token: alpha.data.token, text: "agent 的话" },
+  })
+  const notMineRecall = await request("/api/v1/recall", { method: "POST", body: { as: "human", id: agentSaid.data.message.id } })
+  assert(notMineRecall.status === 403, "不能撤回 agent 的消息")
+  const recalled = await request("/api/v1/recall", { method: "POST", body: { as: "human", id: secretId } })
+  assert(recalled.status === 200 && recalled.data.original.text === "撤回测试：口令 4399", "撤回失败或没带回原文")
+  assert(recalled.data.message.recalled && recalled.data.message.text === "", "撤回后不该还留着原文")
+  const recallAgain = await request("/api/v1/recall", { method: "POST", body: { as: "human", id: secretId } })
+  assert(recallAgain.status === 409, "撤回过的不能再撤回")
+  const recallRoom = await request(`/api/v1/room?project=${project}`)
+  assert(!JSON.stringify(recallRoom.data).includes("口令 4399"), "房间快照里还能看到撤回的内容")
+  const betaInbox = await request("/api/v1/inbox", {
+    method: "POST",
+    body: { agentId: beta.data.agent.id, token: beta.data.token, after: 0 },
+  })
+  assert(!betaInbox.data.messages.some((message) => message.id === secretId), "收件箱里不该有撤回的消息")
+  const asData = await request("/api/v1/messages", {
+    method: "POST",
+    body: { agentId: beta.data.agent.id, token: beta.data.token, limit: 200 },
+  })
+  const recalledData = asData.data.messages.find((message) => message.id === secretId)
+  assert(recalledData?.recalled === true && recalledData.text === "", "bench_messages 里应该只标已撤回")
+
+  // Permission prompts: a seat's request waits on the page until the user
+  // allows or denies it; full permission lets the rest through at once.
+  const seatA = { agentId: alpha.data.agent.id, token: alpha.data.token }
+  const pendingPermit = request("/api/v1/permit", { method: "POST", body: { ...seatA, action: "tool", tool: "Bash", input: { command: "ls /opt" } } })
+  let permitRoom
+  for (let tries = 0; tries < 20; tries++) {
+    await new Promise((resolve) => setTimeout(resolve, 100))
+    permitRoom = await request(`/api/v1/room?project=${project}`)
+    if (permitRoom.data.permits?.length) break
+  }
+  const shown = permitRoom.data.permits?.[0]
+  assert(shown?.tool === "Bash" && shown.input === "ls /opt" && shown.agentId === seatA.agentId, "权限请求没出现在快照里")
+  const deny = await request("/api/v1/permit", { method: "POST", body: { as: "human", id: shown.id, decision: "deny", note: "先别动" } })
+  assert(deny.status === 200, "拒绝失败")
+  const denied = await pendingPermit
+  assert(denied.data.allow === false && denied.data.note === "先别动", "拒绝没传回给席位")
+  const twice = await request("/api/v1/permit", { method: "POST", body: { as: "human", id: shown.id, decision: "once" } })
+  assert(twice.status === 404, "处理过的请求不该再处理")
+  const elevate = request("/api/v1/permit", { method: "POST", body: { ...seatA, action: "full", reason: "要装软件" } })
+  for (let tries = 0; tries < 20; tries++) {
+    await new Promise((resolve) => setTimeout(resolve, 100))
+    permitRoom = await request(`/api/v1/room?project=${project}`)
+    if (permitRoom.data.permits?.length) break
+  }
+  const asksFull = permitRoom.data.permits?.[0]
+  assert(asksFull?.kind === "full" && asksFull.reason === "要装软件", "完整权限请求没出现")
+  await request("/api/v1/permit", { method: "POST", body: { as: "human", id: asksFull.id, decision: "once" } })
+  assert((await elevate).data.allow === true, "允许完整权限没传回")
+  permitRoom = await request(`/api/v1/room?project=${project}`)
+  assert(permitRoom.data.agents.find((agent) => agent.id === seatA.agentId)?.fullAccess === true, "允许后席位应该有完整权限")
+  const free = await request("/api/v1/permit", { method: "POST", body: { ...seatA, action: "tool", tool: "Bash", input: { command: "rm -rf x" } } })
+  assert(free.data.allow === true, "有完整权限时应该直接放行")
+  await request("/api/v1/permit", { method: "POST", body: { as: "human", agentId: seatA.agentId, full: false } })
+  permitRoom = await request(`/api/v1/room?project=${project}`)
+  assert(!permitRoom.data.agents.find((agent) => agent.id === seatA.agentId)?.fullAccess, "收回后不该还有完整权限")
+
+  // bench_ask: a question shows as a card; the user's reply is the answer,
+  // handed straight back to an asker still waiting for it.
+  const alphaSeat = { agentId: alpha.data.agent.id, token: alpha.data.token }
+  const tooMany = await request("/api/v1/ask", {
+    method: "POST",
+    body: { ...alphaSeat, text: "选哪个？", options: ["1", "2", "3", "4", "5", "6", "7"] },
+  })
+  assert(tooMany.status === 400, "超过 6 个选项应该被拒绝")
+  const humanAsk = await request("/api/v1/ask", { method: "POST", body: { as: "human", text: "人不该用这个" } })
+  assert(humanAsk.status === 400, "人不该能用 bench_ask")
+  const question2 = await request("/api/v1/ask", {
+    method: "POST",
+    body: { ...alphaSeat, text: "按钮放左边还是右边？", options: [{ label: "左边", detail: "和标题对齐" }, "右边"] },
+  })
+  assert(question2.status === 200 && question2.data.message.ask?.state === "open", `提问失败 ${question2.data.error || question2.status}`)
+  assert(question2.data.message.ask.options.length === 2 && question2.data.message.ask.options[0].detail === "和标题对齐", "选项没存对")
+  const askId = question2.data.message.id
+  let askRoom = await request(`/api/v1/room?project=${project}`)
+  const asker = askRoom.data.agents.find((agent) => agent.id === alphaSeat.agentId)
+  assert(asker.status === "blocked" && asker.doing.startsWith("等 jinbao 回答"), "提问后席位应该显示在等回答")
+  const notMine = await request("/api/v1/ask", {
+    method: "POST",
+    body: { agentId: beta.data.agent.id, token: beta.data.token, action: "wait", id: askId, timeoutMs: 1000 },
+  })
+  assert(notMine.status === 403, "不能等别人的问题")
+  const waiting = request("/api/v1/ask", { method: "POST", body: { ...alphaSeat, action: "wait", id: askId, timeoutMs: 8000 } })
+  await new Promise((resolve) => setTimeout(resolve, 300))
+  const picked = await request("/api/v1/say", { method: "POST", body: { as: "human", text: "左边", replyTo: askId } })
+  assert(picked.status === 200, "回答问题失败")
+  const got = await waiting
+  assert(got.status === 200 && got.data.state === "answered" && got.data.answer === "左边" && !got.data.timedOut, "等着的提问者没拿到回答")
+  assert(got.data.answerId === picked.data.message.id, "回答的消息 id 不对")
+  askRoom = await request(`/api/v1/room?project=${project}`)
+  const card = askRoom.data.messages.find((message) => message.id === askId)
+  assert(card.ask.state === "answered" && card.ask.handed === true, "等着时回答应该记成已直接交给提问者")
+  const again = await request("/api/v1/ask", { method: "POST", body: { ...alphaSeat, action: "wait", id: askId, timeoutMs: 1000 } })
+  assert(again.data.state === "answered" && again.data.answer === "左边", "已回答的问题再等应该立刻拿到答案")
+  // Nobody waiting: the answer is a plain reply, which wakes the asker as usual.
+  const later = await request("/api/v1/ask", { method: "POST", body: { ...alphaSeat, text: "要不要加动画？" } })
+  const timeout = await request("/api/v1/ask", {
+    method: "POST",
+    body: { ...alphaSeat, action: "wait", id: later.data.message.id, timeoutMs: 1000 },
+  })
+  assert(timeout.data.timedOut === true && timeout.data.state === "open", "没人回答时应该超时返回")
+  await request("/api/v1/say", { method: "POST", body: { as: "human", text: "要", replyTo: later.data.message.id } })
+  askRoom = await request(`/api/v1/room?project=${project}`)
+  const laterCard = askRoom.data.messages.find((message) => message.id === later.data.message.id)
+  assert(laterCard.ask.state === "answered" && !laterCard.ask.handed, "没人在等时回答不该记成已直接交给提问者")
 
   await request("/api/v1/leave", {
     method: "POST",

@@ -24,10 +24,15 @@ function runs(): Run[] {
   if (!store.__benchRuns) {
     try {
       const parsed = JSON.parse(readFileSync(file(), "utf8")) as { runs?: Run[] }
-      // A run that was going when the room stopped will never finish.
-      store.__benchRuns = (parsed.runs ?? []).map((run) =>
-        run.state === "running" ? { ...run, state: "failed", endedAt: run.endedAt ?? run.startedAt } : run,
-      )
+      // A run that was going when the room stopped will never finish: it is
+      // marked cut off, and the room lists it so the user can wake it again.
+      store.__benchRuns = (parsed.runs ?? []).map((run) => {
+        if (run.state !== "running") return run
+        const at = Date.now()
+        const steps = run.steps.map((step) => (step.state === "running" ? { ...step, state: "failed" as const } : step))
+        steps.push({ id: "end", at, kind: "note", title: "服务器重启，这次唤起被打断了", state: "failed" })
+        return { ...run, state: "failed" as const, endedAt: at, interrupted: true, steps }
+      })
     } catch {
       store.__benchRuns = []
     }
@@ -51,7 +56,15 @@ function clip(text: string | undefined) {
   return text.length > MAX_FIELD ? `${text.slice(0, MAX_FIELD)}…（还有 ${text.length - MAX_FIELD} 字）` : text
 }
 
-export function startRun(agentId: string, agentName: string, purpose: Run["purpose"]) {
+const MAX_BODY = 12_000
+
+// Saved as soon as it starts, so a restart mid-run still knows about it.
+export function startRun(
+  agentId: string,
+  agentName: string,
+  purpose: Run["purpose"],
+  extra: Pick<Run, "project" | "body" | "replyTo" | "ask"> = {},
+) {
   const run: Run = {
     id: `r_${randomBytes(4).toString("hex")}`,
     agentId,
@@ -59,12 +72,29 @@ export function startRun(agentId: string, agentName: string, purpose: Run["purpo
     purpose,
     state: "running",
     startedAt: Date.now(),
+    ...extra,
+    body: extra.body && extra.body.length > MAX_BODY ? extra.body.slice(-MAX_BODY) : extra.body,
     steps: [],
   }
   const list = runs()
   list.push(run)
   if (list.length > MAX_RUNS) list.splice(0, list.length - MAX_RUNS)
+  save()
   return run
+}
+
+// Cut off by a restart and not yet told to the room; told once.
+export function takeUnannounced() {
+  const list = runs().filter((run) => run.interrupted && !run.announced)
+  if (list.length === 0) return list
+  for (const run of list) run.announced = true
+  save()
+  return list
+}
+
+export function markResumed(run: Run) {
+  run.resumedAt = Date.now()
+  save()
 }
 
 // Adds a step, or updates the one with the same id (a tool call that has

@@ -4,13 +4,17 @@ import { StringDecoder } from "node:string_decoder"
 import { adapterFor, commandFor, summonPath, type Adapter } from "@/lib/adapters"
 import { createParser, liveLine } from "@/lib/events"
 import { ApiError } from "@/lib/http"
-import { endRun, putStep, startRun } from "@/lib/runs"
+import { endRun, getRun, markResumed, putStep, startRun, takeUnannounced } from "@/lib/runs"
 import {
   agentState,
   bindProject,
   CATCH_UP_CHARS,
+  currentProject,
   currentProjectInfo,
   catchUp,
+  inProject,
+  markInterruptedResumed,
+  postInterrupted,
   endSummaryJob,
   isStandby,
   markWoken,
@@ -32,6 +36,8 @@ import type { Message, RoomSummary, Run } from "@/lib/types"
 
 const NOTE_GAP_MS = 30_000
 const RUN_LIMIT_MS = 15 * 60_000
+// After the stream says its turn is over, how long the process may take to exit.
+const END_GRACE_MS = 3_000
 // Every line of a wake's output is read, however much there is: the answer
 // is in the last event, and a stream of edits (each tool result carries the
 // whole file) passed 1MB once, which used to be where reading stopped. Only
@@ -58,7 +64,9 @@ const MAX_HOPS = 3
 // `whisper`: what the user said to this seat alone, run before anything else.
 type Lane = {
   running: boolean
-  pending: string[]
+  // What called it since its last run, by message id, so a recalled message
+  // can be taken back out before the run starts.
+  pending: { id: string; line: string }[]
   hops: number
   summary?: boolean
   stop?: () => void
@@ -70,6 +78,7 @@ type Lane = {
 
 type SummonGlobal = typeof globalThis & {
   __benchSummonBound?: boolean
+  __benchSummonAnnounced?: boolean
   __benchSummonHandler?: (message: Message) => void
   __benchSummonAt?: Map<string, number>
   __benchLanes?: Map<string, Lane>
@@ -117,7 +126,7 @@ function introduce(agent: NonNullable<ReturnType<typeof agentState>>) {
   return `【你是并坐房间新开的会话】你在「${currentProjectInfo().name}」项目里叫 ${agent.name}，分工是「${agent.role}」，工作目录是 ${agent.workdir}。房间已经替你入座了，bench 工具直接能用，不用再 bench_join。别人 @${agent.name} 时房间会叫醒你。\n\n`
 }
 
-function envelope(body: string, skipped: number, summary: RoomSummary | undefined, replyByStdout: boolean) {
+function envelope(body: string, skipped: number, summary: RoomSummary | undefined, replyByStdout: boolean, claude = false) {
   const how = replyByStdout
     ? "最后的回答直接输出就行，会作为你的发言贴回房间，不用调用 bench_say。中途的进度、逐条汇报直接说出来：这些话会实时显示在你自己的席位和过程记录里，用户看得到，但不会进群聊，所以不要用 bench_say 刷进度。"
     : `回复请发回房间：有 bench_say 工具就用它；没有的话 POST ${roomUrl()}/api/v1/say，带你入座时的 agentId 和 token。`
@@ -128,12 +137,19 @@ function envelope(body: string, skipped: number, summary: RoomSummary | undefine
   // Every feature the user asks for goes on the to-do list on the right, and
   // is worked and accepted along its steps.
   const todo =
-    "jinbao 要你做新功能时，开工前必须先用 bench_task 建一条待办：title 写功能，steps 拆成几步，owner 填你自己；每开始一步用 bench_step 标 doing，做完标 done，note 写做了什么、怎么验的。已有待办的就接着推进，不要重复建。验收也按这些步骤一步一步走。"
+    "jinbao 要你做新功能时，开工前必须先用 bench_task 建一条待办：title 写功能，steps 拆成几步，owner 填你自己；每开始一步用 bench_step 标 doing，做完标 done，note 写做了什么、怎么验的。已有待办的就接着推进，不要重复建。做完了用 bench_task_update 的 review 请 jinbao 验收（note 写怎么看效果）；「验收」那一步只有 jinbao 能在右栏点通过或打回，你不要自己勾，被打回会带着原因叫醒你。"
   // Two agents can keep @-ing each other; the one that sees the round is done ends it.
   const end = replyByStdout
     ? `如果这一轮交接已经完成、不需要谁再接手，回答以「${END_MARK}」开头，写一句做完了什么，不要 @ 任何人。`
     : `如果这一轮交接已经完成、不需要谁再接手，用 bench_say 带 end: true 发一句做完了什么，不要 @ 任何人。`
+  // Claude Code's prompts reach the page (claude-code.sh, lib/permits.ts).
+  const permit = claude
+    ? "跑命令被权限拦住、需要确认或要用没放行的工具时，先用 bench_elevate 说明要做什么、为什么，请 jinbao 给这次唤起临时完整权限，别直接放弃或绕路；单条命令的确认也会弹到他的网页上等他点。sudo 密码只能他自己在终端输。"
+    : ""
   const stop = `${end}这之后 agent 之间不再互相唤起，等 jinbao 发话再继续。`
+  // Woken, nobody watches the client: questions go to the page.
+  const ask =
+    "要问 jinbao、让他拍板时用 bench_ask（可以给选项），不要用你客户端自带的提问工具，这里没人看得到；它会等他在网页上回答，答案作为工具结果返回。能自己判断的别问。"
   // Say plainly how complete the batch is, so the seat does not go digging
   // for messages it already has, or trust a batch that was cut.
   const scope =
@@ -143,7 +159,7 @@ function envelope(body: string, skipped: number, summary: RoomSummary | undefine
         ? `你上次之后的消息太多，更早的 ${skipped} 条没列；先附上房间摘要（${summary.by} 写于 ${stamp(summary.at)}，概括了那之前的对话），再列最近的原文。需要原文用 bench_inbox 查。`
         : `下面是你上次之后房间里的消息，太长只列了最近这些；更早还有 ${skipped} 条没列，需要的话用 bench_inbox 查。`
   const digest = skipped > 0 && summary ? `【房间摘要】\n${summary.text}\n\n【最近的原文】\n` : ""
-  return `【并坐「${currentProjectInfo().name}」项目转来的消息】\n${scope}只略去了你自己说的话和入座、离席这类系统通知。★ 是在叫你的。\n\n${digest}${body}\n\n（${how}${thread}${todo}${stop}）`
+  return `【并坐「${currentProjectInfo().name}」项目转来的消息】\n${scope}只略去了你自己说的话和入座、离席这类系统通知。★ 是在叫你的。\n\n${digest}${body}\n\n（${how}${thread}${todo}${ask}${permit}${stop}）`
 }
 
 function summaryPrompt(replyByStdout: boolean) {
@@ -228,7 +244,9 @@ function launch(
   let err = ""
   let finished = false
   let shownAt = 0
+  let endedTimer: NodeJS.Timeout | undefined
   const take = bindProject((line: string) => {
+    const wasEnded = parser.ended()
     for (const step of parser.feed(line)) {
       putStep(run, step)
       const text = liveLine(step)
@@ -237,6 +255,18 @@ function launch(
         live(text)
       }
     }
+    // Its turn is over. Give the process a moment to exit on its own; if it
+    // stays (a background task it left running keeps it alive), end it here,
+    // so the answer goes up now and not when the 15 minutes run out. Not left
+    // running longer: the seat's next wake resumes the same session.
+    if (!wasEnded && parser.ended() && !finished) {
+      endedTimer = setTimeout(() => {
+        if (finished) return
+        putStep(run, { id: "linger", at: Date.now(), kind: "note", title: `答完了，进程过了 ${seconds(END_GRACE_MS)}还没退出（多半是它在后台挂了任务），已收掉`, state: "done" })
+        kill()
+        finish(0)
+      }, END_GRACE_MS)
+    }
   })
   let stopped = false
   const finish = bindProject((code: number | null, failure?: string) => {
@@ -244,6 +274,7 @@ function launch(
     finished = true
     lane(agent.id).stop = undefined
     clearTimeout(timer)
+    clearTimeout(endedTimer)
     clearInterval(quiet)
     if (pending) take(pending)
     const out = parser.answer()
@@ -378,7 +409,7 @@ function run(agentId: string) {
 
   const seen = catchUp(agentId, CATCH_UP_CHARS)
   // Its inbox may already have shown it the mention; fall back to the queue.
-  const fresh = seen.text || queue.pending.join("\n\n")
+  const fresh = seen.text || queue.pending.map((item: { line: string }) => item.line).join("\n\n")
   const carried = queue.carry
   queue.carry = undefined
   const body = carried
@@ -387,7 +418,7 @@ function run(agentId: string) {
   const command = commandFor(
     agent.agentName,
     agent.session,
-    introduce(agent) + envelope(body, seen.skipped, seen.summary, adapter.reply === "stdout"),
+    introduce(agent) + envelope(body, seen.skipped, seen.summary, adapter.reply === "stdout", agent.agentName === "claude"),
   )
   const hop = queue.hops
   const trigger = queue.trigger
@@ -397,8 +428,7 @@ function run(agentId: string) {
   if (!command) return
 
   queue.running = true
-  const log = startRun(agentId, agent.name, "reply")
-  log.replyTo = trigger
+  const log = startRun(agentId, agent.name, "reply", { project: currentProject(), body, replyTo: trigger })
   const seat = busy(agentId, "被点到了，正在回复")
   launch(agent, command, log, seat.live, ({ out, failure, stopped, lost }) => {
     queue.running = false
@@ -444,7 +474,7 @@ function writeSummary(agent: NonNullable<ReturnType<typeof agentState>>, adapter
   queue.running = true
   const asked = Date.now()
   startSummaryJob(agent.id, prompt.upToSeq)
-  const log = startRun(agent.id, agent.name, "summary")
+  const log = startRun(agent.id, agent.name, "summary", { project: currentProject() })
   const seat = busy(agent.id, "在写房间摘要")
   launch(agent, command, log, seat.live, ({ out, failure, stopped }) => {
     queue.running = false
@@ -499,8 +529,7 @@ function answerWhisper(agent: NonNullable<ReturnType<typeof agentState>>, text: 
   const command = commandFor(agent.agentName ?? "", agent.session ?? "", introduce(agent) + whisperPrompt(text, interrupted))
   if (!command) return
   queue.running = true
-  const log = startRun(agent.id, agent.name, "private")
-  log.ask = text
+  const log = startRun(agent.id, agent.name, "private", { project: currentProject(), ask: text })
   const seat = busy(agent.id, "在回你单独说的话")
   launch(agent, command, log, seat.live, ({ out, failure, stopped }) => {
     queue.running = false
@@ -604,15 +633,95 @@ function wake(message: Message) {
       continue
     }
     const queue = lane(agent.id)
-    queue.pending.push(`${message.authorName}：${withAttachments(message.text, message.attachments)}`)
+    queue.pending.push({ id: message.id, line: `${message.authorName}：${withAttachments(message.text, message.attachments)}` })
     queue.hops = Math.max(queue.hops, hop)
     queue.trigger = message.id
     run(agent.id)
   }
 }
 
+// After a restart: say in each project which wakes were cut off, once, so
+// the user can wake them again (the button under that note).
+function announceInterrupted() {
+  const byProject = new Map<string, Run[]>()
+  for (const item of takeUnannounced()) {
+    if (!item.project) continue
+    byProject.set(item.project, [...(byProject.get(item.project) ?? []), item])
+  }
+  for (const [project, list] of byProject) {
+    try {
+      inProject(project, () => {
+        const what = { reply: "回复", private: "单独回话", summary: "写摘要" } as const
+        // Its seat still shows the reply it never finished.
+        for (const item of list) {
+          try {
+            pulseAgent(item.agentId, "idle", "被服务器重启打断了")
+          } catch {}
+        }
+        const names = list.map((item) => `${item.agentName}（${what[item.purpose]}）`).join("、")
+        postInterrupted(
+          `服务器重启，打断了 ${names}。没回完的话没发出来，点下面重新叫醒，会带着原来那些消息接着做`,
+          list.map((item) => ({
+            runId: item.id,
+            agentId: item.agentId,
+            agentName: item.agentName,
+            purpose: item.purpose,
+            replyTo: item.replyTo,
+          })),
+        )
+      })
+    } catch {
+      // The project is gone.
+    }
+  }
+}
+
+// Wake a seat again with what a cut-off run was doing.
+export function rewake(runId: string) {
+  const item = getRun(runId)
+  if (!item || !item.interrupted) throw new ApiError(404, "这次唤起不是被重启打断的，或者记录已经不在了")
+  if (item.resumedAt) throw new ApiError(409, `${item.agentName} 已经重新叫醒过了`)
+  if (!item.project) throw new ApiError(400, "这次唤起没记下项目，叫不回去")
+  return inProject(item.project, () => {
+    const agent = wakeable(item.agentId)
+    const queue = lane(agent.id)
+    if (item.purpose === "private") {
+      if (!item.ask) throw new ApiError(400, "没记下当时单独说了什么")
+      if (queue.whisper !== undefined) throw new ApiError(409, `上一句还没交给 ${agent.name}，稍等`)
+      queue.whisper = item.ask
+    } else if (item.purpose === "summary") {
+      if (summaryJob()) throw new ApiError(409, "有人正在写摘要")
+      queue.summary = true
+    } else {
+      if (!item.body) throw new ApiError(400, "没记下当时在回哪些消息")
+      queue.carry = queue.carry ? `${item.body}\n\n${queue.carry}` : item.body
+      queue.trigger ??= item.replyTo
+    }
+    markResumed(item)
+    markInterruptedResumed(item.id, item.resumedAt ?? Date.now())
+    run(agent.id)
+    return { agent: agent.name, started: queue.running }
+  })
+}
+
+// The user took a message back: a seat it called and that hasn't started on it
+// yet no longer will. A run already going has read it.
+export function forgetMessage(messageId: string) {
+  for (const queue of g().__benchLanes?.values() ?? []) {
+    if (queue.running) continue
+    const left = queue.pending.filter((item) => item.id !== messageId)
+    if (left.length === queue.pending.length) continue
+    queue.pending = left
+    if (queue.trigger === messageId) queue.trigger = left.at(-1)?.id
+  }
+}
+
 export function ensureSummon() {
   g().__benchSummonHandler = wake
+  if (!g().__benchSummonAnnounced) {
+    g().__benchSummonAnnounced = true
+    announceInterrupted()
+  }
   if (g().__benchSummonBound) return
   g().__benchSummonBound = true
   // Deferred so a reply posted from stdout has its hop count recorded first.

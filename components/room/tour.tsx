@@ -24,9 +24,12 @@ export const TOUR_START = "bench-tour-start";
 export const TOUR_JOIN = "bench-tour-join";
 
 type Step = {
-  target: string | null;
+  // One selector, or several in order of preference: the first that is on
+  // screen wins, and `bodies[i]` (when given) is the text for the i-th one.
+  target: string | string[] | null;
   title: string;
   body: string;
+  bodies?: string[];
   sketch?: "project" | "pick" | "register" | "say" | "seat" | "mention";
   dialog?: boolean;
   finale?: boolean;
@@ -40,9 +43,20 @@ const STEPS: Step[] = [
     body: "我是你的小向导。接下来我会带着你一直配置到可以用，大约三分钟。引导里都只是演示，不会真的建项目，也不会写进房间，只有你的名字会存下来。",
   },
   {
-    target: '[data-tour="project"]',
+    // Wide screens: the project rail. Middle: its narrow icon strip. Narrow: the
+    // project name in the header.
+    target: [
+      '[data-tour="project-rail"]',
+      'nav[aria-label="项目"]',
+      '[data-tour="project"]',
+    ],
     title: "先创建一个项目",
-    body: "一个项目就是一间房。点这里的项目名，选「新建项目…」，起个名字，项目目录可以不填。建好后会自动弹出接入页。",
+    body: "一个项目就是一间房，每个项目一张长凳。点栏底部的「新建项目」，起个名字，项目目录可以不填。建好后会自动弹出接入页。",
+    bodies: [
+      "一个项目就是一间房，每个项目一张长凳。点栏底部的「新建项目」，起个名字，项目目录可以不填。建好后会自动弹出接入页。",
+      "一个项目就是一间房，每个项目一个头像。点栏底部的「+」新建项目，起个名字，项目目录可以不填。建好后会自动弹出接入页。",
+      "一个项目就是一间房。点这里的项目名，选「新建项目…」，起个名字，项目目录可以不填。建好后会自动弹出接入页。",
+    ],
     sketch: "project",
   },
   {
@@ -90,9 +104,8 @@ function Sketch({ kind }: { kind: NonNullable<Step["sketch"]> }) {
   if (kind === "project")
     return (
       <div className={frame}>
-        <p className="text-muted-foreground">项目</p>
-        <p className="mt-1.5 rounded bg-foreground/10 px-2 py-1">
-          ＋ 新建项目…
+        <p className="rounded-lg border border-dashed border-foreground/30 px-2 py-1.5 text-center">
+          ＋ 新建项目
         </p>
       </div>
     );
@@ -226,6 +239,7 @@ function Confetti({ origin }: { origin: () => { x: number; y: number } }) {
 export function Tour() {
   const [index, setIndex] = useState<number | null>(null);
   const [box, setBox] = useState<Box | null>(null);
+  const [hit, setHit] = useState(0);
   const [size, setSize] = useState({ w: 1200, h: 800 });
   const dialogOpen = useRef(false);
   const card = useRef<HTMLDivElement>(null);
@@ -257,11 +271,18 @@ export function Tour() {
     if (!step) return;
     const measure = () => {
       setSize({ w: window.innerWidth, h: window.innerHeight });
-      const found = step.target ? document.querySelector(step.target) : null;
-      if (!found) return setBox(null);
-      const r = found.getBoundingClientRect();
-      const next =
-        r.width === 0 ? null : { x: r.left, y: r.top, w: r.width, h: r.height };
+      let next: Box | null = null;
+      let which = 0;
+      const targets = step.target ? [step.target].flat() : [];
+      for (const [i, selector] of targets.entries()) {
+        const r = document.querySelector(selector)?.getBoundingClientRect();
+        if (r && r.width > 0) {
+          next = { x: r.left, y: r.top, w: r.width, h: r.height };
+          which = i;
+          break;
+        }
+      }
+      setHit(which);
       setBox((old) =>
         old &&
         next &&
@@ -377,7 +398,7 @@ export function Tour() {
         <p
           className={`${centered ? "text-center" : ""} mt-2 text-[13px] leading-6 text-muted-foreground`}
         >
-          {step.body}
+          {step.bodies?.[hit] ?? step.body}
         </p>
         {step.sketch ? <Sketch kind={step.sketch} /> : null}
         {index === 0 ? <NameField onNext={() => setIndex(1)} /> : null}

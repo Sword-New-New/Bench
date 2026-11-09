@@ -219,6 +219,8 @@ export type RoomSnapshot = {
   relayClosed: boolean
   // Permission prompts waiting on the user.
   permits: PermitRequest[]
+  // What the user goes by in the room.
+  userName: string
 }
 
 export type Actor = {

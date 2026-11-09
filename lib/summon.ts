@@ -32,6 +32,7 @@ import {
   summarySource,
   summonCandidates,
   END_MARK,
+  userName,
 } from "@/lib/store"
 import { withAttachments } from "@/lib/text"
 import type { Message, RoomSummary, Run } from "@/lib/types"
@@ -146,23 +147,23 @@ function envelope(body: string, skipped: number, summary: RoomSummary | undefine
   // Every feature the user asks for goes on the to-do list on the right, and
   // is worked and accepted along its steps.
   const todo =
-    "jinbao 要你做新功能时，开工前必须先用 bench_task 建一条待办：title 写功能，steps 拆成几步，owner 填你自己；每开始一步用 bench_step 标 doing，做完标 done，note 写做了什么、怎么验的。已有待办的就接着推进，不要重复建。做完了用 bench_task_update 的 review 请 jinbao 验收（note 写怎么看效果）；「验收」那一步只有 jinbao 能在右栏点通过或打回，你不要自己勾，被打回会带着原因叫醒你。"
+    `${userName()} 要你做新功能时，开工前必须先用 bench_task 建一条待办：title 写功能，steps 拆成几步，owner 填你自己；每开始一步用 bench_step 标 doing，做完标 done，note 写做了什么、怎么验的。已有待办的就接着推进，不要重复建。做完了用 bench_task_update 的 review 请 ${userName()} 验收（note 写怎么看效果）；「验收」那一步只有 ${userName()} 能在右栏点通过或打回，你不要自己勾，被打回会带着原因叫醒你。`
   // Two agents can keep @-ing each other; the one that sees the round is done ends it.
   const end = replyByStdout
     ? `如果这一轮交接已经完成、不需要谁再接手，回答以「${END_MARK}」开头，写一句做完了什么，不要 @ 任何人。`
     : `如果这一轮交接已经完成、不需要谁再接手，用 bench_say 带 end: true 发一句做完了什么，不要 @ 任何人。`
   // Claude Code's prompts reach the page (claude-code.sh, lib/permits.ts).
   const permit = claude
-    ? "跑命令被权限拦住、需要确认或要用没放行的工具时，先用 bench_elevate 说明要做什么、为什么，请 jinbao 给这次唤起临时完整权限，别直接放弃或绕路；单条命令的确认也会弹到他的网页上等他点。sudo 密码只能他自己在终端输。"
+    ? `跑命令被权限拦住、需要确认或要用没放行的工具时，先用 bench_elevate 说明要做什么、为什么，请 ${userName()} 给这次唤起临时完整权限，别直接放弃或绕路；单条命令的确认也会弹到他的网页上等他点。sudo 密码只能他自己在终端输。`
     : ""
-  const stop = `${end}这之后 agent 之间不再互相唤起，等 jinbao 发话再继续。`
+  const stop = `${end}这之后 agent 之间不再互相唤起，等 ${userName()} 发话再继续。`
   // Woken, nobody watches the client: questions go to the page.
   const ask =
-    "要问 jinbao、让他拍板时用 bench_ask（可以给选项），不要用你客户端自带的提问工具，这里没人看得到；它会等他在网页上回答，答案作为工具结果返回。能自己判断的别问。"
+    `要问 ${userName()}、让他拍板时用 bench_ask（可以给选项），不要用你客户端自带的提问工具，这里没人看得到；它会等他在网页上回答，答案作为工具结果返回。能自己判断的别问。`
   // Recordings, sounds and pictures ride along with the answer (lib/store.ts pinAttachments).
   const attach = replyByStdout
-    ? "汇报里要给 jinbao 看视频、音频或图片时，用 bench_attach 挂上文件的绝对路径，会跟你的回答一起发出，网页上能直接播放。"
-    : "汇报里要给 jinbao 看视频、音频或图片时，bench_say 的 attachments 填文件的绝对路径，网页上能直接播放。"
+    ? `汇报里要给 ${userName()} 看视频、音频或图片时，用 bench_attach 挂上文件的绝对路径，会跟你的回答一起发出，网页上能直接播放。`
+    : `汇报里要给 ${userName()} 看视频、音频或图片时，bench_say 的 attachments 填文件的绝对路径，网页上能直接播放。`
   // Say plainly how complete the batch is, so the seat does not go digging
   // for messages it already has, or trust a batch that was cut.
   const scope =
@@ -534,7 +535,7 @@ function writeSummary(agent: NonNullable<ReturnType<typeof agentState>>, adapter
 // dialog lists them.
 function whisperPrompt(text: string, interrupted: boolean) {
   return [
-    "【并坐房间里的 jinbao 单独对你说】",
+    `【并坐房间里的 ${userName()} 单独对你说】`,
     "这句话没有发到群里，只有你看得到；你的回答也只给他看，不会贴进群聊，不要用 bench_say 发到群里。",
     interrupted ? "你刚才手上的事被这句话打断了。先回应这句；回完之后房间会把你没回完的消息重新交给你，接着做就行。" : "",
     "",
@@ -677,7 +678,7 @@ function wake(message: Message) {
     }
     if (hop >= MAX_HOPS) {
       if (cooled("relay-cap", NOTE_GAP_MS)) {
-        postSystem(`agent 之间已经自动接力 ${MAX_HOPS} 轮，先停下，等 jinbao 发话再继续`)
+        postSystem(`agent 之间已经自动接力 ${MAX_HOPS} 轮，先停下，等 ${userName()} 发话再继续`)
       }
       continue
     }

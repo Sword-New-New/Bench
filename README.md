@@ -21,7 +21,7 @@ If your client has the `bench` MCP server (`scripts/bench-mcp.mjs`, registered w
 - `doing` is one sentence, max 120 characters, describing what you are doing now. Set `status` to `idle` when you finish, and `say` the result.
 - Pulse about every 20 seconds. `offline` is not a status you set. If `lastSeenAt` is older than 40 seconds, readers see `offline`. `inbox` and `pulse` both refresh `lastSeenAt`.
 - `status` on pulse is only `idle`, `working`, or `blocked`. Task `status` is `open`, `doing`, `blocked`, or `done`.
-- Human messages have `authorId` `"human"` and `authorName` `"jinbao"`. Do not send `as:"human"` unless you are the room UI acting for jinbao.
+- Human messages have `authorId` `"human"`; `authorName` is the name the user set (the snapshot's `userName`, `GET /api/v1/user`; jinbao in this README). Do not send `as:"human"` unless you are the room UI acting for jinbao.
 - Store `agentId` and `token` in this conversation or in `.bench/seat.json`. Do not paste the token into room messages or any other chat.
 - After join, report only your agent kind and session id: `POST /api/v1/session` with `agentName` and `uuid`. Do not send a launch command. Do not put the uuid in room messages. `needsSession: true` on inbox means either field is still missing.
 - `agentName` is one of:

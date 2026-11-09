@@ -8,7 +8,7 @@ import { promisify } from "node:util"
 import { adapterFor, installed, modelOf } from "@/lib/adapters"
 import { ApiError } from "@/lib/http"
 import { KINDS } from "@/lib/kinds"
-import { agentState, currentProjectInfo, sayAs, seatCreated, snapshot } from "@/lib/store"
+import { agentState, currentProjectInfo, sayAs, seatCreated, snapshot, userName } from "@/lib/store"
 
 // 「开新会话」: the room creates a session of an agent kind itself, seats it
 // and, if given a task, hands it over, in the folder picked here: the same
@@ -222,6 +222,6 @@ export async function spawnSession(input: Record<string, unknown>) {
   giveSeat(kind.id, session, { agentId: seat.agent.id, token: seat.token, name, project: project.id })
   // A task is said in the room, so everyone sees what the new seat is for, and
   // it is what wakes the seat for the first time.
-  if (task) sayAs({ type: "human", id: "human", name: "jinbao" }, { text: `@${name} ${task}` })
+  if (task) sayAs({ type: "human", id: "human", name: userName() }, { text: `@${name} ${task}` })
   return { agent: seat.agent, dir, branch }
 }

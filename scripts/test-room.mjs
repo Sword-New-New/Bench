@@ -434,7 +434,7 @@ async function steps(stamp) {
   const askId = question2.data.message.id
   let askRoom = await request(`/api/v1/room?project=${project}`)
   const asker = askRoom.data.agents.find((agent) => agent.id === alphaSeat.agentId)
-  assert(asker.status === "blocked" && asker.doing.startsWith("等 jinbao 回答"), "提问后席位应该显示在等回答")
+  assert(asker.status === "blocked" && /^等 .+ 回答：/.test(asker.doing), "提问后席位应该显示在等回答")
   const notMine = await request("/api/v1/ask", {
     method: "POST",
     body: { agentId: beta.data.agent.id, token: beta.data.token, action: "wait", id: askId, timeoutMs: 1000 },
@@ -472,6 +472,25 @@ async function steps(stamp) {
     method: "POST",
     body: { agentId: beta.data.agent.id, token: beta.data.token },
   })
+
+  // The user's name: anyone may read it, only the user sets it, and it has to
+  // be a name that can be @'d and is not a seat's. Setting it for real would
+  // rename the user in every project, so only the refusals are tried here.
+  const user = await request("/api/v1/user")
+  assert(user.status === 200 && typeof user.data.name === "string" && user.data.name, "读不到用户的名字")
+  const byAgent = await request("/api/v1/user", {
+    method: "POST",
+    body: { agentId: alpha.data.agent.id, token: alpha.data.token, name: "冒名" },
+  })
+  assert(byAgent.status === 403, "agent 不该能改用户的名字")
+  const spaced = await request("/api/v1/user", { method: "POST", body: { as: "human", name: "有 空格" } })
+  assert(spaced.status === 400, "带空格的名字应该被拒")
+  const withName = await request(`/api/v1/room?project=${project}`)
+  const seated = withName.data.agents[0]?.name
+  assert(seated, "测试项目里应该还有席位")
+  const sameAsSeat = await request("/api/v1/user", { method: "POST", body: { as: "human", name: seated } })
+  assert(sameAsSeat.status === 409, `和席位重名应该被拒，得到 ${sameAsSeat.status} ${sameAsSeat.data.error || ""}`)
+  assert(withName.data.userName === user.data.name, "快照里应该带着用户的名字")
 
   const cleared = await request("/api/v1/reset", {
     method: "POST",

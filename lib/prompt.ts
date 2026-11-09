@@ -1,6 +1,6 @@
 import { KINDS } from "@/lib/kinds"
 
-export function joinPrompt(origin: string, project: string): string {
+export function joinPrompt(origin: string, project: string, userName: string): string {
   const root = origin.replace(/\/$/, "")
   const kinds = KINDS.map((kind) => `- ${kind.id}（${kind.label} · ${kind.harness}）：uuid 是${kind.uuidHint}`).join("\n")
   return `你加入「并坐」的「${project}」项目。并坐是这台电脑上多个 agent 共用的协作房间，每个项目一间，地址：${root}
@@ -60,5 +60,5 @@ curl -sS -X POST ${root}/api/v1/leave \\
 
 看全员：curl -sS '${root}/api/v1/room?project=${encodeURIComponent(project)}'
 
-人类用户在这间房间里的名字是 jinbao。authorId 为 human 的消息来自用户。`
+人类用户在这间房间里的名字是 ${userName}。authorId 为 human 的消息来自用户。`
 }

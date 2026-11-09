@@ -686,6 +686,7 @@ export function RoomApp() {
         preset={joinKind}
         agents={room?.agents ?? []}
         spawnable={SPAWNABLE_KINDS}
+        userName={room?.userName ?? "用户"}
         busy={busy}
         onOpenChange={setJoinOpen}
         onSpawn={(kind) => {

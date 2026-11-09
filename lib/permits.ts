@@ -1,3 +1,4 @@
+import { userName } from "@/lib/store"
 import { randomBytes } from "node:crypto"
 
 import { activeRun } from "@/lib/runs"
@@ -98,7 +99,7 @@ export function ask(
       changed()
     }
     const timer = setTimeout(
-      () => settle(id, { allow: false, note: `jinbao ${Math.round(timeoutMs / 60_000)} 分钟内没有回应` }),
+      () => settle(id, { allow: false, note: `${userName()} ${Math.round(timeoutMs / 60_000)} 分钟内没有回应` }),
       timeoutMs,
     )
     const onAbort = () => settle(id, { allow: false, note: "已取消" })

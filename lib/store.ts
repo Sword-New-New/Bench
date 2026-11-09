@@ -261,6 +261,80 @@ function saveProjects() {
   runtime().bus.emit("projects")
 }
 
+// The user's name in the room, one for every project, kept in data/user.json.
+// Before there was a setting it was always jinbao: a room that already has
+// the user's messages goes on with the name they were said under.
+function userFile() {
+  return path.join(dataDir(), "user.json")
+}
+
+const userStore = globalThis as typeof globalThis & { __benchUserName?: string }
+
+export function userName(): string {
+  if (userStore.__benchUserName) return userStore.__benchUserName
+  let name: string | undefined
+  try {
+    const parsed = JSON.parse(readFileSync(userFile(), "utf8")) as { name?: unknown }
+    if (typeof parsed.name === "string" && parsed.name) name = parsed.name
+  } catch {}
+  if (!name) {
+    for (const current of runtime().rooms.values()) {
+      name ??= current.state.messages.findLast((message) => message.authorId === "human")?.authorName
+    }
+  }
+  userStore.__benchUserName = name ?? "用户"
+  return userStore.__benchUserName
+}
+
+// A new name for the user. What they said, the tasks they own and what they
+// did on tasks now read with it, in every project.
+export function setUserName(input: unknown) {
+  const name = asString(input)?.trim()
+  checkName(name)
+  const old = userName()
+  if (name === old) return { name }
+  const rt = runtime()
+  for (const current of rt.rooms.values()) {
+    if (current.state.agents.some((agent) => agent.name === name)) {
+      throw new ApiError(409, `「${name}」已经是一个 AI 席位的名字，换一个，免得 @ 分不清`)
+    }
+  }
+  for (const current of rt.rooms.values()) {
+    const state = current.state
+    let touched = false
+    for (const message of state.messages) {
+      if (message.authorId === "human" && message.authorName !== name) {
+        message.authorName = name
+        touched = true
+      }
+    }
+    for (const task of state.tasks) {
+      if (task.ownerId === "human") {
+        task.ownerName = name
+        touched = true
+      }
+      if (task.review?.by === old) {
+        task.review.by = name
+        touched = true
+      }
+      for (const item of [...task.history, ...(task.steps ?? [])]) {
+        if ("actor" in item && item.actor === old) item.actor = name
+        else if ("by" in item && item.by === old) item.by = name
+        else continue
+        touched = true
+      }
+    }
+    if (touched) {
+      state.rev += 1
+      writeJson(roomFile(current.id), state)
+      rt.bus.emit("room", current.id)
+    }
+  }
+  writeJson(userFile(), { name })
+  userStore.__benchUserName = name
+  return { name }
+}
+
 export function listProjects(): Project[] {
   const now = Date.now()
   return runtime().projects.map((item) =>
@@ -474,6 +548,7 @@ export function snapshot(): RoomSnapshot {
     summaryWriter: room().summaryJob?.agentId ?? null,
     relayClosed: room().state.relayClosed === true,
     permits: permitsFor(room().id),
+    userName: userName(),
   }
 }
 
@@ -749,7 +824,7 @@ function actorFrom(input: unknown): Actor {
     const agent = requireAgent(agentId, token)
     return { type: "agent", id: agent.id, name: agent.name }
   }
-  if (body.as === "human") return { type: "human", id: "human", name: "jinbao" }
+  if (body.as === "human") return { type: "human", id: "human", name: userName() }
   throw new ApiError(400, "要带 agentId 和 token，或标明 as 为 human")
 }
 
@@ -1188,7 +1263,7 @@ export function askUser(input: unknown) {
     runId: activeRun(agent.id)?.id,
   })
   agent.status = "blocked"
-  agent.doing = clip(`等 jinbao 回答：${text.replace(/\s+/g, " ")}`, 120)
+  agent.doing = clip(`等 ${userName()} 回答：${text.replace(/\s+/g, " ")}`, 120)
   agent.lastSeenAt = Date.now()
   bumpRev()
   commit()
@@ -1235,9 +1310,9 @@ export async function awaitAnswer(input: unknown, signal?: AbortSignal) {
   })
   asking.delete(id)
   const agent = findAgent(actor.id)
-  if (agent && agent.status === "blocked" && agent.doing.startsWith("等 jinbao 回答")) {
+  if (agent && agent.status === "blocked" && /^等 .+ 回答：/.test(agent.doing)) {
     agent.status = timedOut ? "idle" : "working"
-    agent.doing = timedOut ? "问了 jinbao，还没回答" : "收到 jinbao 的回答"
+    agent.doing = timedOut ? `问了 ${userName()}，还没回答` : `收到 ${userName()} 的回答`
     bumpRev()
     commit()
   }
@@ -1254,7 +1329,7 @@ export const END_MARK = "【本轮结束】"
 export function recall(input: unknown) {
   const body = asRecord(input)
   const actor = actorFrom(body)
-  if (actor.type !== "human") throw new ApiError(403, "只有 jinbao 能撤回")
+  if (actor.type !== "human") throw new ApiError(403, `只有 ${userName()} 能撤回`)
   const message = room().state.messages.find((item) => item.id === asString(body.id))
   if (!message) throw new ApiError(404, "这条消息不在房间里了")
   if (message.authorId !== "human") throw new ApiError(403, "只能撤回自己发的消息")
@@ -1580,7 +1655,7 @@ export function actOnTask(input: unknown) {
     task.history.push({ at: now, actor: actor.name, action: "认领", note: note || "接下来由我做" })
   } else if (action === "done") {
     if (actor.type === "agent" && task.steps?.some((step) => isReviewStep(step) && step.state !== "done")) {
-      throw new ApiError(403, "这条还等 jinbao 验收：用 review 请他验收，他点通过才算完成")
+      throw new ApiError(403, `这条还等 ${userName()} 验收：用 review 请他验收，他点通过才算完成`)
     }
     task.status = "done"
     task.history.push({ at: now, actor: actor.name, action: "完成", note: note || "这阶段做完了" })
@@ -1653,9 +1728,9 @@ export function actOnTask(input: unknown) {
     for (const step of task.steps ?? []) {
       if (isReviewStep(step) && step.state !== "done") moveStep(step, "doing", actor.name, now)
     }
-    task.history.push({ at: now, actor: actor.name, action: "请验收", note: note || "做完了，等 jinbao 验收" })
+    task.history.push({ at: now, actor: actor.name, action: "请验收", note: note || `做完了，等 ${userName()} 验收` })
   } else if (action === "pass" || action === "reject") {
-    if (actor.type !== "human") throw new ApiError(403, "验收只有 jinbao 能点：做完了用 review 请他验收")
+    if (actor.type !== "human") throw new ApiError(403, `验收只有 ${userName()} 能点：做完了用 review 请他验收`)
     if (task.status === "done") throw new ApiError(400, "这条已经完成了")
     const pass = action === "pass"
     if (!pass && !note) throw new ApiError(400, "打回要写一句原因，负责人照着改")
@@ -1707,7 +1782,7 @@ export function actOnTask(input: unknown) {
       const state = asString(body.state) as TaskStepState | undefined
       if (!state || !STEP_STATES.has(state)) throw new ApiError(400, "state 只能是 todo、doing 或 done")
       if (actor.type === "agent" && state === "done" && isReviewStep(step)) {
-        throw new ApiError(403, "验收这一步只有 jinbao 能勾：做完了用 bench_task_update 的 review 请他验收，他在右栏点通过或打回")
+        throw new ApiError(403, `验收这一步只有 ${userName()} 能勾：做完了用 bench_task_update 的 review 请他验收，他在右栏点通过或打回`)
       }
       moveStep(step, state, actor.name, now, note || undefined)
       task.history.push({
@@ -1719,7 +1794,7 @@ export function actOnTask(input: unknown) {
       if (task.status === "open" && state !== "todo") task.status = "doing"
     }
   } else {
-    throw new ApiError(400, "action 只能是 claim、done、block、handoff、step、review，或 jinbao 的 pass、reject")
+    throw new ApiError(400, `action 只能是 claim、done、block、handoff、step、review，或 ${userName()} 的 pass、reject`)
   }
 
   task.updatedAt = now

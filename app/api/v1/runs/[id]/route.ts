@@ -1,3 +1,4 @@
+import { userName } from "@/lib/store"
 import { boot } from "@/lib/boot"
 import { ApiError, asRecord, handle, json, readBody } from "@/lib/http"
 import { getRun } from "@/lib/runs"
@@ -22,7 +23,7 @@ export async function POST(request: Request, ctx: RouteContext<"/api/v1/runs/[id
     await boot()
     const { id } = await ctx.params
     const body = asRecord(await readBody(request))
-    if (body.as !== "human") throw new ApiError(403, "重新叫醒由 jinbao 在页面上点")
+    if (body.as !== "human") throw new ApiError(403, `重新叫醒由 ${userName()} 在页面上点`)
     if (body.action !== "rewake") throw new ApiError(400, "action 只能是 rewake")
     return json(rewake(id))
   } catch (error) {

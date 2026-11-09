@@ -156,6 +156,7 @@ export function JoinDialog({
   preset,
   agents,
   spawnable,
+  userName,
   busy,
   onOpenChange,
   onSpawn,
@@ -169,6 +170,8 @@ export function JoinDialog({
   agents: PublicAgent[]
   // Kinds the room can start a session of itself.
   spawnable: string[]
+  // What the user goes by; the prompt tells the agent.
+  userName: string
   busy: boolean
   onOpenChange: (open: boolean) => void
   onSpawn: (kind: string) => void
@@ -202,7 +205,7 @@ export function JoinDialog({
   }, [open])
 
   const projectName = project?.name ?? "默认项目"
-  const prompt = joinPrompt(origin, projectName)
+  const prompt = joinPrompt(origin, projectName, userName)
   const ask = `接入并坐的「${projectName}」项目，名字叫 …，分工是 …`
   const words = query.trim().toLowerCase()
   const shown = KINDS.filter((kind) =>

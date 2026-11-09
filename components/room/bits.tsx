@@ -7,18 +7,10 @@ import { splitMentions } from "@/lib/text"
 import { STATUS_COLOR, STATUS_LABEL } from "@/lib/status"
 import type { AgentStatus } from "@/lib/types"
 
+// The app's own icon (public/bench.svg, also the favicon and the launcher's).
 export function Mark({ className = "size-7" }: { className?: string }) {
-  return (
-    <span
-      className={`grid shrink-0 grid-cols-2 gap-[3px] rounded-lg bg-primary p-[6px] ${className}`}
-      aria-hidden="true"
-    >
-      <span className="rounded-[2px] bg-[#d97757]" />
-      <span className="rounded-[2px] bg-[#4d6bfe]" />
-      <span className="rounded-[2px] bg-[#10a37f]" />
-      <span className="rounded-[2px] bg-[#7c6cf0]" />
-    </span>
-  )
+  // eslint-disable-next-line @next/next/no-img-element
+  return <img src="/bench.svg" alt="" aria-hidden="true" className={`shrink-0 ${className}`} />
 }
 
 export function Lamp({ status }: { status: AgentStatus }) {

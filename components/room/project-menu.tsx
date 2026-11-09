@@ -53,7 +53,8 @@ export function ProjectMenu({
         }
       >
         <span className="min-w-0">
-          <span className="block truncate text-[15px] leading-tight font-semibold">{current?.name ?? "并坐"}</span>
+          {/* On xl the project rail already shows the name; the path and the menu stay. */}
+          <span className="block truncate text-[15px] leading-tight font-semibold xl:hidden">{current?.name ?? "并坐"}</span>
           <span className="hidden truncate text-xs text-muted-foreground sm:block">
             {current?.dir ? shortDir(current.dir) : "并坐 · 一个项目一间房"}
           </span>
@@ -90,6 +91,19 @@ export function ProjectMenu({
         </DropdownMenuItem>
       </DropdownMenuContent>
     </DropdownMenu>
+  )
+}
+
+// The header's line from lg, where the project rail has the menu's jobs: the
+// name (only until xl, where the rail's cards show it) over the folder.
+export function ProjectPlace({ project }: { project: ProjectInfo | null }) {
+  return (
+    <span className="hidden min-w-0 lg:block" title={project?.dir}>
+      <span className="block truncate text-[15px] leading-tight font-semibold xl:hidden">{project?.name ?? "并坐"}</span>
+      <span className="block truncate text-xs text-muted-foreground">
+        {project?.dir ? shortDir(project.dir) : "并坐 · 一个项目一间房"}
+      </span>
+    </span>
   )
 }
 

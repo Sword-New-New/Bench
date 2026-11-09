@@ -645,3 +645,114 @@
 @media (prefers-reduced-motion: reduce) {
   .live-leave { display: none; }
 }
+
+/* Seats working in another project jump on its bench like a wave
+   (components/room/project-rail.tsx): every 2.4s they hop quickly one after
+   another, each 0.12s behind the last, then rest until the next wave. */
+@keyframes bench-turn {
+  0%,
+  16%,
+  100% {
+    transform: translateY(0) scale(1);
+  }
+  2% {
+    transform: translateY(0) scale(1.08, 0.9);
+  }
+  7% {
+    transform: translateY(-8px) scale(0.95, 1.06);
+  }
+  12% {
+    transform: translateY(0) scale(1.06, 0.93);
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  [class*="bench-turn"] {
+    animation: none !important;
+  }
+}
+
+/* A seat on a project's bench hops once when it says something there. */
+@keyframes bench-hop {
+  0%,
+  100% {
+    transform: translateY(0);
+  }
+  30% {
+    transform: translateY(-9px);
+  }
+  55% {
+    transform: translateY(0);
+  }
+  70% {
+    transform: translateY(-3px);
+  }
+}
+
+/* Switching projects (room-app.tsx swaps rooms in a transition): seats fly
+   between their bench and their roster row (project-rail.tsx seatFlight).
+   The old project's come home first; the new one's leave a beat later. */
+::view-transition {
+  pointer-events: none;
+}
+::view-transition-old(root),
+::view-transition-new(root) {
+  animation-duration: 180ms;
+}
+::view-transition-group(.bench-in),
+::view-transition-group(.bench-out) {
+  animation-duration: 300ms;
+  animation-timing-function: cubic-bezier(0.2, 0.8, 0.2, 1);
+}
+::view-transition-group(.bench-out) {
+  animation-delay: 100ms;
+}
+::view-transition-image-pair(.bench-in),
+::view-transition-image-pair(.bench-out) {
+  isolation: auto;
+}
+@media (prefers-reduced-motion: reduce) {
+  [class*="bench-hop"] {
+    animation: none !important;
+  }
+  /* No travel: each seat just fades out where it was and in where it lands. */
+  ::view-transition-group(.bench-in),
+  ::view-transition-group(.bench-out) {
+    animation-duration: 0s !important;
+    animation-delay: 0s !important;
+  }
+  ::view-transition-old(.bench-in),
+  ::view-transition-old(.bench-out),
+  ::view-transition-new(.bench-in),
+  ::view-transition-new(.bench-out) {
+    animation-duration: 160ms !important;
+  }
+}
+
+/* The drop of sweat on a worried bot (components/room/bot.tsx): it runs down
+   the cheek a little, fades, and wells up again. */
+.bot-sweat {
+  animation: bot-sweat 2.4s ease-in infinite;
+}
+@keyframes bot-sweat {
+  0%,
+  20% {
+    transform: translateY(0);
+    opacity: 0;
+  }
+  35% {
+    opacity: 1;
+  }
+  85% {
+    transform: translateY(30%);
+    opacity: 1;
+  }
+  100% {
+    transform: translateY(45%);
+    opacity: 0;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .bot-sweat {
+    animation: none;
+  }
+}

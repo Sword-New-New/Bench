@@ -11,7 +11,7 @@ import { ApiError, asRecord, asString } from "@/lib/http"
 import { hasFull, permitsFor } from "@/lib/permits"
 import { activeRun } from "@/lib/runs"
 import { liveStatus } from "@/lib/status"
-import { isReviewStep } from "@/lib/review"
+import { awaitingReview, isReviewStep } from "@/lib/review"
 import { mentionedAgentIds, mentionPattern, namedAgentIds, withAttachments } from "@/lib/text"
 import type {
   Ask,
@@ -341,12 +341,45 @@ export function listProjects(): Project[] {
     inProject(item.id, () => {
       const state = room().state
       const seats = state.agents.map((agent) => present(agent, now))
+      const asking = new Set([
+        ...permitsFor(item.id).map((permit) => permit.agentId),
+        ...state.messages.filter((message) => message.ask?.state === "open" && !message.recalled).map((message) => message.authorId),
+      ])
+      const review = new Set(state.tasks.filter(awaitingReview).flatMap((task) => (task.ownerId ? [task.ownerId] : [])))
+      const spoke = new Map<string, number>()
+      for (const message of state.messages) if (message.kind !== "system") spoke.set(message.authorId, message.createdAt)
+      const rank = (agent: PublicAgent) => (agent.status === "working" ? 0 : asking.has(agent.id) ? 1 : 2)
+      const bench = [...seats]
+        .sort((a, b) => rank(a) - rank(b) || (spoke.get(b.id) ?? b.createdAt) - (spoke.get(a.id) ?? a.createdAt))
+        .slice(0, 3)
+        // Who gets a place goes by what they're doing; where they sit goes by
+        // when they joined, so seats don't swap places as statuses change.
+        .sort((a, b) => a.createdAt - b.createdAt)
+        .map((agent) => ({
+          id: agent.id,
+          name: agent.name,
+          color: agent.color,
+          agentName: agent.agentName,
+          model: agent.model,
+          demo: agent.demo,
+          status: agent.status,
+          waiting: asking.has(agent.id),
+          review: review.has(agent.id),
+          saidAt: spoke.get(agent.id),
+        }))
       return {
         ...projectInfo(item.id),
         seats: seats.length,
         online: seats.filter((agent) => agent.status !== "offline").length,
         working: seats.filter((agent) => agent.status === "working").length,
         lastAt: Math.max(item.createdAt, state.messages.at(-1)?.createdAt ?? 0),
+        lastOtherAt: state.messages.findLast((message) => message.kind !== "system" && message.authorId !== "human")?.createdAt ?? 0,
+        waiting:
+          permitsFor(item.id).length +
+          state.messages.filter((message) => message.ask?.state === "open" && !message.recalled).length +
+          state.tasks.filter(awaitingReview).length,
+        bench,
+        names: seats.map((agent) => agent.name),
       }
     }),
   )

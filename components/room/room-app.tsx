@@ -1,7 +1,7 @@
 "use client"
 
-import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react"
-import { ListTodo, MessageSquare, Monitor, Moon, Plug, Settings, Sun, TerminalSquare, Users } from "lucide-react"
+import { startTransition, useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react"
+import { ListTodo, MessageSquare, Monitor, Moon, Plug, Settings, Sparkles, Sun, TerminalSquare, Users } from "lucide-react"
 import { useTheme } from "next-themes"
 import { toast } from "sonner"
 
@@ -22,7 +22,9 @@ import { WhisperDialog } from "@/components/room/whisper-dialog"
 import { SpawnDialog } from "@/components/room/spawn-dialog"
 import { type Pending } from "@/components/room/attachments"
 import { api, inOpenProject, setOpenProject, storedHumanKey, type AdapterInfo } from "@/components/room/api"
-import { ProjectDialog, ProjectMenu } from "@/components/room/project-menu"
+import { ProjectDialog, ProjectMenu, ProjectPlace } from "@/components/room/project-menu"
+import { ProjectRail } from "@/components/room/project-rail"
+import { smashProject } from "@/components/room/project-wreck"
 import { Button } from "@/components/ui/button"
 import {
   Dialog,
@@ -185,11 +187,13 @@ export function RoomApp() {
     }
   }, [loadProjects])
 
-  // Switching projects starts from a blank room until its snapshot arrives.
+  // Switching projects keeps the old room on screen until the new one's
+  // snapshot arrives, then swaps both in one transition: the bench and the
+  // roster change in the same commit, so the seats fly between them
+  // (components/room/project-rail.tsx).
   const openProject = useCallback((id: string) => {
     setProjectId((current) => {
       if (current !== id) {
-        setRoom(null)
         setFocusId(null)
         setReply(null)
         setDraft("")
@@ -198,10 +202,21 @@ export function RoomApp() {
     })
   }, [])
 
+  // The project whose room is on screen (committed). Until the new project's
+  // room is, every snapshot of it goes in as a transition: the first one often
+  // arrives twice (the pull and the stream), and a plain update would commit it
+  // without the flight.
+  const shown = useRef<string | null>(null)
+  useEffect(() => {
+    shown.current = room?.project.id ?? null
+  }, [room])
   const apply = useCallback(
     (next: RoomSnapshot) => {
       if (next.project.id !== projectId) return
-      setRoom((current) => (current && current.project.id === next.project.id && next.rev < current.rev ? current : next))
+      const update = () =>
+        setRoom((current) => (current && current.project.id === next.project.id && next.rev < current.rev ? current : next))
+      if (shown.current && shown.current !== next.project.id) startTransition(update)
+      else update()
     },
     [projectId],
   )
@@ -236,7 +251,16 @@ export function RoomApp() {
     source.onopen = () => {
       streaming = true
     }
+    // The stream repeats the room every few seconds so a seat that went quiet
+    // shows as offline; when nothing differs there is nothing to parse or draw.
+    let lastText = ""
     source.onmessage = (event) => {
+      if (event.data === lastText) {
+        streaming = true
+        setLive(true)
+        return
+      }
+      lastText = event.data
       try {
         apply(JSON.parse(event.data) as RoomSnapshot)
         streaming = true
@@ -347,6 +371,7 @@ export function RoomApp() {
     { id: "tasks", label: "待办", icon: ListTodo },
   ]
   const openTasks = room?.tasks.filter((task) => task.status !== "done").length ?? 0
+  const currentProject = room?.project ?? projects?.find((item) => item.id === projectId) ?? null
 
   return (
     <main className="relative isolate flex h-dvh flex-col">
@@ -357,18 +382,32 @@ export function RoomApp() {
           这个页面没有口令，发消息、批准权限这些操作都会被拒。用 <code>npm run open</code> 或桌面上的「并坐」图标重新打开一次，之后就不用了。
         </p>
       ) : null}
-      <div className="shrink-0 px-3 pt-2 lg:px-4">
+      <div className="flex min-h-0 flex-1">
+      <ProjectRail
+        projects={projects ?? []}
+        current={room?.project.id ?? projectId}
+        onPick={openProject}
+        onCreate={() => setProjectDialog({ editing: null })}
+        onEdit={(project) => setProjectDialog({ editing: project })}
+      />
+      <div className="flex min-w-0 flex-1 flex-col">
+      <div className="shrink-0 px-3 pt-2 lg:px-4 lg:pl-1">
       <header className="flex h-12 items-center gap-3 pr-1 pl-1">
         <Mark />
         <h1 className="sr-only">并坐</h1>
         <div className="min-w-0" data-tour="project">
-          <ProjectMenu
-            projects={projects ?? []}
-            current={room?.project ?? projects?.find((item) => item.id === projectId) ?? null}
-            onPick={openProject}
-            onCreate={() => setProjectDialog({ editing: null })}
-            onEdit={() => room && setProjectDialog({ editing: room.project })}
-          />
+          {/* From lg the project rail switches, creates and opens settings, so
+              the header only says where this one lives. */}
+          <div className="lg:hidden">
+            <ProjectMenu
+              projects={projects ?? []}
+              current={currentProject}
+              onPick={openProject}
+              onCreate={() => setProjectDialog({ editing: null })}
+              onEdit={() => room && setProjectDialog({ editing: room.project })}
+            />
+          </div>
+          <ProjectPlace project={currentProject} />
         </div>
         <div className="ml-auto flex items-center gap-1.5">
           <span
@@ -430,6 +469,10 @@ export function RoomApp() {
                 <TerminalSquare />
                 唤起命令…
               </DropdownMenuItem>
+              <DropdownMenuItem onClick={() => window.dispatchEvent(new Event(TOUR_START))}>
+                <Sparkles />
+                新手引导
+              </DropdownMenuItem>
             </DropdownMenuContent>
           </DropdownMenu>
           <Button
@@ -450,7 +493,7 @@ export function RoomApp() {
       </div>
 
       {!room ? (
-        <div className="grid min-h-0 flex-1 gap-4 p-3 lg:grid-cols-[264px_1fr_300px] lg:px-4 lg:pt-1 lg:pb-4">
+        <div className="grid min-h-0 flex-1 gap-4 p-3 lg:grid-cols-[264px_1fr_300px] lg:px-4 lg:pl-1 lg:pt-1 lg:pb-4">
           {["入口", "对话", "待办"].map((label) => (
             <div key={label} className="frost animate-pulse rounded-2xl p-4 text-sm text-muted-foreground">
               正在打开{label}
@@ -458,7 +501,7 @@ export function RoomApp() {
           ))}
         </div>
       ) : (
-        <div className="grid min-h-0 flex-1 grid-rows-[minmax(0,1fr)] pt-2 lg:grid-cols-[264px_minmax(0,1fr)_300px] lg:gap-4 lg:px-4 lg:pt-1 lg:pb-4">
+        <div className="grid min-h-0 flex-1 grid-rows-[minmax(0,1fr)] pt-2 lg:grid-cols-[264px_minmax(0,1fr)_300px] lg:gap-4 lg:px-4 lg:pl-1 lg:pt-1 lg:pb-4">
           <aside data-tour="roster" className={`${tab === "people" ? "block" : "hidden"} frost h-full min-h-0 overflow-hidden lg:block lg:rounded-2xl`}>
             <Roster
               agents={agents}
@@ -650,6 +693,8 @@ export function RoomApp() {
           </aside>
         </div>
       )}
+      </div>
+      </div>
 
       <nav className="frost grid shrink-0 grid-cols-3 lg:hidden">
         {tabs.map((item) => {
@@ -744,9 +789,12 @@ export function RoomApp() {
           }
         }}
         onDeleted={(id) => {
+          // Off the bench with a bang, before the list reload drops the card.
+          smashProject(projects?.find((item) => item.id === id))
           setProjectDialog(null)
+          // Deleting another project from the rail leaves this one open.
           const next = projects?.find((item) => item.id !== id)
-          if (next) openProject(next.id)
+          if (next && id === (room?.project.id ?? projectId)) openProject(next.id)
           void loadProjects().catch(() => {})
           toast.success("项目删掉了")
         }}

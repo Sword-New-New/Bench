@@ -1,4 +1,4 @@
-import { useState } from "react"
+import { useState, ViewTransition } from "react"
 import { AtSign, Ellipsis, Loader2, MessageCircle, PencilLine, Plus, Square } from "lucide-react"
 
 import { Button } from "@/components/ui/button"
@@ -10,6 +10,7 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu"
 import { Avatar, Lamp } from "@/components/room/bits"
+import { seatFlight } from "@/components/room/project-rail"
 import type { AdapterInfo } from "@/components/room/api"
 import { KINDS, kindOf, type Kind } from "@/lib/kinds"
 import { ago, STATUS_LABEL } from "@/lib/status"
@@ -155,8 +156,14 @@ function SeatRow({ agent, ...props }: Props & { agent: PublicAgent }) {
     <div
       className={`group flex items-start gap-2 rounded-xl px-2 py-1.5 transition-colors ${focused ? "bg-sidebar-accent" : "hover:bg-sidebar-accent/70"}`}
     >
+      {/* Shares its name with this seat on the project rail's bench: switching
+          projects flies the seat between the two (components/room/project-rail.tsx). */}
       <span className="pt-1.5">
-        <Lamp status={agent.status} />
+        <ViewTransition name={seatFlight(agent.id)} share="bench-out" default="none">
+          <span className="block">
+            <Lamp status={agent.status} />
+          </span>
+        </ViewTransition>
       </span>
       <div className="min-w-0 flex-1">
       <button type="button" className="block w-full text-left" onClick={() => props.onMention(agent.name)}>

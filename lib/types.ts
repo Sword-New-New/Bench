@@ -185,6 +185,32 @@ export type Project = ProjectInfo & {
   working: number
   // When something last happened in it.
   lastAt: number
+  // When someone other than the user last said something; the page compares it
+  // with when the user last looked, for the unread dot.
+  lastOtherAt: number
+  // Things in it that wait on the user: permits, open questions, sign-offs.
+  waiting: number
+  // Who sits on its bench in the project rail: at most three, the working
+  // first, then those waiting on the user, then whoever spoke last.
+  bench: BenchSeat[]
+  // Every seat's name, for the card's tooltip.
+  names: string[]
+}
+
+export type BenchSeat = {
+  id: string
+  name: string
+  color: string
+  agentName: string
+  model: string
+  demo: boolean
+  status: AgentStatus
+  // Has a permit or a question out to the user.
+  waiting: boolean
+  // Owns a task waiting for the user's sign-off.
+  review: boolean
+  // When it last said something here; the rail makes it hop when this moves.
+  saidAt?: number
 }
 
 // A woken Claude Code turn waiting on the user: to run one tool, or for full

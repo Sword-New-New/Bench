@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode } from "react"
+import { useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode } from "react"
 import { ArrowRight, Check, ChevronDown, ListTree, Reply, Undo2, X, Zap } from "lucide-react"
 import { toast } from "sonner"
 
@@ -19,6 +19,9 @@ const EXAMPLES = [
   "做一版定价页，手机上要能扫，做完看一遍边界",
   "谁现在有空？",
 ]
+
+// How many thread items (a reply chain counts as one) are drawn at first and per click.
+const PAGE = 40
 
 export function Thread({
   messages,
@@ -106,6 +109,25 @@ export function Thread({
     observer.observe(inner)
     return () => observer.disconnect()
   }, [])
+
+  // A long room is slow to draw whole: show the latest stretch, and let a
+  // click at the top bring in an earlier one without moving what you are reading.
+  const [limit, setLimit] = useState(PAGE)
+  const anchor = useRef<number | null>(null)
+  const items = threadItems(messages)
+  const hidden = Math.max(0, items.length - limit)
+  const shown = hidden > 0 ? items.slice(hidden) : items
+  const loadEarlier = () => {
+    const node = scroller.current
+    anchor.current = node ? node.scrollHeight - node.scrollTop : null
+    stick.current = false
+    setLimit((value) => value + PAGE)
+  }
+  useLayoutEffect(() => {
+    const node = scroller.current
+    if (node && anchor.current !== null) node.scrollTop = node.scrollHeight - anchor.current
+    anchor.current = null
+  }, [limit])
 
   const row = (message: Message, previous?: Message) => (
     <MessageRow
@@ -198,7 +220,16 @@ export function Thread({
       >
         <div ref={content} className="mx-auto flex max-w-3xl flex-col gap-1 px-4 pt-6 pb-[calc(var(--dock,8rem)+1rem)] md:px-6">
           {!talked ? <Welcome onExample={onExample} /> : null}
-          {threadItems(messages).map((item) =>
+          {hidden > 0 ? (
+            <button
+              type="button"
+              className="chip mx-auto my-2 rounded-full px-3 py-1 text-xs text-muted-foreground hover:text-foreground"
+              onClick={loadEarlier}
+            >
+              加载更早的 {Math.min(PAGE, hidden)} 条（还有 {hidden} 条没显示）
+            </button>
+          ) : null}
+          {shown.map((item) =>
             item.chain ? (
               <ReplyChain key={item.chain[0].id} chain={item.chain} line={line} />
             ) : (

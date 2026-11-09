@@ -17,6 +17,7 @@ import {
   onMessage,
   postSystem,
   pulseAgent,
+  relayClosed,
   saveSummary,
   sayAs,
   snapshot,
@@ -24,7 +25,9 @@ import {
   summaryJob,
   summarySource,
   summonCandidates,
+  END_MARK,
 } from "@/lib/store"
+import { withAttachments } from "@/lib/text"
 import type { Message, RoomSummary, Run } from "@/lib/types"
 
 const NOTE_GAP_MS = 30_000
@@ -61,6 +64,8 @@ type Lane = {
   stop?: () => void
   carry?: string
   whisper?: string
+  // The latest message that called this seat; the next reply answers it.
+  trigger?: string
 }
 
 type SummonGlobal = typeof globalThis & {
@@ -116,6 +121,19 @@ function envelope(body: string, skipped: number, summary: RoomSummary | undefine
   const how = replyByStdout
     ? "最后的回答直接输出就行，会作为你的发言贴回房间，不用调用 bench_say。中途的进度、逐条汇报直接说出来：这些话会实时显示在你自己的席位和过程记录里，用户看得到，但不会进群聊，所以不要用 bench_say 刷进度。"
     : `回复请发回房间：有 bench_say 工具就用它；没有的话 POST ${roomUrl()}/api/v1/say，带你入座时的 agentId 和 token。`
+  // Each line carries its id; the reply hangs under the message that called it.
+  const thread = replyByStdout
+    ? "你的回答会自动挂成对叫你那条消息的回复。方括号里是消息 id；要看完整群聊、某条回复链或谁说过什么，用 bench_messages 工具（结构化数据）。"
+    : "你的发言会自动挂成对叫你那条消息的回复；要回别的某条，bench_say 的 replyTo 填方括号里的 id。要看完整群聊、某条回复链或谁说过什么，用 bench_messages 工具（结构化数据）。"
+  // Every feature the user asks for goes on the to-do list on the right, and
+  // is worked and accepted along its steps.
+  const todo =
+    "jinbao 要你做新功能时，开工前必须先用 bench_task 建一条待办：title 写功能，steps 拆成几步，owner 填你自己；每开始一步用 bench_step 标 doing，做完标 done，note 写做了什么、怎么验的。已有待办的就接着推进，不要重复建。验收也按这些步骤一步一步走。"
+  // Two agents can keep @-ing each other; the one that sees the round is done ends it.
+  const end = replyByStdout
+    ? `如果这一轮交接已经完成、不需要谁再接手，回答以「${END_MARK}」开头，写一句做完了什么，不要 @ 任何人。`
+    : `如果这一轮交接已经完成、不需要谁再接手，用 bench_say 带 end: true 发一句做完了什么，不要 @ 任何人。`
+  const stop = `${end}这之后 agent 之间不再互相唤起，等 jinbao 发话再继续。`
   // Say plainly how complete the batch is, so the seat does not go digging
   // for messages it already has, or trust a batch that was cut.
   const scope =
@@ -125,7 +143,7 @@ function envelope(body: string, skipped: number, summary: RoomSummary | undefine
         ? `你上次之后的消息太多，更早的 ${skipped} 条没列；先附上房间摘要（${summary.by} 写于 ${stamp(summary.at)}，概括了那之前的对话），再列最近的原文。需要原文用 bench_inbox 查。`
         : `下面是你上次之后房间里的消息，太长只列了最近这些；更早还有 ${skipped} 条没列，需要的话用 bench_inbox 查。`
   const digest = skipped > 0 && summary ? `【房间摘要】\n${summary.text}\n\n【最近的原文】\n` : ""
-  return `【并坐「${currentProjectInfo().name}」项目转来的消息】\n${scope}只略去了你自己说的话和入座、离席这类系统通知。★ 是在叫你的。\n\n${digest}${body}\n\n（${how}）`
+  return `【并坐「${currentProjectInfo().name}」项目转来的消息】\n${scope}只略去了你自己说的话和入座、离席这类系统通知。★ 是在叫你的。\n\n${digest}${body}\n\n（${how}${thread}${todo}${stop}）`
 }
 
 function summaryPrompt(replyByStdout: boolean) {
@@ -372,12 +390,15 @@ function run(agentId: string) {
     introduce(agent) + envelope(body, seen.skipped, seen.summary, adapter.reply === "stdout"),
   )
   const hop = queue.hops
+  const trigger = queue.trigger
   queue.pending = []
   queue.hops = 0
+  queue.trigger = undefined
   if (!command) return
 
   queue.running = true
   const log = startRun(agentId, agent.name, "reply")
+  log.replyTo = trigger
   const seat = busy(agentId, "被点到了，正在回复")
   launch(agent, command, log, seat.live, ({ out, failure, stopped, lost }) => {
     queue.running = false
@@ -387,7 +408,10 @@ function run(agentId: string) {
     }
     if (stopped) {
       // Stopped for an interjection: pick these messages up again after it.
-      if (queue.whisper !== undefined) queue.carry = body
+      if (queue.whisper !== undefined) {
+        queue.carry = body
+        queue.trigger ??= trigger
+      }
       endRun(log, "failed", queue.whisper !== undefined ? "被单独插话打断，回完接着做" : "被你停下了")
       seat.settle()
       run(agentId)
@@ -551,6 +575,8 @@ function wake(message: Message) {
   if (message.kind === "system") return
   const hop = hops().get(message.id) ?? 0
   const fromHuman = message.authorId === "human"
+  // Someone ended the round: agents' messages wake nobody until the user speaks.
+  if (!fromHuman && relayClosed()) return
   for (const agent of summonCandidates(message)) {
     // Between agents only an explicit @ or a handoff wakes someone.
     if (!fromHuman && !message.mentions.includes(agent.id) && message.handoff?.toId !== agent.id) {
@@ -578,8 +604,9 @@ function wake(message: Message) {
       continue
     }
     const queue = lane(agent.id)
-    queue.pending.push(`${message.authorName}：${message.text}`)
+    queue.pending.push(`${message.authorName}：${withAttachments(message.text, message.attachments)}`)
     queue.hops = Math.max(queue.hops, hop)
+    queue.trigger = message.id
     run(agent.id)
   }
 }

@@ -33,6 +33,16 @@ export type Handoff = {
   taskTitle: string
 }
 
+// A file, folder or image sent with a message. Everyone in the room is on this
+// computer, so it travels as a path: picked from disk where it lies, or, for
+// something pasted or dropped, the copy the room saved under data/uploads.
+export type Attachment = {
+  kind: "file" | "dir" | "image"
+  name: string
+  path: string
+  size?: number
+}
+
 export type Message = {
   id: string
   seq: number
@@ -49,6 +59,10 @@ export type Message = {
   handoff?: Handoff
   // Posted during a wake: the steps that led to it.
   runId?: string
+  attachments?: Attachment[]
+  // An agent saying its round of handoffs is over: it mentions nobody, and
+  // agents stop waking each other until the user speaks again.
+  end?: boolean
   createdAt: number
 }
 
@@ -81,6 +95,22 @@ export type Task = {
   updatedAt: number
   history: TaskEvent[]
   brief?: TaskBrief
+  // The to-do list of this feature: worked, and accepted, one step at a time.
+  steps?: TaskStep[]
+}
+
+export type TaskStepState = "todo" | "doing" | "done"
+
+export type TaskStep = {
+  id: string
+  text: string
+  state: TaskStepState
+  // Who last moved it, when, and what they said.
+  by: string
+  at: number
+  updatedAt: number
+  doneAt?: number
+  note?: string
 }
 
 // A running digest of the room, written by an agent the user picks.
@@ -121,6 +151,8 @@ export type RoomSnapshot = {
   summaryDue: boolean
   // The seat writing a summary right now.
   summaryWriter: string | null
+  // An agent ended the round; agents wake nobody until the user speaks.
+  relayClosed: boolean
 }
 
 export type Actor = {
@@ -153,5 +185,8 @@ export type Run = {
   startedAt: number
   endedAt?: number
   messageId?: string
+  // A reply run: the message that woke the seat. What it says during the run
+  // answers that message unless it names another.
+  replyTo?: string
   steps: RunStep[]
 }

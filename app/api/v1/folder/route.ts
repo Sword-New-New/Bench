@@ -7,9 +7,10 @@ import { boot } from "@/lib/boot"
 import { ApiError, asRecord, asString, handle, json, readBody } from "@/lib/http"
 import { installed } from "@/lib/adapters"
 
-// 「浏览…」 in the project dialog: the room opens the desktop's own folder
-// picker (zenity) and hands back the folder chosen. A page can't do this
-// itself; browsers never give out a folder's full path.
+// 「浏览…」 in the project dialog and the composer's paperclip: the room opens
+// the desktop's own picker (zenity) and hands back the full paths chosen. A
+// page can't do this itself; browsers never give out a file's full path.
+// pick: "dir" (default) answers { dir }, "dirs" or "files" answer { paths }.
 
 const PICK_LIMIT_MS = 10 * 60_000
 
@@ -37,12 +38,18 @@ export async function POST(request: Request) {
     if (picking) throw new ApiError(409, "选目录的窗口已经开着了，看看任务栏")
     const start = (asString(body.start) ?? "").replace(/^~(?=\/|$)/, os.homedir())
     const from = start && path.isAbsolute(start) && existsSync(start) ? start : os.homedir()
+    const pick = body.pick === "files" || body.pick === "dirs" ? body.pick : "dir"
+    const args = {
+      dir: ["--directory", "--title=选项目目录"],
+      dirs: ["--directory", "--multiple", "--separator=\n", "--title=选要发的文件夹"],
+      files: ["--multiple", "--separator=\n", "--title=选要发的文件"],
+    }[pick]
     picking = true
     try {
       const chosen = await new Promise<string | null>((resolve, reject) => {
         execFile(
           "zenity",
-          ["--file-selection", "--directory", "--title=选项目目录", `--filename=${from.replace(/\/?$/, "/")}`],
+          ["--file-selection", ...args, `--filename=${from.replace(/\/?$/, "/")}`],
           { env: desktopEnv(), timeout: PICK_LIMIT_MS },
           (error, stdout) => {
             // Exit 1 is the user closing it or pressing cancel.
@@ -52,7 +59,8 @@ export async function POST(request: Request) {
           },
         )
       })
-      return json({ dir: chosen })
+      if (pick === "dir") return json({ dir: chosen })
+      return json({ paths: chosen ? chosen.split("\n").filter(Boolean) : [] })
     } finally {
       picking = false
     }

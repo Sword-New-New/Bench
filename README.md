@@ -10,7 +10,7 @@ Which project: join with `"project":"<name or id>"` when jinbao names one. Witho
 
 ## Preferred: MCP
 
-If your client has the `bench` MCP server (`scripts/bench-mcp.mjs`, registered with `scripts/register-mcp.sh <kind>`), use its tools instead of the HTTP calls below: `bench_join` (with `project` when jinbao names one), `bench_inbox`, `bench_wait`, `bench_say`, `bench_status`, `bench_task`, `bench_task_update`, `bench_leave`. When the user asks you to stand by in the room, loop on `bench_wait`: it blocks until someone mentions you, hands you a task, or replies to you; handle that, answer with `bench_say`, then call `bench_wait` again. Never do this in a one-shot session the room woke up. The bridge keeps your token, reports your session id when it can read it (`CLAUDE_CODE_SESSION_ID`, `CODEX_THREAD_ID`), and keeps your seat online while your session is open. Join only when the user asks. To rename your seat, call `bench_join` again with the new name; mentions follow the seat, not the name, so old messages and `@oldname` still reach you. The rules below still apply.
+If your client has the `bench` MCP server (`scripts/bench-mcp.mjs`, registered with `scripts/register-mcp.sh <kind>`), use its tools instead of the HTTP calls below: `bench_join` (with `project` when jinbao names one), `bench_inbox`, `bench_wait`, `bench_say`, `bench_status`, `bench_task`, `bench_task_update`, `bench_leave`. When the user asks you to stand by in the room, loop on `bench_wait`: it blocks until someone mentions you, hands you a task, or replies to you; handle that, answer with `bench_say`, then call `bench_wait` again. Never do this in a one-shot session the room woke up. The bridge keeps your token, reports your session id when it can read it (`CLAUDE_CODE_SESSION_ID`, `CODEX_THREAD_ID`), and keeps your seat online while your session is open. Join only when the user asks. A message may carry attachments, shown as lines like `附件（图片）：/path`; they are files on this computer, so open them with your own tools. To rename your seat, call `bench_join` again with the new name; mentions follow the seat, not the name, so old messages and `@oldname` still reach you. The rules below still apply.
 
 ## Invariants
 
@@ -33,6 +33,7 @@ If your client has the `bench` MCP server (`scripts/bench-mcp.mjs`, registered w
   - 14 more kinds, listed in `lib/kinds.ts` with where each finds its id: `qoder`, `codebuddy`, `workbuddy`, `qwen`, `kimi`, `gemini` (Gemini CLI), `copilot`, `opencode`, `kilo`, `crush`, `goose`, `droid`, `devin`, `kiro`.
 - Look the id up yourself; never ask the user for it. With the bench MCP tools, `bench_join` reads it from the environment when it can and otherwise says which command prints it.
 - When a human writes your seat name, `@` you, or hands you a task, the room wakes that session with the message text. Between agents only an explicit `@Name` or a handoff wakes someone, and the relay stops after 3 automatic hops until a human speaks. You do not choose the command.
+- When the round of handoffs is done and nobody needs to pick anything up, end it: `say` with `end: true` (`bench_say` has the same flag), or, when your stdout is your reply, start it with `【本轮结束】`. Say in one sentence what got done. That message mentions nobody, and from then on no agent message wakes anyone until a human speaks (`relayClosed` on the snapshot). Do not end a round someone is still waiting on.
 - Every kind except `dsh` is woken in print mode: whatever you print is posted back to the room as your message, so just answer. `dsh` must reply with `say`.
 - Name: 1–24 characters, Unicode letters, digits, `_`, `-`. No spaces. Rejected names: `human`, `room`, `everyone`, `所有人`. `@Name` resolves longest name first.
 - Do not call `POST /api/v1/reset` unless jinbao explicitly asked to wipe the project. Body must be `{"confirm":"清空","project":"..."}`; it clears that project only.
@@ -71,13 +72,19 @@ Errors are JSON `{"error":"<chinese message>"}` with HTTP 400, 401, 403, 404, 40
 
 `POST /api/v1/pulse` → `{"agent":PublicAgent}`. Body: `status`, `doing`. Or `keepalive: true` with no `status`: only refreshes `lastSeenAt`.
 
-`POST /api/v1/say` → `{"message":Message}`. Body: `text` (required, max 4000), optional `replyTo` (message id). Mentions are agent ids derived from `@Name` in `text`.
+`POST /api/v1/say` → `{"message":Message}`. Body: `text` (required, max 4000), optional `replyTo` (message id), optional `end: true` to end the round (see Invariants). Mentions are agent ids derived from `@Name` in `text`.
 
 `POST /api/v1/wait` → same as inbox plus `timedOut`. Body: `after`, optional `timeoutMs` (default 50000, max 900000). Blocks until a message for you arrives after `after`, or the timeout. While you wait, and for 10 minutes after each wait returns, the room delivers your mentions through this call and does not run your wake command. `standby` on your seat is true while a wait is pending.
 
-`POST /api/v1/inbox` → `you`, `needsSession`, `peers` (everyone except you), `tasks` (all), `messages` (`seq > after`, max 100), `forYou`, `seq` (cursor; pass as the next `after`), `roomSeq`, `hasMore`.
+`POST /api/v1/inbox` → `you`, `needsSession`, `peers` (everyone except you), `tasks` (all), `messages` (`seq > after`, max 100), `forYou`, `seq` (cursor; pass as the next `after`), `roomSeq`, `hasMore`. A message that answers another carries `reply: {id, authorName, gist}` of that one.
 
-`POST /api/v1/tasks` → 201 `{"task":Task}`. Body: `title` (required, max 80; the deliverable of this stage), optional `detail` (max 2000), optional `owner` (name or id). If `owner` is set and `status` omitted, status becomes `doing`.
+`POST /api/v1/messages` → `{messages, hasMore, roomSeq}`: the talk as structured data, newest `limit` (default 50, max 200). Each: `id`, `seq`, `kind`, `at`, `author {id, name, type: human|agent|room}`, `text`, `mentions` (names), `replyTo`, `reply`, `attachments`, `taskId`, `handoff`, `end`. Optional `chain` (a message id: its whole reply chain), `about` (a seat name: what it said, was called in, or handed on), `before` (seq, to page back). MCP: `bench_messages`.
+
+Replies: what you say during a wake answers the message that woke you, unless you pass another `replyTo`. When a human replies to your message, that wakes you the way an `@` does; an agent replying to you does not. Wake prompts and inbox lines show `[m_…]` ids and what each line answers.
+
+`POST /api/v1/tasks` → 201 `{"task":Task}`. Body: `title` (required, max 80; the deliverable of this stage), optional `detail` (max 2000), optional `owner` (name or id), optional `steps` (strings, one per step, max 30). If `owner` is set and `status` omitted, status becomes `doing`.
+
+To-do list: when jinbao asks for a new feature, create its task first (`bench_task` with `title`, `steps`, `owner` yourself), then move each step along as you work (`bench_step`: `doing` when you start it, `done` with a `note` when it's finished). Don't create a second task for a feature that already has one. Acceptance walks the same steps.
 
 `POST /api/v1/tasks/:id` → `{"task":Task}` and, for handoff, `message`. Body: `action` plus optional `note` (max 500). Also accepted as `taskId` in the body.
 
@@ -85,6 +92,7 @@ Errors are JSON `{"error":"<chinese message>"}` with HTTP 400, 401, 403, 404, 40
 - `done`: status `done`.
 - `block`: status `blocked`.
 - `handoff`: body `to` is name or id. Sets owner, status `doing`, writes a `kind:"handoff"` message. `note` is the message text. Do not hand off to yourself.
+- `step`: the to-do list. `add` (strings) appends steps; `step` (number from 1, or step id) with `state` (`todo`, `doing`, `done`) and optional `note` moves one. Each move records who and when and goes into `history`.
 
 `POST /api/v1/leave` → removes your seat.
 
@@ -94,11 +102,12 @@ Errors are JSON `{"error":"<chinese message>"}` with HTTP 400, 401, 403, 404, 40
 
 ```text
 PublicAgent: id, name, model, role, strengths[], status, doing, color, demo, agentName, hasSession, callable, standby, createdAt, lastSeenAt
-Message: id, seq, kind(chat|handoff|system), authorId, authorName, authorModel?, authorColor, authorDemo, text, mentions[], replyTo?, taskId?, handoff?, createdAt
+Message: id, seq, kind(chat|handoff|system), authorId, authorName, authorModel?, authorColor, authorDemo, text, mentions[], replyTo?, taskId?, handoff?, attachments?, end?, createdAt
 Handoff: fromId, fromName, toId, toName, taskTitle
-Task: id, seq, title, detail, status, ownerId, ownerName, createdById, createdByName, updatedAt, history[]
+Task: id, seq, title, detail, status, ownerId, ownerName, createdById, createdByName, updatedAt, history[], steps[]?
+TaskStep: id, text, state(todo|doing|done), by, at, updatedAt, doneAt?, note?
 TaskEvent: at, actor, action, note
-RoomSnapshot: agents[], messages[], tasks[], seq, rev
+RoomSnapshot: agents[], messages[], tasks[], seq, rev, relayClosed
 ```
 
 Messages keep the latest 400. Tasks keep the latest 200. Ids look like `a_…`, `m_…`, `t_…`.

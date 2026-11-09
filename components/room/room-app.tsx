@@ -12,12 +12,13 @@ import { JoinDialog } from "@/components/room/join-dialog"
 import { Mark } from "@/components/room/bits"
 import { Roster } from "@/components/room/roster"
 import { RunPanel } from "@/components/room/run-panel"
-import { clearSummarySnooze, SummaryCard, SummaryNudge } from "@/components/room/summary"
+import { clearSummarySnooze, SUMMARY_DONE_DEMO, SummaryCard, SummaryNudge } from "@/components/room/summary"
 import { DEBUG_MENU, DebugMenu, NO_DEBUG, withDebug, type DebugView } from "@/components/room/debug-menu"
 import { TasksPanel } from "@/components/room/tasks-panel"
 import { Thread } from "@/components/room/thread"
 import { WhisperDialog } from "@/components/room/whisper-dialog"
 import { SpawnDialog } from "@/components/room/spawn-dialog"
+import { type Pending } from "@/components/room/attachments"
 import { api, inOpenProject, setOpenProject, type AdapterInfo } from "@/components/room/api"
 import { ProjectDialog, ProjectMenu } from "@/components/room/project-menu"
 import { Button } from "@/components/ui/button"
@@ -128,6 +129,7 @@ export function RoomApp() {
   const [busy, setBusy] = useState(false)
   const [leaving, setLeaving] = useState<PublicAgent | null>(null)
   const [renaming, setRenaming] = useState<PublicAgent | null>(null)
+  const [files, setFiles] = useState<Pending[]>([])
   const [newName, setNewName] = useState("")
   const [handoff, setHandoff] = useState<{ task: Task; agent: PublicAgent } | null>(null)
   const [note, setNote] = useState("")
@@ -320,7 +322,7 @@ export function RoomApp() {
   const tabs: { id: TabId; label: string; icon: typeof Users }[] = [
     { id: "people", label: "入口", icon: Users },
     { id: "chat", label: "对话", icon: MessageSquare },
-    { id: "tasks", label: "分工", icon: ListTodo },
+    { id: "tasks", label: "待办", icon: ListTodo },
   ]
   const openTasks = room?.tasks.filter((task) => task.status !== "done").length ?? 0
 
@@ -359,6 +361,7 @@ export function RoomApp() {
                 void run(() => debugCall({ action: "forget", agentId: agent.id }), `${agent.name} 下次被叫醒会收到全部积压`)
               }
               onClearSummary={() => void run(() => debugCall({ action: "clearSummary" }), "摘要清空了")}
+              onSummaryDone={() => window.dispatchEvent(new Event(SUMMARY_DONE_DEMO))}
               onClearSnooze={() => {
                 clearSummarySnooze()
                 toast.success("「稍后提醒」清掉了")
@@ -417,7 +420,7 @@ export function RoomApp() {
 
       {!room ? (
         <div className="grid min-h-0 flex-1 gap-4 p-3 lg:grid-cols-[264px_1fr_300px] lg:px-4 lg:pt-1 lg:pb-4">
-          {["入口", "对话", "分工"].map((label) => (
+          {["入口", "对话", "待办"].map((label) => (
             <div key={label} className="frost animate-pulse rounded-2xl p-4 text-sm text-muted-foreground">
               正在打开{label}
             </div>
@@ -491,6 +494,8 @@ export function RoomApp() {
               busy={busy}
               inputRef={composerRef}
               onChange={setDraft}
+              files={files}
+              onFiles={setFiles}
               onClearReply={() => setReply(null)}
               notice={
                 room ? (
@@ -509,15 +514,18 @@ export function RoomApp() {
               }
               onSend={() => {
                 const text = draft.trim()
-                if (!text) return
+                if ((!text && files.length === 0) || files.some((item) => item.uploading)) return
+                const attachments = files.map(({ kind, name, path }) => ({ kind, name, path }))
                 const replyTo = reply?.id
                 // Named seats that are busy get this after what they're doing.
                 const queued = agents.filter((agent) => agent.runId && text.includes(`@${agent.name}`))
                 void run(async () => {
                   await api("/api/v1/say", {
                     method: "POST",
-                    body: JSON.stringify({ as: "human", text, replyTo }),
+                    body: JSON.stringify({ as: "human", text, replyTo, attachments }),
                   })
+                  for (const item of files) if (item.preview) URL.revokeObjectURL(item.preview)
+                  setFiles([])
                   setDraft("")
                   setReply(null)
                   if (queued.length > 0) {
@@ -551,7 +559,7 @@ export function RoomApp() {
                   }}
                 />
               }
-              onCreate={(title, ownerId) =>
+              onCreate={(title, ownerId, steps) =>
                 void run(() =>
                   api("/api/v1/tasks", {
                     method: "POST",
@@ -559,7 +567,16 @@ export function RoomApp() {
                       as: "human",
                       title,
                       owner: ownerId ?? undefined,
+                      steps,
                     }),
+                  }).then(() => undefined),
+                )
+              }
+              onStep={(task, step, state) =>
+                void run(() =>
+                  api(`/api/v1/tasks/${task.id}`, {
+                    method: "POST",
+                    body: JSON.stringify({ as: "human", action: "step", step, state }),
                   }).then(() => undefined),
                 )
               }

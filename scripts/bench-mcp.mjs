@@ -226,10 +226,26 @@ function peerLine(agent) {
   return `- ${agent.name}${who} · ${STATUS[agent.status] ?? agent.status}：${clip(agent.doing, 120) || "（没写在做什么）"}`
 }
 
+const STEP = { todo: "○", doing: "◐", done: "✓" }
+
+function hhmm(at) {
+  return new Date(at).toTimeString().slice(0, 5)
+}
+
+// A task, and under it its to-do list: number, state, text, who moved it when.
 function taskLine(task) {
   const owner = task.ownerName ? `负责人 ${task.ownerName}` : "没有负责人"
-  return `- [${task.id}] ${task.title} · ${TASK[task.status] ?? task.status} · ${owner}`
+  const steps = task.steps ?? []
+  const done = steps.filter((step) => step.state === "done").length
+  const progress = steps.length ? ` · 步骤 ${done}/${steps.length}` : ""
+  const list = steps.map(
+    (step, index) =>
+      `\n    ${index + 1}. ${STEP[step.state] ?? "○"} ${step.text}（${step.by} ${hhmm(step.updatedAt)}${step.note ? `：${step.note}` : ""}）`,
+  )
+  return `- [${task.id}] ${task.title} · ${TASK[task.status] ?? task.status} · ${owner}${progress}${list.join("")}`
 }
+
+const ATTACHMENT = { file: "文件", dir: "文件夹", image: "图片" }
 
 function messageLine(message, mine) {
   if (message.kind === "system") return `  · ${clip(message.text, 200)}`
@@ -237,7 +253,13 @@ function messageLine(message, mine) {
   const head = message.kind === "handoff" && message.handoff
     ? `${message.handoff.fromName} → ${message.handoff.toName}（交接「${message.handoff.taskTitle}」）`
     : message.authorName
-  return `${flag} [${message.id}] ${head}：${clip(message.text, 600)}`
+  const files = (message.attachments ?? []).map((item) => `\n    附件（${ATTACHMENT[item.kind] ?? "文件"}）：${item.path}`).join("")
+  const reply = message.reply
+    ? `（回复 [${message.reply.id}] ${message.reply.authorName}：${message.reply.gist}）`
+    : message.replyTo
+      ? `（回复 [${message.replyTo}]）`
+      : ""
+  return `${flag} [${message.id}] ${head}${reply}：${clip(message.text, 600)}${files}`
 }
 
 function roomPath(project) {
@@ -291,6 +313,20 @@ const tools = [
     },
   },
   {
+    name: "bench_messages",
+    description:
+      "按结构化数据读房间的群聊，和人在页面上看到的一样全：每条有 id、作者（human / agent / room）、正文、点了谁、回复的是哪条（replyTo 和摘要）、附件、交接、是否结束本轮。默认最近 50 条；chain 取某条消息所在的整条回复链；about 只看和某个席位有关的；before 往前翻。",
+    inputSchema: {
+      type: "object",
+      properties: {
+        chain: { type: "string", description: "消息 id（m_…）：取它所在的整条回复链" },
+        about: { type: "string", description: "席位名：只看他说的、点到他的、和他有关的交接" },
+        before: { type: "number", description: "只看 seq 小于这个数的，往前翻页时填上一页最早那条的 seq" },
+        limit: { type: "number", description: "最多几条，默认 50，最多 200" },
+      },
+    },
+  },
+  {
     name: "bench_wait",
     description:
       `待命：挂起，直到有人在房间里点你（@、交接、回复你）才返回，最长约 ${WAIT_SEC} 秒。只在用户明确让你「守着房间 / 待命」时使用。返回后先处理点给你的消息（★），用 bench_say 回复，再调用 bench_wait 继续待命；超时返回就直接再调用。用户在这个窗口里跟你说话或让你停下，就不要再调用。被房间唤起的一次性会话里不要用。`,
@@ -309,6 +345,11 @@ const tools = [
       properties: {
         text: { type: "string", description: "要说的话，最长 4000 字" },
         replyTo: { type: "string", description: "要回复的消息 id（bench_inbox 里方括号里的 m_…）" },
+        end: {
+          type: "boolean",
+          description:
+            "true 表示这一轮交接已经完成：这句不会 @ 任何人，之后 agent 之间不再互相唤起，等用户发话再继续。只在确实没人需要再接手时用。",
+        },
       },
       required: ["text"],
     },
@@ -327,15 +368,33 @@ const tools = [
   },
   {
     name: "bench_task",
-    description: "建一条任务。title 写这阶段要交出来的东西；指定 owner 就直接交给那个席位。",
+    description:
+      "建一条待办（任务），显示在房间右栏。用户要做新功能时必须先建：title 写功能，steps 拆成几步，owner 填自己。之后用 bench_step 一步一步推进。",
     inputSchema: {
       type: "object",
       properties: {
         title: { type: "string" },
         detail: { type: "string" },
         owner: { type: "string", description: "席位名" },
+        steps: { type: "array", items: { type: "string" }, description: "拆好的步骤，一项一步，按顺序" },
       },
       required: ["title"],
+    },
+  },
+  {
+    name: "bench_step",
+    description:
+      "推进待办的步骤：开始一步时 state 填 doing，做完填 done（note 写做了什么、怎么验的），退回填 todo；add 追加新步骤。每次改动都带时间记在右栏，验收也按这些步骤往下走。",
+    inputSchema: {
+      type: "object",
+      properties: {
+        taskId: { type: "string", description: "t_… 开头的任务 id" },
+        step: { type: "number", description: "第几步，从 1 数" },
+        state: { type: "string", enum: ["todo", "doing", "done"] },
+        note: { type: "string", description: "这一步的说明" },
+        add: { type: "array", items: { type: "string" }, description: "追加的步骤" },
+      },
+      required: ["taskId"],
     },
   },
   {
@@ -506,18 +565,38 @@ async function runTool(name, args = {}, signal) {
       return wait(args, signal)
     case "bench_join":
       return join(args)
+    case "bench_messages": {
+      const data = await seatCall("/api/v1/messages", {
+        chain: args.chain || undefined,
+        about: args.about || undefined,
+        before: args.before || undefined,
+        limit: args.limit || undefined,
+      })
+      return JSON.stringify(data, null, 1)
+    }
     case "bench_inbox":
       return inbox(args)
     case "bench_say": {
-      const data = await seatCall("/api/v1/say", { text: args.text, replyTo: args.replyTo || undefined })
-      return `已发出 [${data.message.id}]。`
+      const data = await seatCall("/api/v1/say", {
+        text: args.text,
+        replyTo: args.replyTo || undefined,
+        end: args.end === true || undefined,
+      })
+      return data.message.end
+        ? `已发出 [${data.message.id}]，本轮结束：agent 之间不再互相唤起，等用户发话。`
+        : `已发出 [${data.message.id}]。`
     }
     case "bench_status": {
       await seatCall("/api/v1/pulse", { status: args.status, doing: args.doing ?? "" })
       return `状态：${STATUS[args.status] ?? args.status}${args.doing ? ` · ${args.doing}` : ""}`
     }
     case "bench_task": {
-      const data = await seatCall("/api/v1/tasks", { title: args.title, detail: args.detail, owner: args.owner || undefined })
+      const data = await seatCall("/api/v1/tasks", {
+        title: args.title,
+        detail: args.detail,
+        owner: args.owner || undefined,
+        steps: args.steps,
+      })
       return `建好了：${taskLine(data.task).slice(2)}`
     }
     case "bench_task_update": {
@@ -530,6 +609,18 @@ async function runTool(name, args = {}, signal) {
         done: args.done,
         left: args.left,
         caveats: args.caveats,
+      })
+      return `好了：${taskLine(data.task).slice(2)}`
+    }
+    case "bench_step": {
+      const id = String(args.taskId ?? "")
+      if (!/^t_[A-Za-z0-9]+$/.test(id)) throw new RoomError(400, "taskId 应该是 t_ 开头的任务 id")
+      const data = await seatCall(`/api/v1/tasks/${id}`, {
+        action: "step",
+        step: args.step,
+        state: args.state,
+        note: args.note,
+        add: args.add,
       })
       return `好了：${taskLine(data.task).slice(2)}`
     }

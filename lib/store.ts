@@ -1,7 +1,7 @@
 import { AsyncLocalStorage } from "node:async_hooks"
 import { randomBytes } from "node:crypto"
 import { EventEmitter } from "node:events"
-import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs"
+import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs"
 import { homedir } from "node:os"
 import path from "node:path"
 
@@ -9,9 +9,10 @@ import { hasAdapter } from "@/lib/adapters"
 import { ApiError, asRecord, asString } from "@/lib/http"
 import { activeRun } from "@/lib/runs"
 import { liveStatus } from "@/lib/status"
-import { mentionedAgentIds, mentionPattern, namedAgentIds } from "@/lib/text"
+import { mentionedAgentIds, mentionPattern, namedAgentIds, withAttachments } from "@/lib/text"
 import type {
   Actor,
+  Attachment,
   AgentStatus,
   Message,
   Project,
@@ -21,6 +22,8 @@ import type {
   RoomSummary,
   Task,
   TaskStatus,
+  TaskStep,
+  TaskStepState,
 } from "@/lib/types"
 
 const STALE_MS = 40_000
@@ -39,6 +42,9 @@ const NAME_RE = /^[\p{L}\p{N}_-]{1,24}$/u
 const UUID_RE = /^[A-Za-z0-9._-]{1,128}$/
 const STATUSES = new Set<AgentStatus>(["idle", "working", "blocked", "offline"])
 const TASK_STATUSES = new Set<TaskStatus>(["open", "doing", "blocked", "done"])
+const STEP_STATES = new Set<TaskStepState>(["todo", "doing", "done"])
+const STEP_ACTION: Record<TaskStepState, string> = { todo: "退回", doing: "开始", done: "做完" }
+const MAX_STEPS = 30
 // How much talk a woken seat is handed at most (about 100 messages). Once this
 // much has piled up since the last summary, the room suggests writing one.
 export const CATCH_UP_CHARS = 10_000
@@ -70,6 +76,8 @@ type State = {
   summary?: RoomSummary
   // The user chose not to summarize talk up to this seq.
   summarySkipSeq?: number
+  // An agent ended the round: agent messages wake nobody until the user speaks.
+  relayClosed?: boolean
 }
 
 // One room per project: its own seats, talk, tasks and summary. A session
@@ -440,7 +448,7 @@ function sortTasks(tasks: Task[]) {
 export function snapshot(): RoomSnapshot {
   const state = room().state
   const talk = talkSince(summaryBase())
-  const chars = talk.reduce((sum, message) => sum + message.text.length, 0)
+  const chars = talk.reduce((sum, message) => sum + withAttachments(message.text, message.attachments).length, 0)
   return {
     project: projectInfo(room().id),
     agents: sortAgents(state.agents.map((agent) => present(agent))),
@@ -452,6 +460,7 @@ export function snapshot(): RoomSnapshot {
     sinceSummary: { count: talk.length, chars },
     summaryDue: chars >= CATCH_UP_CHARS,
     summaryWriter: room().summaryJob?.agentId ?? null,
+    relayClosed: room().state.relayClosed === true,
   }
 }
 
@@ -464,9 +473,110 @@ function talkSince(after: number) {
   return room().state.messages.filter((message) => message.seq > after && message.kind !== "system")
 }
 
-function talkLine(message: Message) {
+// A message as an agent reads it: its id, so it can answer that one, and
+// what it was answering. The summary writer gets them without ids.
+function talkLine(message: Message, ids = true) {
   const time = new Date(message.createdAt).toTimeString().slice(0, 5)
-  return `${time} ${message.authorName}：${message.text}`
+  const head = ids ? `${time} [${message.id}] ${message.authorName}` : `${time} ${message.authorName}`
+  const answer = replyOf(message)
+  const hint = answer ? `（回复${ids ? ` [${answer.id}]` : ""} ${answer.authorName}：${answer.gist}）` : ""
+  return `${head}${hint}：${withAttachments(message.text, message.attachments)}`
+}
+
+// One line of a message, enough to tell which one is meant.
+function gist(message: Message) {
+  const line = message.text.replace(/\s+/g, " ").trim()
+  if (!line) return message.attachments?.length ? `[附件 ${message.attachments.length} 个]` : ""
+  return line.length > 30 ? `${line.slice(0, 30)}…` : line
+}
+
+// The message this one answers, if it is still in the room.
+function replyOf(message: Message) {
+  if (!message.replyTo) return undefined
+  const target = room().state.messages.find((item) => item.id === message.replyTo)
+  return target ? { id: target.id, authorName: target.authorName, gist: gist(target) } : undefined
+}
+
+function withReply(message: Message) {
+  const reply = replyOf(message)
+  return reply ? { ...message, reply } : message
+}
+
+// The first message of the reply chain this one belongs to.
+function chainRoot(message: Message, byId: Map<string, Message>) {
+  let at = message
+  const seen = new Set<string>()
+  while (at.replyTo && !seen.has(at.id)) {
+    seen.add(at.id)
+    const up = byId.get(at.replyTo)
+    if (!up || up.kind === "system") break
+    at = up
+  }
+  return at.id
+}
+
+// A message as data, for an agent that wants the whole thread the way the
+// page shows it: who said it (a person, an agent or the room), whom it calls,
+// what it answers, what it carries.
+function structured(message: Message) {
+  const names = (ids: string[]) => ids.map((id) => findAgent(id)?.name ?? id)
+  return {
+    id: message.id,
+    seq: message.seq,
+    kind: message.kind,
+    at: new Date(message.createdAt).toISOString(),
+    author: {
+      id: message.authorId,
+      name: message.authorName,
+      type: message.authorId === "human" ? "human" : message.authorId === "room" ? "room" : "agent",
+    },
+    text: message.text,
+    mentions: names(message.mentions),
+    replyTo: message.replyTo,
+    reply: replyOf(message),
+    attachments: message.attachments,
+    taskId: message.taskId,
+    handoff: message.handoff,
+    end: message.end,
+  }
+}
+
+const MESSAGES_LIMIT = 200
+
+// The room's talk as data. `chain`: every message of the reply chain that
+// message is in. `about`: what a seat said, was called in, or handed on.
+// `before`: only messages older than that seq, to page back. Newest `limit` kept.
+export function messagesFor(input: unknown) {
+  const body = asRecord(input)
+  actorFrom(body)
+  const all = room().state.messages
+  let list = all
+  const chain = asString(body.chain)
+  if (chain) {
+    const byId = new Map(all.map((message) => [message.id, message]))
+    const start = byId.get(chain)
+    if (!start) throw new ApiError(404, "这条消息不在房间里了")
+    const root = chainRoot(start, byId)
+    list = all.filter((message) => message.kind !== "system" && chainRoot(message, byId) === root)
+  }
+  const about = asString(body.about)
+  if (about) {
+    const seat = resolveAgent(about)
+    if (!seat) throw new ApiError(404, `没有叫 ${about} 的席位`)
+    list = list.filter(
+      (message) =>
+        message.authorId === seat.id ||
+        message.mentions.includes(seat.id) ||
+        message.handoff?.fromId === seat.id ||
+        message.handoff?.toId === seat.id,
+    )
+  }
+  const before = Number(body.before ?? 0)
+  if (Number.isFinite(before) && before > 0) list = list.filter((message) => message.seq < before)
+  const asked = Number(body.limit ?? 50)
+  const limit = Math.min(MESSAGES_LIMIT, Math.max(1, Number.isFinite(asked) ? Math.floor(asked) : 50))
+  const page = list.slice(-limit)
+  return { messages: page.map(structured), hasMore: list.length > page.length, roomSeq: room().state.seq }
 }
 
 function bumpRev() {
@@ -591,6 +701,26 @@ function actorFrom(input: unknown): Actor {
   }
   if (body.as === "human") return { type: "human", id: "human", name: "jinbao" }
   throw new ApiError(400, "要带 agentId 和 token，或标明 as 为 human")
+}
+
+const IMAGE_RE = /\.(png|jpe?g|gif|webp|bmp|avif)$/i
+
+// Paths that exist on this computer, at most 10 to a message.
+function attachmentsOf(value: unknown): Attachment[] | undefined {
+  if (value == null) return undefined
+  if (!Array.isArray(value)) throw new ApiError(400, "attachments 要是数组")
+  if (value.length > 10) throw new ApiError(400, "一条消息最多带 10 个附件")
+  const list = value.map((item) => {
+    const entry = asRecord(item)
+    const file = asString(entry.path) ?? ""
+    const stat = path.isAbsolute(file) ? statSync(file, { throwIfNoEntry: false }) : undefined
+    if (!stat) throw new ApiError(400, `附件不存在：${file || "（没有路径）"}`)
+    // What it is comes from the disk, not from what the caller said.
+    const kind = stat.isDirectory() ? "dir" : IMAGE_RE.test(file) ? "image" : "file"
+    const name = clip(asString(entry.name) || path.basename(file), 120)
+    return { kind, name, path: path.resolve(file), size: stat.isDirectory() ? undefined : stat.size } as Attachment
+  })
+  return list.length ? list : undefined
 }
 
 function clip(value: string, max: number) {
@@ -798,6 +928,13 @@ export function summonCandidates(message: Message) {
   if (message.kind === "system") return []
   const ids = new Set(namedAgentIds(message.text, room().state.agents))
   if (message.handoff?.toId) ids.add(message.handoff.toId)
+  // The user replying to an agent calls it, no @ needed. Between agents a
+  // reply alone doesn't: every wake's answer replies to what woke it, and
+  // that would bounce back and forth.
+  if (message.authorId === "human" && message.replyTo) {
+    const answered = room().state.messages.find((item) => item.id === message.replyTo)
+    if (answered && findAgent(answered.authorId)) ids.add(answered.authorId)
+  }
   ids.delete(message.authorId)
   const found: { id: string; name: string; agentName?: string; session?: string }[] = []
   for (const id of ids) {
@@ -854,13 +991,24 @@ export function touch(id: string) {
 export function say(input: unknown) {
   const body = asRecord(input)
   const actor = actorFrom(body)
-  const text = asString(body.text)
-  if (!text) throw new ApiError(400, "消息是空的")
-  const replyTo = asString(body.replyTo)
-  if (replyTo && !room().state.messages.some((message) => message.id === replyTo)) {
+  const attachments = attachmentsOf(body.attachments)
+  const text = asString(body.text) ?? ""
+  if (!text.trim() && !attachments) throw new ApiError(400, "消息是空的")
+  const asked = asString(body.replyTo)
+  const there = (id?: string) => Boolean(id) && room().state.messages.some((message) => message.id === id)
+  if (asked && !there(asked)) {
     throw new ApiError(404, "要回复的那条消息不在了")
   }
   const agent = actor.type === "agent" ? findAgent(actor.id) : undefined
+  // Said during a wake without naming a message: it answers what woke the seat.
+  const woke = agent ? activeRun(agent.id)?.replyTo : undefined
+  const replyTo = asked ?? (there(woke) ? woke : undefined)
+  // Ending the round is said in the open, starts with the marker, and calls
+  // nobody; from then on agents' messages wake no one until the user speaks.
+  const end = Boolean(agent) && (body.end === true || text.startsWith(END_MARK))
+  const said = end ? { text: clip(text.startsWith(END_MARK) ? text : `${END_MARK}${text}`, 4000), mentions: [] } : lockMentions(clip(text, 4000))
+  if (end) room().state.relayClosed = true
+  else if (actor.type === "human") room().state.relayClosed = undefined
   const message = appendMessage({
     kind: "chat",
     authorId: actor.id,
@@ -868,8 +1016,10 @@ export function say(input: unknown) {
     authorModel: agent?.model,
     authorColor: agent?.color ?? "#1f1a14",
     authorDemo: agent?.demo ?? false,
-    ...lockMentions(clip(text, 4000)),
+    ...said,
+    attachments,
     replyTo,
+    end: end || undefined,
     // Said during a wake, by stdout or by its own bench_say: tie it to the steps.
     runId: agent ? activeRun(agent.id)?.id : undefined,
   })
@@ -877,6 +1027,12 @@ export function say(input: unknown) {
   commit()
   runtime().bus.emit("message", message)
   return { message }
+}
+
+export const END_MARK = "【本轮结束】"
+
+export function relayClosed() {
+  return room().state.relayClosed === true
 }
 
 export function postSystem(text: string) {
@@ -933,8 +1089,8 @@ export function inbox(input: unknown) {
     needsSession: !agent.demo && !(agent.agentName && agent.session),
     peers: view.agents.filter((item) => item.id !== agent.id),
     tasks: view.tasks,
-    messages: fresh,
-    forYou,
+    messages: fresh.map(withReply),
+    forYou: forYou.map(withReply),
     seq: cursor,
     roomSeq: view.seq,
     hasMore: pending.length > fresh.length,
@@ -974,7 +1130,7 @@ export function summarySource() {
   const lines: string[] = []
   let size = 0
   for (let index = talk.length - 1; index >= 0; index--) {
-    const line = talkLine(talk[index])
+    const line = talkLine(talk[index], false)
     if (lines.length > 0 && size + line.length > SUMMARY_SOURCE_CHARS) break
     lines.unshift(line)
     size += line.length
@@ -1072,6 +1228,17 @@ export function actOnTaskAs(
   return actOnTask(withActor(actor, input))
 }
 
+// Step texts as given, one per item: a list of strings, or lines of one string.
+function stepsFrom(value: unknown, by: string, now: number): TaskStep[] {
+  if (value == null) return []
+  const texts = Array.isArray(value) ? value : typeof value === "string" ? value.split("\n") : null
+  if (!texts) throw new ApiError(400, "steps 要是字符串数组，或一行一步的字符串")
+  return texts
+    .map((item) => asString(item))
+    .filter((text): text is string => Boolean(text))
+    .map((text) => ({ id: uid("s"), text: clip(text, 120), state: "todo", by, at: now, updatedAt: now }))
+}
+
 export function createTask(input: unknown) {
   const body = asRecord(input)
   const actor = actorFrom(body)
@@ -1086,6 +1253,8 @@ export function createTask(input: unknown) {
   const owner = ownerRef ? resolveAgent(ownerRef) : null
   if (ownerRef && !owner) throw new ApiError(404, `没有叫 ${ownerRef} 的席位`)
   const status = statusInput ?? (owner ? "doing" : "open")
+  const steps = stepsFrom(body.steps, actor.name, Date.now())
+  if (steps.length > MAX_STEPS) throw new ApiError(400, `一条待办最多 ${MAX_STEPS} 步`)
   const task: Task = {
     id: uid("t"),
     seq: nextSeq(),
@@ -1097,6 +1266,7 @@ export function createTask(input: unknown) {
     createdById: actor.id,
     createdByName: actor.name,
     updatedAt: Date.now(),
+    steps: steps.length ? steps : undefined,
     history: [
       {
         at: Date.now(),
@@ -1174,6 +1344,7 @@ export function actOnTask(input: unknown) {
       note: sheet || `交给 ${to.name}`,
     })
     const fromAgent = actor.type === "agent" ? findAgent(actor.id) : undefined
+    if (actor.type === "human") room().state.relayClosed = undefined
     const message = appendMessage({
       kind: "handoff",
       authorId: actor.id,
@@ -1197,8 +1368,40 @@ export function actOnTask(input: unknown) {
     commit()
     runtime().bus.emit("message", message)
     return { task, message }
+  } else if (action === "step") {
+    // The to-do list: add steps, and/or move one along. `step` is its number
+    // (from 1) or id; `state` is todo, doing or done.
+    const steps = (task.steps ??= [])
+    const added = stepsFrom(body.add, actor.name, now)
+    if (steps.length + added.length > MAX_STEPS) throw new ApiError(400, `一条待办最多 ${MAX_STEPS} 步`)
+    const ref = body.step
+    if (added.length === 0 && ref == null) throw new ApiError(400, "要么用 add 加步骤，要么用 step 和 state 推进一步")
+    steps.push(...added)
+    if (added.length) {
+      task.history.push({ at: now, actor: actor.name, action: "加步骤", note: added.map((step) => step.text).join("；") })
+    }
+    if (ref != null) {
+      const number = Number(ref)
+      const index = Number.isInteger(number) ? number - 1 : steps.findIndex((step) => step.id === ref)
+      const step = steps[index]
+      if (!step) throw new ApiError(404, `没有第 ${String(ref)} 步`)
+      const state = asString(body.state) as TaskStepState | undefined
+      if (!state || !STEP_STATES.has(state)) throw new ApiError(400, "state 只能是 todo、doing 或 done")
+      step.state = state
+      step.by = actor.name
+      step.updatedAt = now
+      step.doneAt = state === "done" ? now : undefined
+      step.note = note || undefined
+      task.history.push({
+        at: now,
+        actor: actor.name,
+        action: `${STEP_ACTION[state]}第 ${index + 1} 步`,
+        note: note ? `${step.text}（${note}）` : step.text,
+      })
+      if (task.status === "open" && state !== "todo") task.status = "doing"
+    }
   } else {
-    throw new ApiError(400, "action 只能是 claim、done、block 或 handoff")
+    throw new ApiError(400, "action 只能是 claim、done、block、handoff 或 step")
   }
 
   task.updatedAt = now

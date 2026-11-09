@@ -12,6 +12,16 @@ export function shortText(text: string): string {
   return cut.length > 28 ? `${cut.slice(0, 28)}…` : cut
 }
 
+const ATTACHMENT_LABEL = { file: "文件", dir: "文件夹", image: "图片" } as const
+
+// A message as an agent reads it: its attachments follow as paths it can
+// open with its own tools.
+export function withAttachments(text: string, attachments?: { kind: keyof typeof ATTACHMENT_LABEL; path: string }[]) {
+  if (!attachments?.length) return text
+  const lines = attachments.map((item) => `附件（${ATTACHMENT_LABEL[item.kind]}）：${item.path}`)
+  return [text, ...lines].filter(Boolean).join("\n")
+}
+
 // `@name` as a whole word, every occurrence.
 export function mentionPattern(name: string) {
   return new RegExp(`@${escapeRegExp(name)}(?![\\p{L}\\p{N}_-])`, "gu")

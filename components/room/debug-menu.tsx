@@ -77,6 +77,7 @@ export function DebugMenu({
   onForget,
   onClearSummary,
   onClearSnooze,
+  onSummaryDone,
 }: {
   view: DebugView
   agents: PublicAgent[]
@@ -86,6 +87,7 @@ export function DebugMenu({
   onForget: (agent: PublicAgent) => void
   onClearSummary: () => void
   onClearSnooze: () => void
+  onSummaryDone: () => void
 }) {
   const changed = view.nudge || view.writing || view.status !== "real"
   return (
@@ -128,6 +130,7 @@ export function DebugMenu({
               <DropdownMenuLabel className="font-normal">从「在做」切走会先放完成动画</DropdownMenuLabel>
             </DropdownMenuSubContent>
           </DropdownMenuSub>
+          <DropdownMenuItem onClick={onSummaryDone}>放一次「摘要写好了」动效</DropdownMenuItem>
           <DropdownMenuItem onClick={onClearSnooze}>清掉「稍后提醒」</DropdownMenuItem>
           {changed ? <DropdownMenuItem onClick={() => onView(NO_DEBUG)}>全部恢复</DropdownMenuItem> : null}
         </DropdownMenuGroup>

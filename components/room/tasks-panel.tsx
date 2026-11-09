@@ -1,5 +1,7 @@
 import { useState } from "react"
+import { Check, ChevronDown } from "lucide-react"
 
+import { Reveal } from "@/components/room/reveal"
 import { Button } from "@/components/ui/button"
 import {
   DropdownMenu,
@@ -8,6 +10,7 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu"
 import { Input } from "@/components/ui/input"
+import { Textarea } from "@/components/ui/textarea"
 import {
   Select,
   SelectContent,
@@ -15,8 +18,8 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select"
-import { TASK_STATUS_LABEL } from "@/lib/status"
-import type { PublicAgent, Task, TaskStatus } from "@/lib/types"
+import { TASK_STATUS_LABEL, clock } from "@/lib/status"
+import type { PublicAgent, Task, TaskStatus, TaskStep, TaskStepState } from "@/lib/types"
 
 // Each status gets its own paper color; the tilt cycles so a stack of notes
 // doesn't line up.
@@ -38,6 +41,7 @@ export function TasksPanel({
   onCreate,
   onAskHandoff,
   onStatus,
+  onStep,
   header,
 }: {
   tasks: Task[]
@@ -46,11 +50,13 @@ export function TasksPanel({
   busy: boolean
   // Shown above the new-task form, such as the room summary.
   header?: React.ReactNode
-  onCreate: (title: string, ownerId: string | null) => void
+  onCreate: (title: string, ownerId: string | null, steps: string[]) => void
   onAskHandoff: (task: Task, agent: PublicAgent) => void
   onStatus: (task: Task, action: "done" | "block") => void
+  onStep: (task: Task, step: number, state: TaskStepState) => void
 }) {
   const [title, setTitle] = useState("")
+  const [steps, setSteps] = useState("")
   const [owner, setOwner] = useState("none")
   const active = tasks.filter((task) => task.status !== "done")
   const done = tasks.filter((task) => task.status === "done")
@@ -65,7 +71,7 @@ export function TasksPanel({
   return (
     <div className="flex h-full min-h-0 flex-col">
       <div className="flex items-baseline justify-between px-4 pt-3 pb-3">
-        <h2 className="text-xs font-semibold tracking-wider text-muted-foreground uppercase">分工</h2>
+        <h2 className="text-xs font-semibold tracking-wider text-muted-foreground uppercase">待办</h2>
         <span className="text-[11px] text-muted-foreground">
           {active.length} 进行中{done.length > 0 ? ` · ${done.length} 完成` : ""}
         </span>
@@ -78,17 +84,30 @@ export function TasksPanel({
         onSubmit={(event) => {
           event.preventDefault()
           if (!title.trim()) return
-          onCreate(title.trim(), owner === "none" ? null : owner)
+          const list = steps
+            .split("\n")
+            .map((line) => line.trim())
+            .filter(Boolean)
+          onCreate(title.trim(), owner === "none" ? null : owner, list)
           setTitle("")
+          setSteps("")
           setOwner("none")
         }}
       >
         <Input
           value={title}
           onChange={(event) => setTitle(event.target.value)}
-          placeholder="新任务：这阶段要交出来的东西"
-          aria-label="任务标题"
+          placeholder="新待办：要做的功能"
+          aria-label="待办标题"
           className="border-0 bg-transparent px-1 shadow-none placeholder:text-current placeholder:opacity-55 focus-visible:ring-0 dark:bg-transparent"
+        />
+        <Textarea
+          value={steps}
+          onChange={(event) => setSteps(event.target.value)}
+          placeholder="拆成几步，一行一步（可以不填）"
+          aria-label="步骤，一行一步"
+          rows={2}
+          className="min-h-0 resize-none border-0 bg-transparent px-1 py-0.5 text-xs shadow-none placeholder:text-current placeholder:opacity-55 focus-visible:ring-0 dark:bg-transparent"
         />
         <div className="flex gap-2">
           <Select items={items} value={owner} onValueChange={(value) => setOwner(value ?? "none")}>
@@ -111,7 +130,7 @@ export function TasksPanel({
       <div className="space-y-5 px-3">
         {tasks.length === 0 ? (
           <div className="rounded-sm border border-dashed border-foreground/15 px-3 py-4 text-xs leading-5 text-muted-foreground">
-            还没有分工。建一条任务并指定负责人，或在对话里 @名字 把活递过去。同一阶段只留一个负责人。
+            还没有待办。写下要做的功能、拆好步骤并指定负责人；在对话里让 AI 做新功能时，它也会自己在这里建一条，做一步勾一步。
           </div>
         ) : null}
         {active.map((task, index) => (
@@ -124,6 +143,7 @@ export function TasksPanel({
             busy={busy}
             onAskHandoff={onAskHandoff}
             onStatus={onStatus}
+            onStep={onStep}
           />
         ))}
         {done.length > 0 ? (
@@ -142,6 +162,7 @@ export function TasksPanel({
                   busy={busy}
                   onAskHandoff={onAskHandoff}
                   onStatus={onStatus}
+                  onStep={onStep}
                 />
               ))}
             </div>
@@ -161,6 +182,7 @@ function TaskCard({
   busy,
   onAskHandoff,
   onStatus,
+  onStep,
 }: {
   tilt: string
   task: Task
@@ -169,6 +191,7 @@ function TaskCard({
   busy: boolean
   onAskHandoff: (task: Task, agent: PublicAgent) => void
   onStatus: (task: Task, action: "done" | "block") => void
+  onStep: (task: Task, step: number, state: TaskStepState) => void
 }) {
   const others = agents.filter((agent) => agent.id !== task.ownerId)
   return (
@@ -189,6 +212,9 @@ function TaskCard({
         {" · "}
         {task.createdByName} 建立
       </p>
+      {task.steps?.length ? (
+        <StepDrawer steps={task.steps} busy={busy} onStep={(step, state) => onStep(task, step, state)} />
+      ) : null}
       {task.brief && task.status !== "done" ? (
         <dl className="mt-2 space-y-1 rounded-sm bg-white/35 px-2 py-1.5 text-[11px] leading-5 dark:bg-black/15">
           <div className="text-muted-foreground">{task.brief.by} 的交接单</div>
@@ -258,5 +284,75 @@ function TaskCard({
         </div>
       ) : null}
     </article>
+  )
+}
+
+const NEXT: Record<TaskStepState, TaskStepState> = { todo: "doing", doing: "done", done: "todo" }
+const STEP_LABEL: Record<TaskStepState, string> = { todo: "待做", doing: "在做", done: "做完" }
+
+// A task's to-do list, folded to one line (how far along, and the step in
+// hand) that opens to every step with who moved it and when. The dot in front
+// of a step moves it along: to do, doing, done, and back.
+function StepDrawer({
+  steps,
+  busy,
+  onStep,
+}: {
+  steps: TaskStep[]
+  busy: boolean
+  onStep: (step: number, state: TaskStepState) => void
+}) {
+  const [open, setOpen] = useState(false)
+  const done = steps.filter((step) => step.state === "done").length
+  const current = steps.find((step) => step.state === "doing") ?? steps.find((step) => step.state === "todo")
+  return (
+    <div className="mt-2 rounded-sm bg-white/35 dark:bg-black/15">
+      <button
+        type="button"
+        className="flex w-full items-center gap-2 px-2 py-1.5 text-left text-[11px]"
+        aria-expanded={open}
+        onClick={() => setOpen((value) => !value)}
+      >
+        <span className="shrink-0 font-medium">
+          步骤 {done}/{steps.length}
+        </span>
+        <span className="h-1 w-10 shrink-0 overflow-hidden rounded-full bg-current/15">
+          <span className="block h-full rounded-full bg-current/60" style={{ width: `${(done / steps.length) * 100}%` }} />
+        </span>
+        <span className="min-w-0 flex-1 truncate text-muted-foreground">
+          {current ? `${current.state === "doing" ? "正在" : "下一步"}：${current.text}` : "全部做完"}
+        </span>
+        <ChevronDown className={`size-3.5 shrink-0 transition-transform ${open ? "rotate-180" : ""}`} />
+      </button>
+      <Reveal open={open}>
+        <ol className="space-y-1 px-2 pb-2 text-[11px] leading-5">
+          {steps.map((step, index) => (
+            <li key={step.id} className="flex gap-1.5">
+              <button
+                type="button"
+                className={`mt-0.5 grid size-4 shrink-0 place-items-center rounded-full border border-current/35 ${
+                  step.state === "done" ? "bg-current/70" : step.state === "doing" ? "bg-current/25" : ""
+                }`}
+                title={`${STEP_LABEL[step.state]}，点一下改成${STEP_LABEL[NEXT[step.state]]}`}
+                aria-label={`第 ${index + 1} 步${STEP_LABEL[step.state]}，改成${STEP_LABEL[NEXT[step.state]]}`}
+                disabled={busy}
+                onClick={() => onStep(index + 1, NEXT[step.state])}
+              >
+                {step.state === "done" ? <Check className="size-2.5 text-background" /> : null}
+              </button>
+              <div className="min-w-0 flex-1">
+                <p className={step.state === "done" ? "line-through opacity-60" : step.state === "doing" ? "font-medium" : ""}>
+                  {index + 1}. {step.text}
+                </p>
+                <p className="text-muted-foreground">
+                  {STEP_LABEL[step.state]} · {step.by} {clock(step.updatedAt)}
+                  {step.note ? `：${step.note}` : ""}
+                </p>
+              </div>
+            </li>
+          ))}
+        </ol>
+      </Reveal>
+    </div>
   )
 }

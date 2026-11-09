@@ -1,9 +1,12 @@
 import { useEffect, useMemo, useRef, useState } from "react"
-import { Send, X } from "lucide-react"
+import { File, Folder, Paperclip, Send, X } from "lucide-react"
+import { toast } from "sonner"
 
+import { PendingFiles, pickPaths, previewText, uploadFile, type Pending } from "@/components/room/attachments"
 import { Avatar, seatLook } from "@/components/room/bits"
 import { Reveal } from "@/components/room/reveal"
 import { Button } from "@/components/ui/button"
+import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from "@/components/ui/dropdown-menu"
 import { Label } from "@/components/ui/label"
 import { Textarea } from "@/components/ui/textarea"
 import { KINDS, kindOf } from "@/lib/kinds"
@@ -35,6 +38,8 @@ export function Composer({
   onSend,
   onClearReply,
   notice,
+  files,
+  onFiles,
 }: {
   agents: PublicAgent[]
   value: string
@@ -46,8 +51,41 @@ export function Composer({
   onClearReply: () => void
   // Shown just above the input, such as the summary reminder.
   notice?: React.ReactNode
+  // Attachments going out with the next message.
+  files: Pending[]
+  onFiles: (update: (current: Pending[]) => Pending[]) => void
 }) {
   const [picked, setPicked] = useState(false)
+  const [dragging, setDragging] = useState(false)
+  const uploading = files.some((item) => item.uploading)
+
+  // Pasted or dropped: shown at once, then swapped for the saved copy.
+  function addBlobs(list: FileList | File[]) {
+    for (const file of Array.from(list)) {
+      const key = `uploading:${Math.random().toString(36).slice(2)}`
+      const preview = file.type.startsWith("image/") ? URL.createObjectURL(file) : undefined
+      onFiles((current) => [
+        ...current,
+        { kind: preview ? "image" : "file", name: file.name || "粘贴的图片", path: key, size: file.size, preview, uploading: true },
+      ])
+      uploadFile(file)
+        .then((saved) => onFiles((current) => current.map((item) => (item.path === key ? { ...saved, preview } : item))))
+        .catch((error: unknown) => {
+          onFiles((current) => current.filter((item) => item.path !== key))
+          toast.error(error instanceof Error ? error.message : "没传上")
+        })
+    }
+    inputRef.current?.focus()
+  }
+
+  function pick(kind: "files" | "dirs") {
+    pickPaths(kind)
+      .then((chosen) => {
+        if (chosen.length) onFiles((current) => [...current, ...chosen])
+        inputRef.current?.focus()
+      })
+      .catch((error: unknown) => toast.error(error instanceof Error ? error.message : "没打开选择窗口"))
+  }
   const formRef = useRef<HTMLFormElement>(null)
 
   // The composer floats over the thread; tell the thread how much room to
@@ -78,12 +116,14 @@ export function Composer({
     agents.map((agent) => agent.name),
   )
 
-  // One quick target per kind: the seat that is online, else the one that can be woken.
+  // Quick targets: every seat that is online or can be woken, so two sessions
+  // of the same kind are two chips; a kind with none of those still gets its
+  // first seat. A kind with one chip reads as the kind, several by seat name.
   const targets = KINDS.flatMap((kind) => {
     const seats = agents.filter((agent) => kindOf(agent)?.id === kind.id)
-    const seat =
-      seats.find((agent) => agent.status !== "offline") ?? seats.find((agent) => agent.callable) ?? seats[0]
-    return seat ? [{ kind, seat }] : []
+    const reachable = seats.filter((agent) => agent.status !== "offline" || agent.callable)
+    const picked = reachable.length > 0 ? reachable : seats.slice(0, 1)
+    return picked.map((seat) => ({ kind, seat, label: picked.length > 1 ? seat.name : kind.label }))
   })
 
   function insert(name: string) {
@@ -103,14 +143,33 @@ export function Composer({
     >
       {notice ? <div className="mx-auto max-w-3xl">{notice}</div> : null}
       <div
-        className="raised mx-auto max-w-3xl rounded-[22px] transition-shadow focus-within:ring-3 focus-within:ring-ring/20"
+        className={`raised mx-auto max-w-3xl rounded-[22px] transition-shadow focus-within:ring-3 focus-within:ring-ring/20 ${
+          dragging ? "ring-3 ring-primary/40" : ""
+        }`}
+        onDragOver={(event) => {
+          if (!event.dataTransfer.types.includes("Files")) return
+          event.preventDefault()
+          setDragging(true)
+        }}
+        onDragLeave={(event) => {
+          if (!event.currentTarget.contains(event.relatedTarget as Node | null)) setDragging(false)
+        }}
+        onDrop={(event) => {
+          if (!event.dataTransfer.files.length) return
+          event.preventDefault()
+          setDragging(false)
+          addBlobs(event.dataTransfer.files)
+        }}
       >
         <Reveal open={reply !== null}>
           {reply ? (
             <div className="flex items-center gap-2 border-b border-foreground/8 px-3.5 py-2 text-xs text-muted-foreground">
               <span className="min-w-0 flex-1 truncate">
-                回复 <span className="font-medium text-foreground">{reply.authorName}</span>：{reply.text}
+                回复 <span className="font-medium text-foreground">{reply.authorName}</span>：{previewText(reply)}
               </span>
+              {agents.some((agent) => agent.id === reply.authorId) ? (
+                <span className="shrink-0 text-[11px]">发出去就会叫醒它，不用 @</span>
+              ) : null}
               <button type="button" className="rounded p-0.5 hover:bg-muted" onClick={onClearReply} aria-label="取消回复">
                 <X className="size-3.5" />
               </button>
@@ -136,6 +195,16 @@ export function Composer({
             })}
           </div>
         </Reveal>
+        <PendingFiles
+          files={files}
+          onRemove={(index) =>
+            onFiles((current) => {
+              const gone = current[index]
+              if (gone?.preview) URL.revokeObjectURL(gone.preview)
+              return current.filter((_, at) => at !== index)
+            })
+          }
+        />
         <Label htmlFor="composer" className="sr-only">
           发给房间
         </Label>
@@ -143,11 +212,16 @@ export function Composer({
           ref={inputRef}
           id="composer"
           value={value}
-          placeholder="说点什么，@ 谁就唤起谁 · Enter 发送，Shift+Enter 换行"
+          placeholder={dragging ? "松手就附上" : "说点什么，@ 谁就唤起谁 · 可以粘贴图片、拖文件进来 · Enter 发送"}
           className="max-h-60 min-h-14 resize-none border-0 bg-transparent px-4 pt-3.5 shadow-none placeholder:text-foreground/45 focus-visible:ring-0 dark:bg-transparent"
           onChange={(event) => {
             setPicked(false)
             onChange(event.target.value)
+          }}
+          onPaste={(event) => {
+            if (!event.clipboardData.files.length) return
+            event.preventDefault()
+            addBlobs(event.clipboardData.files)
           }}
           onKeyDown={(event) => {
             if (event.key === "Enter" && !event.shiftKey && !event.nativeEvent.isComposing) {
@@ -161,11 +235,30 @@ export function Composer({
           }}
         />
         <div className="flex items-center gap-2 px-2 pb-2">
+          <DropdownMenu>
+            <DropdownMenuTrigger
+              className="grid size-8 shrink-0 place-items-center rounded-full text-muted-foreground transition-colors hover:bg-foreground/6 hover:text-foreground aria-expanded:bg-foreground/6"
+              aria-label="附上文件或文件夹"
+              title="附上文件或文件夹，也可以直接粘贴图片、拖文件进来"
+            >
+              <Paperclip className="size-4" />
+            </DropdownMenuTrigger>
+            <DropdownMenuContent align="start" side="top" className="min-w-40">
+              <DropdownMenuItem onClick={() => pick("files")}>
+                <File />
+                选文件…
+              </DropdownMenuItem>
+              <DropdownMenuItem onClick={() => pick("dirs")}>
+                <Folder />
+                选文件夹…
+              </DropdownMenuItem>
+            </DropdownMenuContent>
+          </DropdownMenu>
           <div className="-my-1.5 flex min-w-0 flex-1 items-center overflow-x-auto py-1.5">
             <span className="shrink-0 px-1 text-xs text-muted-foreground">发给</span>
-            {targets.map(({ kind, seat }) => (
+            {targets.map(({ kind, seat, label }) => (
               <Pick
-                key={kind.id}
+                key={seat.id}
                 gone={hasMention(value, seat.name)}
                 title={`@${seat.name}`}
                 onPick={() => {
@@ -174,7 +267,7 @@ export function Composer({
                 }}
               >
                 <span className="size-1.5 rounded-full" style={{ background: kind.color }} />
-                {kind.label}
+                {label}
               </Pick>
             ))}
             {agents.length > 1 ? (
@@ -197,7 +290,7 @@ export function Composer({
             type="submit"
             size="icon"
             className="rounded-full shadow-[inset_0_1px_0_0_rgb(255_255_255/0.25)]"
-            disabled={busy || value.trim().length === 0}
+            disabled={busy || uploading || (value.trim().length === 0 && files.length === 0)}
             aria-label="发送"
           >
             <Send />

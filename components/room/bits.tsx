@@ -1,3 +1,5 @@
+import { useEffect, useRef, useState } from "react"
+
 import { Bot } from "@/components/room/bot"
 import { kindOf, type Kind } from "@/lib/kinds"
 import { splitMentions } from "@/lib/text"
@@ -84,6 +86,21 @@ export function seatLook(agent: { name: string; color: string; agentName?: strin
   return { kind, color: kind?.color ?? agent.color, label: kind?.label }
 }
 
+// The thread sticks to its bottom as it grows, which pushes the head of
+// something just opened out of sight. Once that has happened (next frames,
+// and again when a Reveal has finished growing), bring its top back into view.
+export function keepTopInView(node: HTMLElement | null) {
+  const pull = () => {
+    let box = node?.parentElement ?? null
+    while (box && !/auto|scroll/.test(getComputedStyle(box).overflowY)) box = box.parentElement
+    if (!node || !box) return
+    const above = node.getBoundingClientRect().top - box.getBoundingClientRect().top - 40
+    if (above < 0) box.scrollTop += above
+  }
+  requestAnimationFrame(() => requestAnimationFrame(pull))
+  window.setTimeout(pull, 350)
+}
+
 export function MessageBody({
   text,
   names,
@@ -98,17 +115,52 @@ export function MessageBody({
     tone === "inverse"
       ? "rounded px-0.5 font-medium bg-white/18"
       : "rounded px-0.5 font-medium text-mention bg-mention/10"
+  // Long answers fill the whole thread, so anything past four lines folds
+  // until it's opened. Whether it overflows is measured while folded, and
+  // again whenever the bubble's width changes.
+  const ref = useRef<HTMLParagraphElement>(null)
+  const [open, setOpen] = useState(false)
+  const [long, setLong] = useState(false)
+  useEffect(() => {
+    const body = ref.current
+    if (!body || open) return
+    const measure = () => setLong(body.scrollHeight > body.clientHeight + 1)
+    const observer = new ResizeObserver(measure)
+    observer.observe(body)
+    measure()
+    return () => observer.disconnect()
+  }, [open, text])
   return (
-    <p className="text-[0.9rem] leading-relaxed break-words whitespace-pre-wrap">
-      {parts.map((part, index) =>
-        part.mention ? (
-          <span key={`${part.text}-${index}`} className={mentionClass}>
-            {part.text}
-          </span>
-        ) : (
-          <span key={`${index}-${part.text.slice(0, 12)}`}>{part.text}</span>
-        ),
-      )}
-    </p>
+    <>
+      <p
+        ref={ref}
+        className={`text-[0.9rem] leading-relaxed break-words whitespace-pre-wrap ${open ? "" : "line-clamp-4"}`}
+      >
+        {parts.map((part, index) =>
+          part.mention ? (
+            <span key={`${part.text}-${index}`} className={mentionClass}>
+              {part.text}
+            </span>
+          ) : (
+            <span key={`${index}-${part.text.slice(0, 12)}`}>{part.text}</span>
+          ),
+        )}
+      </p>
+      {long ? (
+        <button
+          type="button"
+          className={`mt-0.5 text-xs font-medium underline-offset-2 hover:underline ${
+            tone === "inverse" ? "text-white/90" : "text-muted-foreground"
+          }`}
+          aria-expanded={open}
+          onClick={() => {
+            setOpen(!open)
+            keepTopInView(ref.current)
+          }}
+        >
+          {open ? "收起" : "展开全文"}
+        </button>
+      ) : null}
+    </>
   )
 }

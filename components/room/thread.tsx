@@ -1,8 +1,10 @@
 import { useEffect, useRef, useState, type CSSProperties, type ReactNode } from "react"
-import { ArrowRight, ListTree, Reply, X } from "lucide-react"
+import { ArrowRight, ChevronDown, ListTree, Reply, X } from "lucide-react"
 
-import { Avatar, MessageBody, seatLook } from "@/components/room/bits"
+import { MessageFiles, previewText } from "@/components/room/attachments"
+import { Avatar, keepTopInView, MessageBody, seatLook } from "@/components/room/bits"
 import { DOCK_EVENT } from "@/components/room/composer"
+import { Reveal } from "@/components/room/reveal"
 import { RunTrail } from "@/components/room/run-trail"
 import { clock } from "@/lib/status"
 import type { Message, PublicAgent } from "@/lib/types"
@@ -97,6 +99,37 @@ export function Thread({
     return () => observer.disconnect()
   }, [])
 
+  const row = (message: Message, previous?: Message) => (
+    <MessageRow
+      key={message.id}
+      message={message}
+      previous={previous}
+      messages={messages}
+      agents={agents}
+      names={names}
+      onReply={onReply}
+      onOpenTask={onOpenTask}
+      onOpenRun={onOpenRun}
+      onMention={onMention}
+      detail={detail}
+    />
+  )
+
+  const line = (message: Message, previous: Message | undefined) => (
+    <ChainLine
+      key={message.id}
+      message={message}
+      previous={previous}
+      messages={messages}
+      agents={agents}
+      names={names}
+      detail={detail}
+      onReply={onReply}
+      onOpenRun={onOpenRun}
+      onMention={onMention}
+    />
+  )
+
   // Wakes still going whose reply isn't in yet.
   const posted = new Set(messages.map((message) => message.runId).filter(Boolean))
   const live = agents.filter((agent) => agent.runId && !posted.has(agent.runId))
@@ -152,27 +185,218 @@ export function Thread({
       >
         <div ref={content} className="mx-auto flex max-w-3xl flex-col gap-1 px-4 pt-6 pb-[calc(var(--dock,8rem)+1rem)] md:px-6">
           {!talked ? <Welcome onExample={onExample} /> : null}
-          {messages.map((message, index) => (
-            <MessageRow
-              key={message.id}
-              message={message}
-              previous={messages[index - 1]}
-              messages={messages}
-              agents={agents}
-              names={names}
-              onReply={onReply}
-              onOpenTask={onOpenTask}
-              onOpenRun={onOpenRun}
-              onMention={onMention}
-              detail={detail}
-            />
-          ))}
-          {live.map((agent) => (
-            <LiveRun key={agent.id} agent={agent} detail={detail} onOpenRun={onOpenRun} onMention={onMention} />
-          ))}
+          {threadItems(messages).map((item) =>
+            item.chain ? (
+              <ReplyChain key={item.chain[0].id} chain={item.chain} line={line} />
+            ) : (
+              row(item.message, item.previous)
+            ),
+          )}
+          <LiveDrawer agents={live} detail={detail} onOpenRun={onOpenRun} onMention={onMention} />
         </div>
       </div>
     </div>
+  )
+}
+
+type ThreadItem = { message: Message; previous?: Message; chain?: undefined } | { chain: Message[] }
+
+// Replies gather under the message they started from, into one chain. A
+// chain sits where its latest message landed, so a new reply still turns up
+// at the bottom of the thread, with what it answers right above it.
+function threadItems(messages: Message[]): ThreadItem[] {
+  const byId = new Map(messages.map((message) => [message.id, message]))
+  const rootOf = (message: Message) => {
+    let at = message
+    const seen = new Set<string>()
+    while (at.replyTo && !seen.has(at.id)) {
+      seen.add(at.id)
+      const up = byId.get(at.replyTo)
+      if (!up || up.kind === "system") break
+      at = up
+    }
+    return at.id
+  }
+  const chains = new Map<string, Message[]>()
+  const chainOf = new Map<string, Message[]>()
+  for (const message of messages) {
+    if (message.kind === "system") continue
+    const root = rootOf(message)
+    const chain = chains.get(root) ?? []
+    chain.push(message)
+    chains.set(root, chain)
+    chainOf.set(message.id, chain)
+  }
+  const items: ThreadItem[] = []
+  let previous: Message | undefined
+  for (const message of messages) {
+    const chain = chainOf.get(message.id)
+    if (!chain || chain.length < 2) {
+      items.push({ message, previous })
+      previous = message
+      continue
+    }
+    if (chain[chain.length - 1].id !== message.id) continue
+    items.push({ chain })
+    previous = undefined
+  }
+  return items
+}
+
+// A reply chain reads as one conversation: one card, headed by who took part
+// and when it last moved, every message on its own line, people and agents
+// alike on the left. Folded, it shows the first message and the latest one,
+// with how many sit between.
+function ReplyChain({
+  chain,
+  line,
+}: {
+  chain: Message[]
+  line: (message: Message, previous: Message | undefined) => ReactNode
+}) {
+  const [open, setOpen] = useState(false)
+  const top = useRef<HTMLElement>(null)
+  const [root, ...replies] = chain
+  const middle = replies.slice(0, -1)
+  const last = replies[replies.length - 1]
+  const people = [...new Set(chain.map((message) => message.authorName))]
+  const toggle = () => {
+    setOpen((value) => !value)
+    keepTopInView(top.current)
+  }
+  return (
+    // A solid card, not glass on glass: an opaque face, a rim you can see, a
+    // lift off the backdrop, and a stripe down the left marking one conversation.
+    <section
+      ref={top}
+      className="my-5 overflow-hidden rounded-2xl border border-l-[3px] border-foreground/15 border-l-primary/60 bg-card shadow-[0_1px_2px_rgb(0_0_0/0.06),0_18px_36px_-20px_rgb(0_0_0/0.28)]"
+    >
+      <header className="flex items-center gap-2 border-b border-foreground/10 bg-muted/60 px-4 py-2 text-[11px] text-muted-foreground">
+        <Reply className="size-3 shrink-0" />
+        <span className="min-w-0 flex-1 truncate">
+          <span className="font-medium text-foreground">回复链</span> · {chain.length} 条 · {people.join("、")} · 最新{" "}
+          {clock(last.createdAt)}
+        </span>
+        {middle.length > 0 ? (
+          <button
+            type="button"
+            className="flex shrink-0 items-center gap-0.5 rounded-md px-1 hover:bg-muted hover:text-foreground"
+            aria-expanded={open}
+            onClick={toggle}
+          >
+            {open ? "收起" : "展开全部"}
+            <ChevronDown className={`size-3 transition-transform ${open ? "rotate-180" : ""}`} />
+          </button>
+        ) : null}
+      </header>
+      {line(root, undefined)}
+      {middle.length > 0 ? (
+        <>
+          <Reveal open={!open}>
+            <button
+              type="button"
+              className="flex w-full items-center gap-2 border-t border-foreground/8 px-4 py-1.5 text-[11px] text-muted-foreground hover:bg-muted/60 hover:text-foreground"
+              onClick={toggle}
+            >
+              <span className="h-px flex-1 border-t border-dashed border-current/40" />
+              中间还有 {middle.length} 条
+              <span className="h-px flex-1 border-t border-dashed border-current/40" />
+            </button>
+          </Reveal>
+          <Reveal open={open}>{middle.map((message, index) => line(message, middle[index - 1] ?? root))}</Reveal>
+        </>
+      ) : null}
+      {/* Folded, the latest keeps its quote unless it answers the first message. */}
+      {line(last, open ? (middle[middle.length - 1] ?? root) : root)}
+    </section>
+  )
+}
+
+// One message inside a reply chain: compact, left-aligned for everyone, a
+// quote only when it answers something other than the line above it.
+function ChainLine({
+  message,
+  previous,
+  messages,
+  agents,
+  names,
+  detail,
+  onReply,
+  onOpenRun,
+  onMention,
+}: {
+  message: Message
+  previous: Message | undefined
+  messages: Message[]
+  agents: PublicAgent[]
+  names: string[]
+  detail: boolean
+  onReply: (message: Message) => void
+  onOpenRun: (runId: string) => void
+  onMention: (name: string) => void
+}) {
+  const author = agents.find((agent) => agent.id === message.authorId)
+  const look = seatLook(
+    author ?? { name: message.authorName, color: message.authorColor, model: message.authorModel, demo: message.authorDemo },
+  )
+  const human = message.authorId === "human"
+  const reply =
+    previous && message.replyTo && message.replyTo !== previous.id
+      ? messages.find((item) => item.id === message.replyTo)
+      : undefined
+  const avatar = <Avatar name={message.authorName} color={look.color} label={look.label} kind={look.kind} size="sm" />
+  return (
+    <article className={`flex gap-3 px-4 py-3 ${previous ? "border-t border-foreground/8" : ""} ${human ? "bg-primary/[0.05]" : ""}`}>
+      <div className="w-6 shrink-0 pt-0.5">
+        {author ? (
+          <MentionAvatar name={author.name} onMention={onMention}>
+            {avatar}
+          </MentionAvatar>
+        ) : (
+          avatar
+        )}
+      </div>
+      <div className="min-w-0 flex-1">
+        <p className="flex flex-wrap items-baseline gap-x-2 text-xs">
+          <span className="font-semibold">{message.authorName}</span>
+          {look.kind ? (
+            <span className="font-medium" style={{ color: look.color }}>
+              {look.kind.label}
+            </span>
+          ) : null}
+          <span className="text-muted-foreground">{clock(message.createdAt)}</span>
+        </p>
+        {reply ? <Quote message={reply} align="start" /> : null}
+        {detail && message.runId ? <RunTrail runId={message.runId} answer={message.text} /> : null}
+        {message.text ? (
+          <div className="mt-0.5">
+            <MessageBody text={message.text} names={names} />
+          </div>
+        ) : null}
+        {message.attachments?.length ? <MessageFiles files={message.attachments} /> : null}
+        <div className="mt-0.5 -ml-1 flex items-center gap-1">
+          {message.runId && !detail ? (
+            <button
+              type="button"
+              className="flex items-center gap-1 rounded-md px-1 text-[11px] text-muted-foreground hover:bg-muted hover:text-foreground"
+              onClick={() => message.runId && onOpenRun(message.runId)}
+            >
+              <ListTree className="size-3" />
+              查看过程
+            </button>
+          ) : null}
+          <button
+            type="button"
+            className="flex items-center gap-1 rounded-md px-1 text-[11px] text-muted-foreground hover:bg-muted hover:text-foreground"
+            onClick={() => onReply(message)}
+            aria-label="回复这条"
+          >
+            <Reply className="size-3" />
+            回复
+          </button>
+        </div>
+      </div>
+    </article>
   )
 }
 
@@ -279,35 +503,45 @@ function MessageRow({
     previous.authorId === message.authorId &&
     message.createdAt - previous.createdAt < 5 * 60_000 &&
     !message.replyTo
-  const reply = message.replyTo ? messages.find((item) => item.id === message.replyTo) : undefined
+  // In a chain the message it answers is usually right above it; quote it
+  // only when it isn't.
+  const reply =
+    message.replyTo && message.replyTo !== previous?.id
+      ? messages.find((item) => item.id === message.replyTo)
+      : undefined
   const author = agents.find((agent) => agent.id === message.authorId)
   const look = seatLook(
     author ?? { name: message.authorName, color: message.authorColor, model: message.authorModel, demo: message.authorDemo },
   )
 
+  // Under the bubble, where it can be found however long the message is.
   const replyButton = (
     <button
       type="button"
-      className="self-center rounded-md p-1 text-muted-foreground opacity-0 group-hover:opacity-100 hover:bg-muted focus-visible:opacity-100"
+      className="flex items-center gap-1 rounded-md px-1 text-[11px] text-muted-foreground hover:bg-muted hover:text-foreground"
       onClick={() => onReply(message)}
       aria-label="回复这条"
     >
-      <Reply className="size-3.5" />
+      <Reply className="size-3" />
+      回复
     </button>
   )
 
   if (mine) {
     return (
-      <article className={`group flex justify-end gap-1 ${grouped ? "mt-0.5" : "mt-4"}`}>
-        {replyButton}
+      <article className={`flex justify-end ${grouped ? "mt-0.5" : "mt-4"}`}>
         <div className="max-w-[min(85%,36rem)]">
           {reply ? <Quote message={reply} align="end" /> : null}
-          <div className="bubble mine rounded-2xl rounded-br-md px-3.5 py-2 text-white">
-            <MessageBody text={message.text} names={names} tone="inverse" />
-          </div>
-          {!grouped ? (
-            <p className="mt-1 text-right text-[11px] text-muted-foreground">{clock(message.createdAt)}</p>
+          {message.text ? (
+            <div className="bubble mine rounded-2xl rounded-br-md px-3.5 py-2 text-white">
+              <MessageBody text={message.text} names={names} tone="inverse" />
+            </div>
           ) : null}
+          {message.attachments?.length ? <MessageFiles files={message.attachments} align="end" /> : null}
+          <div className="mt-1 flex items-center justify-end gap-2 text-[11px] text-muted-foreground">
+            {replyButton}
+            {!grouped ? <span>{clock(message.createdAt)}</span> : null}
+          </div>
         </div>
       </article>
     )
@@ -315,7 +549,7 @@ function MessageRow({
 
   return (
     <article
-      className={`group flex gap-3 ${grouped ? "mt-0.5" : "mt-4"}`}
+      className={`flex gap-3 ${grouped ? "mt-0.5" : "mt-4"}`}
       onPointerEnter={() => setWatching(true)}
       onPointerLeave={() => setWatching(false)}
     >
@@ -345,25 +579,30 @@ function MessageRow({
         ) : null}
         {reply ? <Quote message={reply} align="start" /> : null}
         {detail && message.runId ? <RunTrail runId={message.runId} answer={message.text} /> : null}
-        <div
-          className="bubble rounded-2xl rounded-tl-md bg-card/85 px-3.5 py-2"
-          style={{ "--halo": look.color } as CSSProperties}
-        >
-          <MessageBody text={message.text} names={names} />
-        </div>
-        {message.runId && !detail ? (
-          // How it got there: the tool calls of the wake that wrote this.
-          <button
-            type="button"
-            className="mt-1 flex items-center gap-1 rounded-md px-1 text-[11px] text-muted-foreground hover:bg-muted hover:text-foreground"
-            onClick={() => message.runId && onOpenRun(message.runId)}
+        {message.text ? (
+          <div
+            className="bubble rounded-2xl rounded-tl-md bg-card/85 px-3.5 py-2"
+            style={{ "--halo": look.color } as CSSProperties}
           >
-            <ListTree className="size-3" />
-            查看过程
-          </button>
+            <MessageBody text={message.text} names={names} />
+          </div>
         ) : null}
+        {message.attachments?.length ? <MessageFiles files={message.attachments} /> : null}
+        <div className="mt-1 flex items-center gap-1">
+          {message.runId && !detail ? (
+            // How it got there: the tool calls of the wake that wrote this.
+            <button
+              type="button"
+              className="flex items-center gap-1 rounded-md px-1 text-[11px] text-muted-foreground hover:bg-muted hover:text-foreground"
+              onClick={() => message.runId && onOpenRun(message.runId)}
+            >
+              <ListTree className="size-3" />
+              查看过程
+            </button>
+          ) : null}
+          {replyButton}
+        </div>
       </div>
-      {replyButton}
     </article>
   )
 }
@@ -371,6 +610,73 @@ function MessageRow({
 // A seat that is working on a reply right now. 「详细」 shows its steps as they
 // come; 「摘要」 a bubble that keeps moving until the reply lands in its place,
 // with the step it is on and a way into the full log.
+// Seats working right now. One shows as its card; two or more fold into one
+// bar (who, and a line of what each is doing) that opens to the cards.
+function LiveDrawer({
+  agents,
+  detail,
+  onOpenRun,
+  onMention,
+}: {
+  agents: PublicAgent[]
+  detail: boolean
+  onOpenRun: (runId: string) => void
+  onMention: (name: string) => void
+}) {
+  const [open, setOpen] = useState(false)
+  if (agents.length === 0) return null
+  if (agents.length === 1) {
+    return <LiveRun agent={agents[0]} detail={detail} onOpenRun={onOpenRun} onMention={onMention} />
+  }
+  return (
+    <section className="mt-4">
+      <button
+        type="button"
+        className="bubble working flex w-full max-w-[min(100%,40rem)] items-center gap-3 rounded-2xl bg-card/85 px-3 py-2 text-left"
+        aria-expanded={open}
+        onClick={() => setOpen((value) => !value)}
+      >
+        <span className="flex shrink-0 -space-x-2">
+          {agents.slice(0, 4).map((agent) => {
+            const look = seatLook(agent)
+            return (
+              <span key={agent.id} className="rounded-full ring-2 ring-card">
+                <Avatar name={agent.name} color={look.color} label={look.label} kind={look.kind} size="sm" />
+              </span>
+            )
+          })}
+        </span>
+        <span className="min-w-0 flex-1">
+          <span className="block text-xs font-semibold">
+            {agents.length} 个在做
+            <span className="ml-1.5 font-normal text-muted-foreground">{open ? "点这里收起" : "点开看各自的进度"}</span>
+          </span>
+          {/* The first two say what they are on; the rest only count. */}
+          <span className="flex min-w-0 gap-2 text-xs text-muted-foreground">
+            {agents.slice(0, 2).map((agent) => (
+              <span key={agent.id} className="min-w-0 max-w-1/2 truncate">
+                <span className="font-medium text-foreground/80">{agent.name}</span>：{agent.doing || "在想…"}
+              </span>
+            ))}
+            {agents.length > 2 ? <span className="shrink-0">等 {agents.length} 个</span> : null}
+          </span>
+        </span>
+        <span className="typing shrink-0" aria-hidden>
+          <i />
+          <i />
+          <i />
+        </span>
+        <ChevronDown className={`size-4 shrink-0 text-muted-foreground transition-transform ${open ? "rotate-180" : ""}`} />
+      </button>
+      <Reveal open={open}>
+        {agents.map((agent) => (
+          <LiveRun key={agent.id} agent={agent} detail={detail} onOpenRun={onOpenRun} onMention={onMention} />
+        ))}
+      </Reveal>
+    </section>
+  )
+}
+
 function LiveRun({
   agent,
   detail,
@@ -424,7 +730,7 @@ function Quote({ message, align }: { message: Message; align: "start" | "end" })
     <p
       className={`mb-1 line-clamp-1 border-l-2 pl-2 text-xs text-muted-foreground ${align === "end" ? "ml-auto" : ""}`}
     >
-      回复 {message.authorName}：{message.text}
+      回复 {message.authorName}：{previewText(message)}
     </p>
   )
 }

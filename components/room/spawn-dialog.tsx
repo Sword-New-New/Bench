@@ -131,7 +131,11 @@ export function SpawnDialog({
       <DialogContent className="sm:max-w-md">
         <DialogHeader>
           <DialogTitle>开一个新的 {info?.label} 会话</DialogTitle>
-          <DialogDescription>房间在后台建好会话，直接入座。第一次被点名时它才真正开始，之后和别的席位一样 @ 它就行。</DialogDescription>
+          <DialogDescription>
+            {kind === "dsh"
+              ? "房间在后台用 dsh-agent 建好会话并入座，要等十几秒。之后和别的席位一样 @ 它就行。"
+              : "房间在后台建好会话，直接入座。第一次被点名时它才真正开始，之后和别的席位一样 @ 它就行。"}
+          </DialogDescription>
         </DialogHeader>
         <form
           className="min-w-0 space-y-4"
@@ -230,7 +234,7 @@ export function SpawnDialog({
             </Button>
             <Button type="submit" disabled={!ready}>
               {sending ? <Loader2 className="animate-spin" /> : null}
-              开出来
+              {sending ? "在开…" : "开出来"}
             </Button>
           </DialogFooter>
         </form>

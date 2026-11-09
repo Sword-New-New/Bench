@@ -270,7 +270,7 @@ const tools = [
           type: "string",
           description: "进哪个项目，填用户说的项目名。用户没说时不填：房间会按你的工作目录找项目，找不到会列出项目让你问用户。",
         },
-        name: { type: "string", description: "席位名，1-24 个字，不要空格，别人用 @名字 点你。不填就用默认名。" },
+        name: { type: "string", description: "席位名，1-24 个字，不要空格，别人用 @名字 点你。第一次不填就用默认名；已经入座后再填一个新名字就是改名，旧名字的 @ 也还能找到你；不改名就别填。" },
         model: { type: "string", description: "你的模型，比如 claude-opus、gpt-5、gemini" },
         role: { type: "string", description: "你在这次协作里的分工，比如 实现、审查、调研" },
         strengths: { type: "array", items: { type: "string" }, description: "最多 6 个擅长的方向" },
@@ -397,17 +397,21 @@ async function join(args) {
   const project = picked.project
   const sameProject = seat?.project === project.id
   // Moving to another project keeps who it is there: name, model, role.
-  const name = (typeof args.name === "string" && args.name.trim()) || seat?.name || `${spec.label}-${(uuid || Math.random().toString(16).slice(2)).slice(0, 4)}`
+  const asked = typeof args.name === "string" && args.name.trim() ? args.name.trim() : ""
+  const name = asked || seat?.name || `${spec.label}-${(uuid || Math.random().toString(16).slice(2)).slice(0, 4)}`
+  // Back in its own seat it goes by the token. A name only goes along when
+  // the agent gave one, which renames the seat; otherwise it keeps whatever
+  // the seat is called now (the user may have renamed it from the page).
+  const known = sameProject ? seat : loadSeat(nameFile(project.id, name))
   const body = {
     project: project.id,
-    name,
+    name: known && !asked ? undefined : name,
+    rename: Boolean(known && asked),
     model: args.model || (sameProject ? undefined : seat?.model),
     role: args.role || (sameProject ? undefined : seat?.role),
     strengths: Array.isArray(args.strengths) ? args.strengths : sameProject ? undefined : seat?.strengths,
     ...(uuid ? { agentName: kind, uuid } : {}),
   }
-  // A new name means a new seat; the old one stays until someone asks it to leave.
-  const known = sameProject && seat?.name === name ? seat : loadSeat(nameFile(project.id, name))
   let result
   try {
     result = await call("/api/v1/join", known ? { ...body, token: known.token } : body)
@@ -418,6 +422,7 @@ async function join(args) {
     throw error
   }
   const room = await call(roomPath(project.id))
+  const before = known?.name
   // A new seat starts reading from now; old history is there via bench_inbox all.
   seat = {
     agentId: result.agent.id,
@@ -430,6 +435,7 @@ async function join(args) {
     strengths: result.agent.strengths,
   }
   saveSeat()
+  if (before && before !== seat.name) rmSync(nameFile(project.id, before), { force: true })
   startHeartbeat()
   const session = uuid
     ? `已报会话：${kind}。别人 @${seat.name} 时房间会唤起这次会话。`

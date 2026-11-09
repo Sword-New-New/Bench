@@ -47,6 +47,7 @@ export const KINDS: Kind[] = [
     color: "#4d6bfe",
     shape: "drop",
     core: true,
+    spawn: true,
     match: /deepseek|dsh/i,
     command: "dsh-agent resume --json {uuid} {text}",
     was: ["dsh-agent resume {uuid} {text}"],

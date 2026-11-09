@@ -40,6 +40,7 @@ import {
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu"
+import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
 import { Textarea } from "@/components/ui/textarea"
 import { KINDS } from "@/lib/kinds"
@@ -126,6 +127,8 @@ export function RoomApp() {
   const [adapterName, setAdapterName] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
   const [leaving, setLeaving] = useState<PublicAgent | null>(null)
+  const [renaming, setRenaming] = useState<PublicAgent | null>(null)
+  const [newName, setNewName] = useState("")
   const [handoff, setHandoff] = useState<{ task: Task; agent: PublicAgent } | null>(null)
   const [note, setNote] = useState("")
   const [highlight, setHighlight] = useState<string | null>(null)
@@ -435,6 +438,10 @@ export function RoomApp() {
                 setTab("chat")
               }}
               onLeave={setLeaving}
+              onRename={(agent) => {
+                setNewName(agent.name)
+                setRenaming(agent)
+              }}
               onOpenRun={setRunId}
               onWhisper={(agent) => setWhisperId(agent.id)}
               onSpawn={(kind, from) => setSpawn({ kind, from })}
@@ -471,6 +478,7 @@ export function RoomApp() {
               }}
               onOpenTask={openTask}
               onOpenRun={setRunId}
+              onMention={mention}
               onExample={(text) => {
                 setDraft(text)
                 requestAnimationFrame(() => composerRef.current?.focus())
@@ -704,6 +712,48 @@ export function RoomApp() {
               离席
             </Button>
           </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog open={renaming !== null} onOpenChange={(open) => !open && setRenaming(null)}>
+        <DialogContent className="sm:max-w-sm">
+          <DialogHeader>
+            <DialogTitle>给 {renaming?.name} 改名</DialogTitle>
+            <DialogDescription>
+              点名认的是席位，不是名字：它说过的话和点到它的消息都会换成新名字，别人还写旧名字也能找到它。
+            </DialogDescription>
+          </DialogHeader>
+          <form
+            onSubmit={(event) => {
+              event.preventDefault()
+              const agent = renaming
+              const name = newName.trim()
+              if (!agent || !name || name === agent.name) return
+              void run(async () => {
+                await api(`/api/v1/agents/${agent.id}`, {
+                  method: "POST",
+                  body: JSON.stringify({ as: "human", action: "rename", name }),
+                })
+                setRenaming(null)
+              })
+            }}
+          >
+            <Input
+              value={newName}
+              onChange={(event) => setNewName(event.target.value)}
+              maxLength={24}
+              autoFocus
+              aria-label="新名字"
+            />
+            <DialogFooter className="mt-4">
+              <Button type="button" variant="ghost" onClick={() => setRenaming(null)}>
+                取消
+              </Button>
+              <Button type="submit" disabled={busy || !newName.trim() || newName.trim() === renaming?.name}>
+                改名
+              </Button>
+            </DialogFooter>
+          </form>
         </DialogContent>
       </Dialog>
 

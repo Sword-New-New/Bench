@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, type CSSProperties } from "react"
+import { useEffect, useRef, useState, type CSSProperties, type ReactNode } from "react"
 import { ArrowRight, ListTree, Reply, X } from "lucide-react"
 
 import { Avatar, MessageBody, seatLook } from "@/components/room/bits"
@@ -22,6 +22,7 @@ export function Thread({
   onReply,
   onOpenTask,
   onOpenRun,
+  onMention,
   onExample,
   detail,
   onDetail,
@@ -37,6 +38,8 @@ export function Thread({
   onReply: (message: Message) => void
   onOpenTask: (taskId: string) => void
   onOpenRun: (runId: string) => void
+  // Clicking an avatar @-mentions that seat in the composer.
+  onMention: (name: string) => void
   onExample: (text: string) => void
 }) {
   const scroller = useRef<HTMLDivElement>(null)
@@ -160,11 +163,12 @@ export function Thread({
               onReply={onReply}
               onOpenTask={onOpenTask}
               onOpenRun={onOpenRun}
+              onMention={onMention}
               detail={detail}
             />
           ))}
           {live.map((agent) => (
-            <LiveRun key={agent.id} agent={agent} detail={detail} onOpenRun={onOpenRun} />
+            <LiveRun key={agent.id} agent={agent} detail={detail} onOpenRun={onOpenRun} onMention={onMention} />
           ))}
         </div>
       </div>
@@ -195,6 +199,21 @@ function Welcome({ onExample }: { onExample: (text: string) => void }) {
   )
 }
 
+// A seat's avatar in the thread: one click puts @name in the composer.
+function MentionAvatar({ name, onMention, children }: { name: string; onMention: (name: string) => void; children: ReactNode }) {
+  return (
+    <button
+      type="button"
+      className="block rounded-full transition-transform hover:scale-105 focus-visible:ring-2 focus-visible:ring-ring active:scale-95"
+      title={`@${name}`}
+      aria-label={`@${name}`}
+      onClick={() => onMention(name)}
+    >
+      {children}
+    </button>
+  )
+}
+
 function MessageRow({
   message,
   previous,
@@ -204,6 +223,7 @@ function MessageRow({
   onReply,
   onOpenTask,
   onOpenRun,
+  onMention,
   detail,
 }: {
   detail: boolean
@@ -215,6 +235,7 @@ function MessageRow({
   onReply: (message: Message) => void
   onOpenTask: (taskId: string) => void
   onOpenRun: (runId: string) => void
+  onMention: (name: string) => void
 }) {
   const [watching, setWatching] = useState(false)
 
@@ -299,9 +320,13 @@ function MessageRow({
       onPointerLeave={() => setWatching(false)}
     >
       <div className="w-8 shrink-0">
-        {!grouped ? (
+        {grouped ? null : author ? (
+          <MentionAvatar name={author.name} onMention={onMention}>
+            <Avatar name={message.authorName} color={look.color} label={look.label} kind={look.kind} watch={watching} />
+          </MentionAvatar>
+        ) : (
           <Avatar name={message.authorName} color={look.color} label={look.label} kind={look.kind} watch={watching} />
-        ) : null}
+        )}
       </div>
       <div className="min-w-0 max-w-[min(85%,40rem)]">
         {!grouped ? (
@@ -350,16 +375,20 @@ function LiveRun({
   agent,
   detail,
   onOpenRun,
+  onMention,
 }: {
   agent: PublicAgent
   detail: boolean
   onOpenRun: (runId: string) => void
+  onMention: (name: string) => void
 }) {
   const look = seatLook(agent)
   return (
     <article className="mt-4 flex gap-3">
       <div className="w-8 shrink-0">
-        <Avatar name={agent.name} color={look.color} label={look.label} kind={look.kind} status="working" />
+        <MentionAvatar name={agent.name} onMention={onMention}>
+          <Avatar name={agent.name} color={look.color} label={look.label} kind={look.kind} status="working" />
+        </MentionAvatar>
       </div>
       <div className="min-w-0 max-w-[min(85%,40rem)] flex-1">
         <p className="mb-1 flex flex-wrap items-baseline gap-x-2 text-xs">

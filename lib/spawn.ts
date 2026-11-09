@@ -1,19 +1,21 @@
 import { execFile } from "node:child_process"
 import { randomBytes, randomUUID } from "node:crypto"
-import { mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs"
+import { mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs"
 import os from "node:os"
 import path from "node:path"
 import { promisify } from "node:util"
 
+import { adapterFor, installed, modelOf } from "@/lib/adapters"
 import { ApiError } from "@/lib/http"
 import { KINDS } from "@/lib/kinds"
 import { agentState, currentProjectInfo, sayAs, seatCreated, snapshot } from "@/lib/store"
 
 // 「开新会话」: the room creates a session of an agent kind itself, seats it
-// and, if given a task, hands it over. The session only comes into being on
-// its first wake (the wake script creates it under the id picked here), in
-// the folder picked here: the same one as a seat, a new git worktree, or a
-// path you type.
+// and, if given a task, hands it over, in the folder picked here: the same
+// one as a seat, a new git worktree, or a path you type. A Claude session only
+// comes into being on its first wake (the wake script creates it under the id
+// picked here); dsh-agent can't take an id, so a DeepSeek one is made right
+// away (newDshSession).
 
 const run = promisify(execFile)
 
@@ -119,6 +121,74 @@ function giveSeat(kind: string, session: string, seat: { agentId: string; token:
   writeFileSync(path.join(dir, `${kind}-name-${Buffer.from(`${seat.project}/${seat.name}`).toString("hex")}.json`), body, { mode: 0o600 })
 }
 
+// dsh-agent picks the session id itself: run a short first turn in the
+// folder and read the id from its JSON events. Only sessions made by
+// `dsh-agent exec` can be resumed by a wake later.
+async function newDshSession(dir: string, seat: { name: string; role: string; project: string }) {
+  if (!installed("dsh-agent")) throw new ApiError(501, "没找到 dsh-agent，先装 DeepSeek Harness 的命令行")
+  const intro =
+    `这是并坐房间为你开的会话：你在「${seat.project}」项目里的席位叫 ${seat.name}，分工是 ${seat.role}。` +
+    "房间已经替你入座，不用调用 bench_join。之后有人 @你，房间会把消息转给你，用 bench_say 回复。现在只回一个字：好"
+  let stdout = ""
+  try {
+    ;({ stdout } = await run("dsh-agent", ["exec", "--json", "--timeout", "120", "-C", dir, intro], {
+      cwd: dir,
+      timeout: 150_000,
+      maxBuffer: 16 * 1024 * 1024,
+    }))
+  } catch (error) {
+    const err = error as { stderr?: string; stdout?: string; message?: string }
+    stdout = err.stdout ?? ""
+    if (!stdout.includes("thread.started")) {
+      const why = (err.stderr || err.message || "").trim().split("\n").slice(-1)[0]
+      throw new ApiError(500, `dsh-agent 没开出会话：${why.slice(0, 300)}`)
+    }
+  }
+  for (const line of stdout.split("\n")) {
+    try {
+      const event = JSON.parse(line)
+      if (event?.type === "thread.started" && typeof event.session_id === "string") return event.session_id as string
+    } catch {
+      // progress lines that aren't JSON
+    }
+  }
+  throw new ApiError(500, "dsh-agent 跑完了，但没报出会话 id")
+}
+
+// Renamed from the page: the seat's bench tools keep its name in their state
+// files, and a name file under the old name. Point them at the new one.
+export function renameSeatFiles(agentId: string, project: string, name: string) {
+  const dir = path.join(process.env.XDG_STATE_HOME || path.join(os.homedir(), ".local", "state"), "bench-mcp")
+  let files: string[]
+  try {
+    files = readdirSync(dir).filter((file) => file.endsWith(".json"))
+  } catch {
+    return
+  }
+  const kinds = new Set<string>()
+  let body: Record<string, unknown> | undefined
+  for (const file of files) {
+    const full = path.join(dir, file)
+    let seat: Record<string, unknown>
+    try {
+      seat = JSON.parse(readFileSync(full, "utf8"))
+    } catch {
+      continue
+    }
+    if (seat.agentId !== agentId) continue
+    body = { ...seat, name }
+    const named = /^(.+)-name-[0-9a-f]+\.json$/.exec(file)
+    if (named) {
+      kinds.add(named[1])
+      rmSync(full, { force: true })
+    } else writeFileSync(full, JSON.stringify(body), { mode: 0o600 })
+  }
+  if (!body) return
+  for (const kind of kinds) {
+    writeFileSync(path.join(dir, `${kind}-name-${Buffer.from(`${project}/${name}`).toString("hex")}.json`), JSON.stringify(body), { mode: 0o600 })
+  }
+}
+
 function asText(value: unknown, max: number) {
   return typeof value === "string" ? value.trim().slice(0, max) : ""
 }
@@ -142,9 +212,14 @@ export async function spawnSession(input: Record<string, unknown>) {
   let branch: string | undefined
   if (where.mode === "worktree") ({ dir, branch } = await newWorktree(base, name))
 
-  const session = randomUUID()
-  const seat = seatCreated({ name, role, model: "Claude Code", agentName: kind.id, session, workdir: dir })
-  giveSeat(kind.id, session, { agentId: seat.agent.id, token: seat.token, name, project: currentProjectInfo().id })
+  const project = currentProjectInfo()
+  const session = kind.id === "dsh" ? await newDshSession(dir, { name, role, project: project.name }) : randomUUID()
+  // Someone may have taken the name while the session was being made.
+  if (snapshot().agents.some((agent) => agent.name === name)) throw new ApiError(409, `已经有人叫 ${name}，换个名字`)
+  const adapter = adapterFor(kind.id)
+  const model = kind.id === "claude" ? "Claude Code" : ((adapter && modelOf(adapter)) ?? kind.harness)
+  const seat = seatCreated({ name, role, model, agentName: kind.id, session, workdir: dir })
+  giveSeat(kind.id, session, { agentId: seat.agent.id, token: seat.token, name, project: project.id })
   // A task is said in the room, so everyone sees what the new seat is for, and
   // it is what wakes the seat for the first time.
   if (task) sayAs({ type: "human", id: "human", name: "jinbao" }, { text: `@${name} ${task}` })

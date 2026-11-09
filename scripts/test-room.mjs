@@ -88,6 +88,36 @@ async function steps(stamp) {
   assert(inbox.data.forYou.some((message) => message.id === said.data.message.id), "乙没有看见点名")
   assert(inbox.data.peers.some((agent) => agent.doing === "在把活交给乙"), "乙看不见甲正在做什么")
 
+  // Mentions hold the seat, not the name: renaming carries the old messages
+  // along, and the old name still reaches the seat.
+  const renamed = await request(`/api/v1/agents/${beta.data.agent.id}`, {
+    method: "POST",
+    body: { as: "human", action: "rename", name: `丙${stamp}` },
+  })
+  assert(renamed.status === 200 && renamed.data.agent.name === `丙${stamp}`, `改名失败 ${renamed.data.error || ""}`)
+  const after = await request(`/api/v1/room?project=${project}`)
+  const old = after.data.messages.find((message) => message.id === said.data.message.id)
+  assert(old.text.includes(`@丙${stamp}`) && !old.text.includes(`@乙${stamp}`), "改名后旧消息里的点名没换成新名字")
+  assert(old.mentions.includes(beta.data.agent.id), "改名后旧消息点到的人变了")
+  const byOld = await request("/api/v1/say", {
+    method: "POST",
+    body: { agentId: alpha.data.agent.id, token: alpha.data.token, text: `@乙${stamp} 还在吗` },
+  })
+  assert(byOld.data.message.mentions.includes(beta.data.agent.id), "用旧名字点不到改名后的席位")
+  assert(byOld.data.message.text.includes(`@丙${stamp}`), "旧名字的点名没写成现在的名字")
+  const back = await request("/api/v1/join", { method: "POST", body: { token: beta.data.token, model: "composer" } })
+  assert(back.status === 201 || back.status === 200, `带 token 回座失败 ${back.data.error || ""}`)
+  assert(back.data.agent.id === beta.data.agent.id && back.data.agent.name === `丙${stamp}`, "不带名字回座时名字被改回去了")
+  const self = await request("/api/v1/join", { method: "POST", body: { token: beta.data.token, name: `丁${stamp}`, rename: true } })
+  assert(self.data.agent?.id === beta.data.agent.id && self.data.agent.name === `丁${stamp}`, "席位自己改名失败")
+  const stale = await request("/api/v1/join", { method: "POST", body: { token: beta.data.token, name: `乙${stamp}` } })
+  assert(stale.data.agent?.name === `丁${stamp}`, "旧版桥带着旧名字回座，把改好的名字改回去了")
+  const clash = await request(`/api/v1/agents/${beta.data.agent.id}`, {
+    method: "POST",
+    body: { as: "human", action: "rename", name: `甲${stamp}` },
+  })
+  assert(clash.status === 409, "改成别人正在用的名字应该被拒绝")
+
   const task = await request("/api/v1/tasks", {
     method: "POST",
     body: {

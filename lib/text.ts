@@ -12,6 +12,11 @@ export function shortText(text: string): string {
   return cut.length > 28 ? `${cut.slice(0, 28)}…` : cut
 }
 
+// `@name` as a whole word, every occurrence.
+export function mentionPattern(name: string) {
+  return new RegExp(`@${escapeRegExp(name)}(?![\\p{L}\\p{N}_-])`, "gu")
+}
+
 export function mentionedAgentIds(
   text: string,
   agents: { id: string; name: string }[],

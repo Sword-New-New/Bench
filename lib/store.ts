@@ -9,7 +9,7 @@ import { hasAdapter } from "@/lib/adapters"
 import { ApiError, asRecord, asString } from "@/lib/http"
 import { activeRun } from "@/lib/runs"
 import { liveStatus } from "@/lib/status"
-import { mentionedAgentIds, namedAgentIds } from "@/lib/text"
+import { mentionedAgentIds, mentionPattern, namedAgentIds } from "@/lib/text"
 import type {
   Actor,
   AgentStatus,
@@ -56,6 +56,9 @@ type Agent = Omit<PublicAgent, "hasSession" | "callable" | "standby" | "status" 
   // has not been woken yet (its session only exists after the first wake).
   workdir?: string
   fresh?: boolean
+  // Names it had before, newest first: an @ to one still reaches it, unless
+  // another seat has taken that name since.
+  formerNames?: string[]
 }
 
 type State = {
@@ -497,7 +500,60 @@ function findAgent(id: string) {
 }
 
 function resolveAgent(ref: string) {
-  return room().state.agents.find((agent) => agent.id === ref || agent.name === ref)
+  const agents = room().state.agents
+  return (
+    agents.find((agent) => agent.id === ref || agent.name === ref) ??
+    agents.find((agent) => agent.formerNames?.includes(ref))
+  )
+}
+
+function checkName(name: string | undefined): asserts name is string {
+  if (!name || !NAME_RE.test(name) || RESERVED.has(name.toLowerCase()) || RESERVED.has(name)) {
+    throw new ApiError(400, "名字用 1 到 24 个字母、数字或中文，不要空格，方便别人 @你")
+  }
+}
+
+// Mentions are kept as seat ids; the name is only how they read. A message
+// is said in current names: an @ to a seat's former name becomes its name
+// now, so who it reaches is settled when it is sent.
+function lockMentions(text: string) {
+  const agents = room().state.agents
+  const current = new Set(agents.map((agent) => agent.name))
+  let out = text
+  for (const agent of agents) {
+    for (const old of agent.formerNames ?? []) {
+      if (!current.has(old)) out = out.replace(mentionPattern(old), `@${agent.name}`)
+    }
+  }
+  return { text: out, mentions: mentionedAgentIds(out, agents) }
+}
+
+// A new name for a seat, by the user from the page or by the seat itself
+// (bench_join with another name). Everything that points at the seat holds
+// its id, so the old messages follow: what it said and the @s to it now read
+// with the new name.
+export function renameAgent(id: string, input: unknown) {
+  const agent = findAgent(id)
+  if (!agent) throw new ApiError(404, "这个席位不在了")
+  const name = asString(input)?.trim()
+  checkName(name)
+  const old = agent.name
+  if (name === old) return { agent: present(agent) }
+  if (room().state.agents.some((other) => other.id !== id && other.name === name)) {
+    throw new ApiError(409, `已经有人叫 ${name}，换个名字`)
+  }
+  agent.name = name
+  agent.formerNames = [old, ...(agent.formerNames ?? []).filter((item) => item !== name && item !== old)].slice(0, 5)
+  const pattern = mentionPattern(old)
+  for (const message of room().state.messages) {
+    if (message.authorId === id) message.authorName = name
+    if (message.mentions.includes(id)) message.text = message.text.replace(pattern, `@${name}`)
+  }
+  for (const task of room().state.tasks) {
+    if (task.ownerId === id) task.ownerName = name
+  }
+  postSystem(`${old} 改名为 ${name}，之后 @${name}；@${old} 也还能找到它`)
+  return { agent: present(agent) }
 }
 
 function waitingOf() {
@@ -581,12 +637,15 @@ function strengthsOf(value: unknown) {
 
 export function join(input: unknown) {
   const body = asRecord(input)
-  const name = asString(body.name)
-  if (!name || !NAME_RE.test(name) || RESERVED.has(name.toLowerCase()) || RESERVED.has(name)) {
-    throw new ApiError(400, "名字用 1 到 24 个字母、数字或中文，不要空格，方便别人 @你")
-  }
   const token = asString(body.token)
-  const existing = room().state.agents.find((agent) => agent.name === name)
+  // The token finds the seat whatever it is called now, and it keeps that
+  // name unless the call asks for a rename (bench_join with a new name sends
+  // rename: true). Bridges from before renames always send the name they
+  // remember, which must not undo a rename made from the page.
+  const mine = token ? room().state.agents.find((agent) => agent.token === token) : undefined
+  const name = mine && body.rename !== true ? mine.name : asString(body.name)
+  checkName(name)
+  const existing = mine ?? room().state.agents.find((agent) => agent.name === name)
   const model = clip(asString(body.model) || existing?.model || "未填模型", 48)
   const role = clip(asString(body.role) || existing?.role || "未分工", 24)
   const strengths = Array.isArray(body.strengths)
@@ -598,6 +657,7 @@ export function join(input: unknown) {
     if (!token || existing.token !== token) {
       throw new ApiError(409, `已经有人叫 ${name}。带上原来的 token 才能回到这个席位`)
     }
+    if (existing.name !== name) renameAgent(existing.id, name)
     existing.model = model
     existing.role = role
     existing.strengths = strengths
@@ -808,8 +868,7 @@ export function say(input: unknown) {
     authorModel: agent?.model,
     authorColor: agent?.color ?? "#1f1a14",
     authorDemo: agent?.demo ?? false,
-    text: clip(text, 4000),
-    mentions: mentionedAgentIds(text, room().state.agents),
+    ...lockMentions(clip(text, 4000)),
     replyTo,
     // Said during a wake, by stdout or by its own bench_say: tie it to the steps.
     runId: agent ? activeRun(agent.id)?.id : undefined,

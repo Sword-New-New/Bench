@@ -1,5 +1,5 @@
 import { useState } from "react"
-import { AtSign, Ellipsis, Loader2, MessageCircle, Plus, Square } from "lucide-react"
+import { AtSign, Ellipsis, Loader2, MessageCircle, PencilLine, Plus, Square } from "lucide-react"
 
 import { Button } from "@/components/ui/button"
 import {
@@ -24,6 +24,7 @@ type Props = {
   onMention: (name: string) => void
   onFocus: (id: string | null) => void
   onLeave: (agent: PublicAgent) => void
+  onRename: (agent: PublicAgent) => void
   onOpenRun: (runId: string) => void
   onStop: (agent: PublicAgent) => void
   // Say something to this seat alone, outside the room.
@@ -246,6 +247,12 @@ function SeatRow({ agent, ...props }: Props & { agent: PublicAgent }) {
               停下这次唤起
             </DropdownMenuItem>
           ) : null}
+          {agent.demo ? null : (
+            <DropdownMenuItem onClick={() => props.onRename(agent)}>
+              <PencilLine />
+              改名…
+            </DropdownMenuItem>
+          )}
           <DropdownMenuItem onClick={() => props.onFocus(focused ? null : agent.id)}>
             {focused ? "看全部对话" : "只看和他有关的"}
           </DropdownMenuItem>

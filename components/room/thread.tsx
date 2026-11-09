@@ -1,11 +1,16 @@
 import { useEffect, useRef, useState, type CSSProperties, type ReactNode } from "react"
-import { ArrowRight, ChevronDown, ListTree, Reply, X } from "lucide-react"
+import { ArrowRight, Check, ChevronDown, ListTree, Reply, Undo2, X } from "lucide-react"
+import { toast } from "sonner"
 
+import { api } from "@/components/room/api"
+import { AskCard } from "@/components/room/ask-card"
 import { MessageFiles, previewText } from "@/components/room/attachments"
-import { Avatar, keepTopInView, MessageBody, seatLook } from "@/components/room/bits"
+import { FullAccessToggle } from "@/components/room/permits"
+import { Avatar, FoldButton, keepTopInView, MessageBody, seatLook, useFold } from "@/components/room/bits"
 import { DOCK_EVENT } from "@/components/room/composer"
 import { Reveal } from "@/components/room/reveal"
 import { RunTrail } from "@/components/room/run-trail"
+import { Button } from "@/components/ui/button"
 import { clock } from "@/lib/status"
 import type { Message, PublicAgent } from "@/lib/types"
 
@@ -24,6 +29,7 @@ export function Thread({
   onReply,
   onOpenTask,
   onOpenRun,
+  onRewake,
   onMention,
   onExample,
   detail,
@@ -40,6 +46,8 @@ export function Thread({
   onReply: (message: Message) => void
   onOpenTask: (taskId: string) => void
   onOpenRun: (runId: string) => void
+  // Wake again a seat a restart cut off.
+  onRewake: (runId: string) => void
   // Clicking an avatar @-mentions that seat in the composer.
   onMention: (name: string) => void
   onExample: (text: string) => void
@@ -110,6 +118,7 @@ export function Thread({
       onReply={onReply}
       onOpenTask={onOpenTask}
       onOpenRun={onOpenRun}
+      onRewake={onRewake}
       onMention={onMention}
       detail={detail}
     />
@@ -132,7 +141,10 @@ export function Thread({
 
   // Wakes still going whose reply isn't in yet.
   const posted = new Set(messages.map((message) => message.runId).filter(Boolean))
-  const live = agents.filter((agent) => agent.runId && !posted.has(agent.runId))
+  // In the order they started, so a tool call doesn't bump a seat to the top.
+  const live = agents
+    .filter((agent) => agent.runId && !posted.has(agent.runId))
+    .sort((a, b) => (a.runStartedAt ?? 0) - (b.runStartedAt ?? 0) || a.id.localeCompare(b.id))
 
   return (
     <div className="relative flex min-h-0 flex-1 flex-col">
@@ -269,7 +281,7 @@ function ReplyChain({
     // lift off the backdrop, and a stripe down the left marking one conversation.
     <section
       ref={top}
-      className="my-5 overflow-hidden rounded-2xl border border-l-[3px] border-foreground/15 border-l-primary/60 bg-card shadow-[0_1px_2px_rgb(0_0_0/0.06),0_18px_36px_-20px_rgb(0_0_0/0.28)]"
+      className="my-5 overflow-clip rounded-2xl border border-l-[3px] border-foreground/15 border-l-primary/60 bg-card shadow-[0_1px_2px_rgb(0_0_0/0.06),0_18px_36px_-20px_rgb(0_0_0/0.28)]"
     >
       <header className="flex items-center gap-2 border-b border-foreground/10 bg-muted/60 px-4 py-2 text-[11px] text-muted-foreground">
         <Reply className="size-3 shrink-0" />
@@ -335,6 +347,8 @@ function ChainLine({
   onOpenRun: (runId: string) => void
   onMention: (name: string) => void
 }) {
+  const fold = useFold(message.text)
+  if (message.recalled) return <RecalledLine message={message} inChain />
   const author = agents.find((agent) => agent.id === message.authorId)
   const look = seatLook(
     author ?? { name: message.authorName, color: message.authorColor, model: message.authorModel, demo: message.authorDemo },
@@ -370,11 +384,13 @@ function ChainLine({
         {detail && message.runId ? <RunTrail runId={message.runId} answer={message.text} /> : null}
         {message.text ? (
           <div className="mt-0.5">
-            <MessageBody text={message.text} names={names} />
+            <MessageBody text={shown(message, agents)} names={names} fold={fold} />
           </div>
         ) : null}
         {message.attachments?.length ? <MessageFiles files={message.attachments} /> : null}
+        {message.ask ? <AskCard message={message} /> : null}
         <div className="mt-0.5 -ml-1 flex items-center gap-1">
+          <FoldButton fold={fold} />
           {message.runId && !detail ? (
             <button
               type="button"
@@ -394,6 +410,7 @@ function ChainLine({
             <Reply className="size-3" />
             回复
           </button>
+          {message.authorId === "human" ? <RecallButton message={message} /> : null}
         </div>
       </div>
     </article>
@@ -447,6 +464,7 @@ function MessageRow({
   onReply,
   onOpenTask,
   onOpenRun,
+  onRewake,
   onMention,
   detail,
 }: {
@@ -459,9 +477,41 @@ function MessageRow({
   onReply: (message: Message) => void
   onOpenTask: (taskId: string) => void
   onOpenRun: (runId: string) => void
+  onRewake: (runId: string) => void
   onMention: (name: string) => void
 }) {
   const [watching, setWatching] = useState(false)
+  const fold = useFold(message.text)
+
+  if (message.recalled) return <RecalledLine message={message} />
+
+  if (message.kind === "system" && message.interrupted?.length) {
+    // After a restart: what it cut off, each with a button to wake it again.
+    return (
+      <div className="my-2 self-center rounded-2xl border border-amber-500/30 bg-amber-500/[0.08] px-4 py-2.5 text-center text-xs leading-5 text-muted-foreground">
+        <p>{message.text}</p>
+        <div className="mt-2 flex flex-wrap justify-center gap-1.5">
+          {message.interrupted.map((item) =>
+            item.resumedAt ? (
+              <span key={item.runId} className="inline-flex h-6 items-center gap-1 px-2 text-muted-foreground">
+                <Check className="size-3" />
+                {item.agentName} 已重新叫醒 · {clock(item.resumedAt)}
+              </span>
+            ) : (
+              <span key={item.runId} className="inline-flex items-center gap-1">
+                <Button type="button" size="xs" onClick={() => onRewake(item.runId)}>
+                  重新叫醒 {item.agentName}
+                </Button>
+                <Button type="button" size="xs" variant="ghost" onClick={() => onOpenRun(item.runId)}>
+                  过程
+                </Button>
+              </span>
+            ),
+          )}
+        </div>
+      </div>
+    )
+  }
 
   if (message.kind === "system") {
     return (
@@ -490,7 +540,7 @@ function MessageRow({
           {handoff.taskTitle}
         </button>
         <div className="mt-1 text-muted-foreground">
-          <MessageBody text={message.text} names={names} />
+          <MessageBody text={shown(message, agents)} names={names} />
         </div>
       </article>
     )
@@ -534,11 +584,13 @@ function MessageRow({
           {reply ? <Quote message={reply} align="end" /> : null}
           {message.text ? (
             <div className="bubble mine rounded-2xl rounded-br-md px-3.5 py-2 text-white">
-              <MessageBody text={message.text} names={names} tone="inverse" />
+              <MessageBody text={shown(message, agents)} names={names} tone="inverse" fold={fold} />
             </div>
           ) : null}
           {message.attachments?.length ? <MessageFiles files={message.attachments} align="end" /> : null}
           <div className="mt-1 flex items-center justify-end gap-2 text-[11px] text-muted-foreground">
+            <FoldButton fold={fold} />
+            <RecallButton message={message} />
             {replyButton}
             {!grouped ? <span>{clock(message.createdAt)}</span> : null}
           </div>
@@ -584,11 +636,13 @@ function MessageRow({
             className="bubble rounded-2xl rounded-tl-md bg-card/85 px-3.5 py-2"
             style={{ "--halo": look.color } as CSSProperties}
           >
-            <MessageBody text={message.text} names={names} />
+            <MessageBody text={shown(message, agents)} names={names} fold={fold} />
           </div>
         ) : null}
         {message.attachments?.length ? <MessageFiles files={message.attachments} /> : null}
+        {message.ask ? <AskCard message={message} /> : null}
         <div className="mt-1 flex items-center gap-1">
+          <FoldButton fold={fold} />
           {message.runId && !detail ? (
             // How it got there: the tool calls of the wake that wrote this.
             <button
@@ -612,6 +666,94 @@ function MessageRow({
 // with the step it is on and a way into the full log.
 // Seats working right now. One shows as its card; two or more fold into one
 // bar (who, and a line of what each is doing) that opens to the cards.
+// A step that has gone quiet for 10 seconds says how long it has been going.
+const QUIET_MS = 10_000
+
+function useNow(on: boolean) {
+  const [now, setNow] = useState(0)
+  useEffect(() => {
+    if (!on) return
+    const tick = () => setNow(Date.now())
+    const first = window.setTimeout(tick, 0)
+    const timer = window.setInterval(tick, 1000)
+    return () => {
+      window.clearTimeout(first)
+      window.clearInterval(timer)
+    }
+  }, [on])
+  return now
+}
+
+function quietFor(agent: PublicAgent, now: number) {
+  // 「还没开始回应，已等 …」 already counts by itself.
+  if (!agent.stepAt || !now || agent.doing.includes("已等")) return ""
+  const ms = now - agent.stepAt
+  if (ms < QUIET_MS) return ""
+  const sec = Math.floor(ms / 1000)
+  return sec < 60 ? `${sec} 秒` : `${Math.floor(sec / 60)} 分 ${String(sec % 60).padStart(2, "0")} 秒`
+}
+
+function Quiet({ agent, now }: { agent: PublicAgent; now: number }) {
+  const text = quietFor(agent, now)
+  return text ? <span className="shrink-0 tabular-nums text-amber-700/80 dark:text-amber-300/80">· {text}</span> : null
+}
+
+// ---- recall ----
+
+// The page puts a recalled message's words back in the composer through this.
+export const EDIT_EVENT = "bench-edit-draft"
+
+// What was taken back from this page, for 「重新编辑」. Only here: the room
+// itself keeps nothing of it.
+const recalledHere = new Map<string, string>()
+
+async function recallMessage(message: Message) {
+  try {
+    const result = await api<{ original: { text: string } }>("/api/v1/recall", {
+      method: "POST",
+      body: JSON.stringify({ as: "human", id: message.id }),
+    })
+    if (result.original.text.trim()) recalledHere.set(message.id, result.original.text)
+  } catch (error) {
+    toast.error(error instanceof Error ? error.message : "没撤回成功")
+  }
+}
+
+function RecallButton({ message }: { message: Message }) {
+  return (
+    <button
+      type="button"
+      className="flex items-center gap-1 rounded-md px-1 text-[11px] text-muted-foreground hover:bg-muted hover:text-foreground"
+      onClick={() => void recallMessage(message)}
+      aria-label="撤回这条"
+    >
+      <Undo2 className="size-3" />
+      撤回
+    </button>
+  )
+}
+
+function RecalledLine({ message, inChain = false }: { message: Message; inChain?: boolean }) {
+  const words = recalledHere.get(message.id)
+  return (
+    <p
+      className={`text-center text-xs text-muted-foreground ${inChain ? "px-4 py-2.5" : "my-2 self-center"}`}
+    >
+      {message.authorId === "human" ? "你" : message.authorName}撤回了一条消息
+      {message.recalled ? ` · ${clock(message.recalled.at)}` : ""}
+      {words ? (
+        <button
+          type="button"
+          className="ml-1.5 font-medium text-primary underline-offset-2 hover:underline"
+          onClick={() => window.dispatchEvent(new CustomEvent(EDIT_EVENT, { detail: words }))}
+        >
+          重新编辑
+        </button>
+      ) : null}
+    </p>
+  )
+}
+
 function LiveDrawer({
   agents,
   detail,
@@ -624,6 +766,7 @@ function LiveDrawer({
   onMention: (name: string) => void
 }) {
   const [open, setOpen] = useState(false)
+  const now = useNow(agents.length > 0)
   if (agents.length === 0) return null
   if (agents.length === 1) {
     return <LiveRun agent={agents[0]} detail={detail} onOpenRun={onOpenRun} onMention={onMention} />
@@ -654,8 +797,11 @@ function LiveDrawer({
           {/* The first two say what they are on; the rest only count. */}
           <span className="flex min-w-0 gap-2 text-xs text-muted-foreground">
             {agents.slice(0, 2).map((agent) => (
-              <span key={agent.id} className="min-w-0 max-w-1/2 truncate">
-                <span className="font-medium text-foreground/80">{agent.name}</span>：{agent.doing || "在想…"}
+              <span key={agent.id} className="flex min-w-0 max-w-1/2 gap-1">
+                <span className="min-w-0 truncate">
+                  <span className="font-medium text-foreground/80">{agent.name}</span>：{agent.doing || "在想…"}
+                </span>
+                <Quiet agent={agent} now={now} />
               </span>
             ))}
             {agents.length > 2 ? <span className="shrink-0">等 {agents.length} 个</span> : null}
@@ -689,8 +835,9 @@ function LiveRun({
   onMention: (name: string) => void
 }) {
   const look = seatLook(agent)
+  const now = useNow(true)
   return (
-    <article className="mt-4 flex gap-3">
+    <article className="mt-4 flex animate-in gap-3 duration-300 fade-in slide-in-from-bottom-1">
       <div className="w-8 shrink-0">
         <MentionAvatar name={agent.name} onMention={onMention}>
           <Avatar name={agent.name} color={look.color} label={look.label} kind={look.kind} status="working" />
@@ -700,6 +847,7 @@ function LiveRun({
         <p className="mb-1 flex flex-wrap items-baseline gap-x-2 text-xs">
           <span className="font-semibold">{agent.name}</span>
           <span className="text-sky-700 dark:text-sky-300">正在做</span>
+          <FullAccessToggle agent={agent} />
         </p>
         {detail ? (
           agent.runId ? <RunTrail runId={agent.runId} /> : null
@@ -717,6 +865,9 @@ function LiveRun({
               <i />
             </span>
             <span className="min-w-0 truncate text-sm text-muted-foreground">{agent.doing || "在想…"}</span>
+            <span className="shrink-0 text-sm">
+              <Quiet agent={agent} now={now} />
+            </span>
             <ListTree className="size-3.5 shrink-0 text-muted-foreground" aria-label="查看过程" />
           </button>
         )}
@@ -734,3 +885,13 @@ function Quote({ message, align }: { message: Message; align: "start" | "end" })
     </p>
   )
 }
+
+// What a message reads as on the page. A verdict names the task's owner by
+// its current seat name, looked up from the id it carries.
+function shown(message: Message, agents: PublicAgent[]) {
+  const owner = message.verdict?.ownerId
+  if (!owner) return message.text
+  const name = agents.find((agent) => agent.id === owner)?.name
+  return name ? `${message.text}（负责人 ${name}）` : message.text
+}
+

@@ -18,6 +18,7 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select"
+import { awaitingReview } from "@/lib/review"
 import { TASK_STATUS_LABEL, clock } from "@/lib/status"
 import type { PublicAgent, Task, TaskStatus, TaskStep, TaskStepState } from "@/lib/types"
 
@@ -42,6 +43,7 @@ export function TasksPanel({
   onAskHandoff,
   onStatus,
   onStep,
+  onReview,
   header,
 }: {
   tasks: Task[]
@@ -54,6 +56,7 @@ export function TasksPanel({
   onAskHandoff: (task: Task, agent: PublicAgent) => void
   onStatus: (task: Task, action: "done" | "block") => void
   onStep: (task: Task, step: number, state: TaskStepState) => void
+  onReview: (task: Task, pass: boolean, note: string) => void
 }) {
   const [title, setTitle] = useState("")
   const [steps, setSteps] = useState("")
@@ -144,6 +147,7 @@ export function TasksPanel({
             onAskHandoff={onAskHandoff}
             onStatus={onStatus}
             onStep={onStep}
+            onReview={onReview}
           />
         ))}
         {done.length > 0 ? (
@@ -163,6 +167,7 @@ export function TasksPanel({
                   onAskHandoff={onAskHandoff}
                   onStatus={onStatus}
                   onStep={onStep}
+                  onReview={onReview}
                 />
               ))}
             </div>
@@ -183,6 +188,7 @@ function TaskCard({
   onAskHandoff,
   onStatus,
   onStep,
+  onReview,
 }: {
   tilt: string
   task: Task
@@ -192,7 +198,9 @@ function TaskCard({
   onAskHandoff: (task: Task, agent: PublicAgent) => void
   onStatus: (task: Task, action: "done" | "block") => void
   onStep: (task: Task, step: number, state: TaskStepState) => void
+  onReview: (task: Task, pass: boolean, note: string) => void
 }) {
+  const waiting = awaitingReview(task)
   const others = agents.filter((agent) => agent.id !== task.ownerId)
   return (
     <article
@@ -203,8 +211,12 @@ function TaskCard({
     >
       <div className="flex items-start justify-between gap-2">
         <h3 className="text-sm leading-5 font-medium">{task.title}</h3>
-        <span className={`shrink-0 rounded-full px-1.5 py-0.5 text-[10px] font-medium ${CHIP[task.status]}`}>
-          {TASK_STATUS_LABEL[task.status]}
+        <span
+          className={`shrink-0 rounded-full px-1.5 py-0.5 text-[10px] font-medium ${
+            waiting ? "bg-violet-500/12 text-violet-700 dark:text-violet-300" : CHIP[task.status]
+          }`}
+        >
+          {waiting ? "待验收" : TASK_STATUS_LABEL[task.status]}
         </span>
       </div>
       <p className="mt-1 text-xs text-muted-foreground">
@@ -212,6 +224,13 @@ function TaskCard({
         {" · "}
         {task.createdByName} 建立
       </p>
+      {waiting ? (
+        <ReviewBox task={task} busy={busy} onReview={(pass, note) => onReview(task, pass, note)} />
+      ) : task.review?.state === "rejected" && task.status !== "done" ? (
+        <p className="mt-2 rounded-sm bg-red-500/10 px-2 py-1.5 text-[11px] leading-5 text-red-800 dark:text-red-200">
+          {clock(task.review.at)} 打回：{task.review.note}
+        </p>
+      ) : null}
       {task.steps?.length ? (
         <StepDrawer steps={task.steps} busy={busy} onStep={(step, state) => onStep(task, step, state)} />
       ) : null}
@@ -244,16 +263,18 @@ function TaskCard({
       ) : null}
       {task.status !== "done" ? (
         <div className="mt-2.5 flex flex-wrap gap-1">
-          <Button
-            type="button"
-            size="xs"
-            variant="outline"
-            className="border-current/20 bg-transparent hover:bg-white/40 dark:border-current/20 dark:bg-transparent dark:hover:bg-black/15"
-            disabled={busy}
-            onClick={() => onStatus(task, "done")}
-          >
-            完成
-          </Button>
+          {waiting ? null : (
+            <Button
+              type="button"
+              size="xs"
+              variant="outline"
+              className="border-current/20 bg-transparent hover:bg-white/40 dark:border-current/20 dark:bg-transparent dark:hover:bg-black/15"
+              disabled={busy}
+              onClick={() => onStatus(task, "done")}
+            >
+              完成
+            </Button>
+          )}
           <Button
             type="button"
             size="xs"
@@ -284,6 +305,79 @@ function TaskCard({
         </div>
       ) : null}
     </article>
+  )
+}
+
+// The user's sign-off on a card that waits for it: pass in one click, or
+// send it back with a reason the owner is woken with.
+function ReviewBox({
+  task,
+  busy,
+  onReview,
+}: {
+  task: Task
+  busy: boolean
+  onReview: (pass: boolean, note: string) => void
+}) {
+  const [rejecting, setRejecting] = useState(false)
+  const [reason, setReason] = useState("")
+  const asked = task.review?.state === "waiting" ? task.review : undefined
+  return (
+    <div className="mt-2 space-y-1.5 rounded-sm border border-violet-500/30 bg-violet-500/[0.07] px-2 py-2 text-[11px] leading-5">
+      <p className="font-medium">
+        等你验收
+        <span className="font-normal text-muted-foreground">
+          {asked ? ` · ${asked.by} ${clock(asked.at)} 请验收${asked.note ? `：${asked.note}` : ""}` : " · 其余步骤都做完了"}
+        </span>
+      </p>
+      {rejecting ? (
+        <form
+          className="space-y-1.5"
+          onSubmit={(event) => {
+            event.preventDefault()
+            if (!reason.trim()) return
+            onReview(false, reason.trim())
+            setRejecting(false)
+            setReason("")
+          }}
+        >
+          <Textarea
+            autoFocus
+            value={reason}
+            onChange={(event) => setReason(event.target.value)}
+            placeholder={`哪里不对？会转给 ${task.ownerName ?? "负责人"}，它照着改`}
+            aria-label="打回原因"
+            rows={2}
+            className="min-h-0 resize-none bg-white/60 text-xs dark:bg-black/20"
+          />
+          <div className="flex gap-1">
+            <Button type="submit" size="xs" variant="destructive" disabled={busy || !reason.trim()}>
+              打回
+            </Button>
+            <Button type="button" size="xs" variant="ghost" onClick={() => setRejecting(false)}>
+              取消
+            </Button>
+          </div>
+        </form>
+      ) : (
+        <div className="flex gap-1">
+          <Button type="button" size="xs" disabled={busy} onClick={() => onReview(true, "")}>
+            <Check className="size-3" />
+            验收通过
+          </Button>
+          <Button
+            type="button"
+            size="xs"
+            variant="outline"
+            className="border-current/20 bg-transparent hover:bg-white/40 dark:border-current/20 dark:bg-transparent dark:hover:bg-black/15"
+            disabled={busy}
+            onClick={() => setRejecting(true)}
+          >
+            打回
+          </Button>
+        </div>
+      )}
+    </div>
   )
 }
 

@@ -12,10 +12,11 @@ import { JoinDialog } from "@/components/room/join-dialog"
 import { Mark } from "@/components/room/bits"
 import { Roster } from "@/components/room/roster"
 import { RunPanel } from "@/components/room/run-panel"
+import { PermitBar } from "@/components/room/permits"
 import { clearSummarySnooze, SUMMARY_DONE_DEMO, SummaryCard, SummaryNudge } from "@/components/room/summary"
 import { DEBUG_MENU, DebugMenu, NO_DEBUG, withDebug, type DebugView } from "@/components/room/debug-menu"
 import { TasksPanel } from "@/components/room/tasks-panel"
-import { Thread } from "@/components/room/thread"
+import { EDIT_EVENT, Thread } from "@/components/room/thread"
 import { WhisperDialog } from "@/components/room/whisper-dialog"
 import { SpawnDialog } from "@/components/room/spawn-dialog"
 import { type Pending } from "@/components/room/attachments"
@@ -116,6 +117,15 @@ export function RoomApp() {
   const [now, setNow] = useState(0)
   const [tab, setTab] = useState<TabId>("chat")
   const [draft, setDraft] = useState("")
+  // 「重新编辑」 on a recalled message puts its words back in the composer.
+  useEffect(() => {
+    const edit = (event: Event) => {
+      const text = (event as CustomEvent<string>).detail
+      if (typeof text === "string") setDraft(text)
+    }
+    window.addEventListener(EDIT_EVENT, edit)
+    return () => window.removeEventListener(EDIT_EVENT, edit)
+  }, [])
   const [reply, setReply] = useState<Message | null>(null)
   const [focusId, setFocusId] = useState<string | null>(null)
   const [joinOpen, setJoinOpen] = useState(false)
@@ -360,7 +370,7 @@ export function RoomApp() {
               onForget={(agent) =>
                 void run(() => debugCall({ action: "forget", agentId: agent.id }), `${agent.name} 下次被叫醒会收到全部积压`)
               }
-              onClearSummary={() => void run(() => debugCall({ action: "clearSummary" }), "摘要清空了")}
+              onClearSummary={() => void run(() => debugCall({ action: "clearSummary", confirm: "清空摘要" }), "摘要清空了")}
               onSummaryDone={() => window.dispatchEvent(new Event(SUMMARY_DONE_DEMO))}
               onClearSnooze={() => {
                 clearSummarySnooze()
@@ -481,6 +491,16 @@ export function RoomApp() {
               }}
               onOpenTask={openTask}
               onOpenRun={setRunId}
+              onRewake={(runId) =>
+                void run(
+                  () =>
+                    api(`/api/v1/runs/${runId}`, {
+                      method: "POST",
+                      body: JSON.stringify({ as: "human", action: "rewake" }),
+                    }).then(() => undefined),
+                  "叫醒了，会带着原来那些消息接着做",
+                )
+              }
               onMention={mention}
               onExample={(text) => {
                 setDraft(text)
@@ -499,17 +519,20 @@ export function RoomApp() {
               onClearReply={() => setReply(null)}
               notice={
                 room ? (
-                  <SummaryNudge
-                    room={room}
-                    busy={busy}
-                    onRequest={(agent) =>
-                      void run(
-                        () => summaryCall({ action: "request", agentId: agent.id }),
-                        `请 ${agent.name} 写摘要了`,
-                      )
-                    }
-                    onSkip={() => void run(() => summaryCall({ action: "skip" }))}
-                  />
+                  <>
+                    <PermitBar room={room} />
+                    <SummaryNudge
+                      room={room}
+                      busy={busy}
+                      onRequest={(agent) =>
+                        void run(
+                          () => summaryCall({ action: "request", agentId: agent.id }),
+                          `请 ${agent.name} 写摘要了`,
+                        )
+                      }
+                      onSkip={() => void run(() => summaryCall({ action: "skip" }))}
+                    />
+                  </>
                 ) : null
               }
               onSend={() => {
@@ -578,6 +601,16 @@ export function RoomApp() {
                     method: "POST",
                     body: JSON.stringify({ as: "human", action: "step", step, state }),
                   }).then(() => undefined),
+                )
+              }
+              onReview={(task, pass, note) =>
+                void run(
+                  () =>
+                    api(`/api/v1/tasks/${task.id}`, {
+                      method: "POST",
+                      body: JSON.stringify({ as: "human", action: pass ? "pass" : "reject", note }),
+                    }).then(() => undefined),
+                  pass ? "验收通过" : "打回了，已经叫醒负责人",
                 )
               }
               onAskHandoff={(task, agent) => {

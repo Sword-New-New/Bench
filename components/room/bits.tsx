@@ -1,4 +1,5 @@
-import { useEffect, useRef, useState } from "react"
+import { useEffect, useState } from "react"
+import { ChevronDown, ChevronUp } from "lucide-react"
 
 import { Bot } from "@/components/room/bot"
 import { kindOf, type Kind } from "@/lib/kinds"
@@ -101,40 +102,73 @@ export function keepTopInView(node: HTMLElement | null) {
   window.setTimeout(pull, 350)
 }
 
+// Long messages fold to four lines. The state lives with the message, so its
+// 「展开全文 / 收起」 sits in the row of 「查看过程」 and 「回复」 under it:
+// one place and one look, folded or open.
+export type Fold = ReturnType<typeof useFold>
+
+export function useFold(text: string) {
+  // Whether it overflows is measured while folded, and again whenever the
+  // bubble's width changes. The paragraph comes in through a callback ref.
+  const [node, attach] = useState<HTMLParagraphElement | null>(null)
+  const [open, setOpen] = useState(false)
+  const [long, setLong] = useState(false)
+  useEffect(() => {
+    if (!node || open) return
+    const measure = () => setLong(node.scrollHeight > node.clientHeight + 1)
+    const observer = new ResizeObserver(measure)
+    observer.observe(node)
+    measure()
+    return () => observer.disconnect()
+  }, [node, open, text])
+  const toggle = () => {
+    setOpen(!open)
+    keepTopInView(node)
+  }
+  return { attach, open, long, toggle }
+}
+
+export function FoldButton({ fold }: { fold: Fold }) {
+  if (!fold.long) return null
+  return (
+    <button
+      type="button"
+      className="flex items-center gap-1 rounded-md px-1 text-[11px] text-muted-foreground hover:bg-muted hover:text-foreground"
+      aria-expanded={fold.open}
+      onClick={fold.toggle}
+    >
+      {fold.open ? <ChevronUp className="size-3" /> : <ChevronDown className="size-3" />}
+      {fold.open ? "收起" : "展开全文"}
+    </button>
+  )
+}
+
 export function MessageBody({
   text,
   names,
   tone = "ink",
+  fold: given,
 }: {
   text: string
   names: string[]
   tone?: "ink" | "inverse"
+  // Given, the caller shows its FoldButton; otherwise it goes right under the text.
+  fold?: Fold
 }) {
   const parts = splitMentions(text, names)
   const mentionClass =
     tone === "inverse"
       ? "rounded px-0.5 font-medium bg-white/18"
       : "rounded px-0.5 font-medium text-mention bg-mention/10"
-  // Long answers fill the whole thread, so anything past four lines folds
-  // until it's opened. Whether it overflows is measured while folded, and
-  // again whenever the bubble's width changes.
-  const ref = useRef<HTMLParagraphElement>(null)
-  const [open, setOpen] = useState(false)
-  const [long, setLong] = useState(false)
-  useEffect(() => {
-    const body = ref.current
-    if (!body || open) return
-    const measure = () => setLong(body.scrollHeight > body.clientHeight + 1)
-    const observer = new ResizeObserver(measure)
-    observer.observe(body)
-    measure()
-    return () => observer.disconnect()
-  }, [open, text])
+  const own = useFold(text)
+  const { attach, open, long } = given ?? own
   return (
     <>
       <p
-        ref={ref}
-        className={`text-[0.9rem] leading-relaxed break-words whitespace-pre-wrap ${open ? "" : "line-clamp-4"}`}
+        ref={attach}
+        className={`text-[0.9rem] leading-relaxed break-words whitespace-pre-wrap ${
+          open ? "" : `line-clamp-4 ${long ? "[mask-image:linear-gradient(to_bottom,black_55%,transparent)]" : ""}`
+        }`}
       >
         {parts.map((part, index) =>
           part.mention ? (
@@ -146,21 +180,11 @@ export function MessageBody({
           ),
         )}
       </p>
-      {long ? (
-        <button
-          type="button"
-          className={`mt-0.5 text-xs font-medium underline-offset-2 hover:underline ${
-            tone === "inverse" ? "text-white/90" : "text-muted-foreground"
-          }`}
-          aria-expanded={open}
-          onClick={() => {
-            setOpen(!open)
-            keepTopInView(ref.current)
-          }}
-        >
-          {open ? "收起" : "展开全文"}
-        </button>
-      ) : null}
+      {given ? null : (
+        <div className="-ml-1">
+          <FoldButton fold={own} />
+        </div>
+      )}
     </>
   )
 }

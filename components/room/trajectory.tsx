@@ -16,8 +16,8 @@ import type { Message, PublicAgent } from "@/lib/types"
 // tick has its speaker's color and is longer the longer the message is; the
 // stretch you are reading is lit, the ticks near the pointer grow like a dock,
 // hovering shows who said what, a click goes there. A breathing dot under the
-// ticks for each seat at work right now. When nobody is working and the
-// computer is playing something, the ticks themselves stretch with the sound
+// ticks for each seat at work right now. When the computer is playing
+// something, the ticks themselves stretch with the sound
 // (lib/audio.ts, useBeat). The right side stays empty on purpose.
 
 const CONTENT = 768 // the thread's max-w-3xl
@@ -71,7 +71,8 @@ export function Trajectory({
 
   const [rhythm, setRhythm] = useState(() => readPref(RHYTHM_KEY) !== "off")
   const busy = agents.filter((agent) => agent.runId && !agent.demo)
-  const level = useRhythm(gutter >= MIN_RHYTHM && rhythm && busy.length === 0)
+  // Moves with the music whether or not anyone is working.
+  const level = useRhythm(gutter >= MIN_RHYTHM && rhythm)
   // The ticks themselves stretch with the music, low notes at the bottom.
   useBeat(rail, level, Math.max(0, Math.min(gutter - 80, 150)))
 

@@ -3,9 +3,12 @@ import { randomBytes } from "node:crypto"
 import { StringDecoder } from "node:string_decoder"
 
 import { adapterFor, commandFor, summonPath, type Adapter } from "@/lib/adapters"
+import { compactEnv, CONTEXT_KINDS, seatContext, type SeatContext } from "@/lib/context"
 import { createParser, liveLine } from "@/lib/events"
 import { ApiError } from "@/lib/http"
-import { endRun, getRun, markResumed, putStep, startRun, takeUnannounced } from "@/lib/runs"
+import { detectLimit, whenText } from "@/lib/limits"
+import { commandLine, killTree } from "@/lib/platform"
+import { endRun, getRun, markResumed, pendingResumes, putStep, setLimited, startRun, takeUnannounced } from "@/lib/runs"
 import {
   agentState,
   bindProject,
@@ -15,8 +18,10 @@ import {
   catchUp,
   inProject,
   markInterruptedResumed,
+  markLimited,
   markReached,
   postInterrupted,
+  postLimited,
   endSummaryJob,
   isStandby,
   markWoken,
@@ -32,13 +37,13 @@ import {
   summarySource,
   summonCandidates,
   END_MARK,
+  askSettled,
   userName,
 } from "@/lib/store"
 import { withAttachments } from "@/lib/text"
 import type { Message, RoomSummary, Run } from "@/lib/types"
 
 const NOTE_GAP_MS = 30_000
-const RUN_LIMIT_MS = 15 * 60_000
 // After the stream says its turn is over, how long the process may take to exit.
 const END_GRACE_MS = 3_000
 // Every line of a wake's output is read, however much there is: the answer
@@ -72,6 +77,8 @@ type Lane = {
   pending: { id: string; line: string }[]
   hops: number
   summary?: boolean
+  // The user asked the room to compact this seat's context; runs next.
+  compact?: boolean
   stop?: () => void
   carry?: string
   whisper?: string
@@ -89,6 +96,8 @@ type Lane = {
 type SummonGlobal = typeof globalThis & {
   __benchSummonBound?: boolean
   __benchSummonAnnounced?: boolean
+  // Runs the user asked to be woken again after a usage limit: when.
+  __benchResumeTimers?: Map<string, NodeJS.Timeout>
   __benchSummonHandler?: (message: Message) => void
   __benchSummonAt?: Map<string, number>
   __benchLanes?: Map<string, Lane>
@@ -229,6 +238,13 @@ function explain(agentName: string | undefined, failure: string) {
   if (agentName === "workbuddy" && /Authentication required|\/login/i.test(failure)) {
     return "WorkBuddy 自带的命令行没有登录。桌面端的登录是加密存的，只交给它自己拉起的进程，房间借不到。让它在 WorkBuddy 窗口里「守着房间」（循环 bench_wait）就不用唤起；或者装完整版 codebuddy（npm i -g @tencent-ai/codebuddy-code）并在终端里 /login 一次，见 MAINTENANCE.md。"
   }
+  if (agentName === "cursor" && /Model unavailable on Free/i.test(failure)) {
+    return "Cursor 账号是免费版，这个模型用不了：免费版只能用 Grok 4.7、Grok 4.6 的固定档（比如 grok-4.7-medium，不带 -low、-fast）和 auto。在它的席位菜单「换模型…」里换一个。"
+  }
+  const provider = /This chat uses (\S+), but your current provider is (\S+?)\./.exec(failure)
+  if (agentName === "codex" && provider) {
+    return `这个会话是在 ${provider[1]} 上开的，Codex 现在接的是 ${provider[2]}（~/.codex/config.toml 的 model_provider），会话不能换提供方接着跑。要叫醒它，就把 Codex 切回 ${provider[1]}；或者在它的席位菜单「在同目录开新会话…」，开一个 ${provider[2]} 上的新会话。`
+  }
   if (agentName === "dsh" && /cannot compose presets/.test(failure)) {
     return "它是在 DeepSeek Harness 网页端开的会话，带着 Agent 预设；房间用的 dsh-agent 只能接着跑它自己 exec 开的、不带预设的会话，叫不醒网页端的。让它在网页端「守着房间」（循环 bench_wait）就不用唤起；要叫得醒，就在终端用 dsh-agent exec 开会话再接入并坐。写摘要可以先换别人。"
   }
@@ -238,6 +254,46 @@ function explain(agentName: string | undefined, failure: string) {
 function tail(text: string, max: number) {
   const clean = text.trim().replace(/\s+/g, " ")
   return clean.length > max ? `…${clean.slice(-max)}` : clean
+}
+
+// Did the turn end on the account's usage limit? The client says so in its last
+// words, but its error line (what `failure` holds) can be about anything else,
+// so go by what it said. Said only when the turn failed: a seat that merely
+// quotes the message is not limited.
+function limitOf(log: Run, out: string) {
+  const last = [...log.steps].reverse().find((step) => step.kind === "text")?.title ?? ""
+  // Codex says it in the error that fails the turn (a note step, lib/events.ts).
+  const failed = log.steps.find((step) => step.kind === "note" && step.state === "failed")?.title ?? ""
+  for (const text of [out, last, failed]) {
+    if (/^\s*You(?:'|’)ve hit your/i.test(text)) {
+      const hit = detectLimit(text)
+      if (hit) return hit
+    }
+  }
+  return null
+}
+
+// Say in the room that a seat ran out of allowance, with the card that lets
+// the user have it carry on once it resets. Returns whether it was one.
+function noteLimit(agent: NonNullable<ReturnType<typeof agentState>>, log: Run, out: string) {
+  const hit = limitOf(log, out)
+  if (!hit) return false
+  setLimited(log, { resetsAt: hit.resetsAt })
+  const when = hit.resetsAt ? `${whenText(hit.resetsAt)} 重置` : "没写几点重置"
+  postLimited(`${agent.name} 撞到了「${hit.label}」，${when}。这次没做完，可以让它重置后自动接着做`, {
+    runId: log.id,
+    agentId: agent.id,
+    agentName: agent.name,
+    label: hit.label,
+    resetsAt: hit.resetsAt,
+    state: "open",
+  })
+  return true
+}
+
+function reportFailure(agent: NonNullable<ReturnType<typeof agentState>>, log: Run, failure: string, out: string, what: string) {
+  if (noteLimit(agent, log, out)) return
+  postSystem(`${what}没成功：${explain(agent.agentName, failure)}`)
 }
 
 // Runs one command on a seat's session and reports how it went. Its output
@@ -271,7 +327,7 @@ function launch(
     }
     // Its turn is over. Give the process a moment to exit on its own; if it
     // stays (a background task it left running keeps it alive), end it here,
-    // so the answer goes up now and not when the 15 minutes run out. Not left
+    // so the answer goes up now and not whenever the process gets round to it. Not left
     // running longer: the seat's next wake resumes the same session.
     if (!wasEnded && parser.ended() && !finished) {
       endedTimer = setTimeout(() => {
@@ -283,11 +339,11 @@ function launch(
     }
   })
   let stopped = false
+  let quiet: NodeJS.Timeout | undefined
   const finish = bindProject((code: number | null, failure?: string) => {
     if (finished) return
     finished = true
     lane(agent.id).stop = undefined
-    clearTimeout(timer)
     clearTimeout(endedTimer)
     clearInterval(quiet)
     if (pending) take(pending)
@@ -300,9 +356,17 @@ function launch(
   })
 
   // Its own process group, so stopping it also ends what the shell started.
-  const child = spawn(command, {
-    shell: true,
+  // Windows runs it through Git Bash (lib/platform.ts) and has no groups.
+  let launch: [string, string[]]
+  try {
+    launch = commandLine(command)
+  } catch (error) {
+    finish(null, (error as Error).message)
+    return
+  }
+  const child = spawn(launch[0], launch[1], {
     detached: true,
+    windowsHide: true,
     cwd: process.cwd(),
     stdio: ["ignore", "pipe", "pipe"],
     env: {
@@ -316,11 +380,17 @@ function launch(
       ...(lane(agent.id).key ? { BENCH_RUN_KEY: lane(agent.id).key } : {}),
       // A session the room created: where its first wake starts it.
       ...(agent.workdir ? { BENCH_NEW_DIR: agent.workdir } : {}),
+      // The model the user picked for it (lib/models.ts); unset, the default.
+      ...(agent.modelPick ? { BENCH_MODEL: agent.modelPick } : {}),
+      // And how hard it thinks, for the scripts that pass it on.
+      ...(agent.effortPick ? { BENCH_EFFORT: agent.effortPick } : {}),
+      // Where its context compacts by itself, if the user set one (lib/context.ts).
+      ...compactEnv(agent),
     },
   })
   const kill = () => {
     try {
-      if (child.pid) process.kill(-child.pid, "SIGTERM")
+      if (child.pid) killTree(child.pid)
     } catch {
       child.kill("SIGTERM")
     }
@@ -330,11 +400,8 @@ function launch(
     kill()
     finish(null)
   }
-  const timer = setTimeout(() => {
-    kill()
-    finish(null, "超过 15 分钟没结束，已停掉")
-  }, RUN_LIMIT_MS)
-  let quiet: NodeJS.Timeout | undefined
+  // No time limit: an agent may work for hours. A run ends when the process
+  // does, when its turn is over (above), or when the user presses stop.
   if (streams(command)) {
     const since = Date.now()
     quiet = setInterval(bindProject(() => {
@@ -378,7 +445,7 @@ function busy(agentId: string, doing: string) {
     // The current step, while the seat still shows what we put there.
     live(line: string) {
       const still = agentState(agentId)
-      if (!still || still.doing !== shown) return
+      if (!still || (still.doing !== shown && !askSettled(still.doing))) return
       shown = line
       try {
         pulseAgent(agentId, "working", line)
@@ -386,7 +453,8 @@ function busy(agentId: string, doing: string) {
     },
     settle() {
       const still = agentState(agentId)
-      if (still && still.doing === shown) {
+      // A question still unanswered stays up after the run; an answered one gives way.
+      if (still && (still.doing === shown || (askSettled(still.doing) && !still.doing.startsWith("问了")))) {
         try {
           pulseAgent(still.id, "idle", before)
         } catch {}
@@ -402,12 +470,14 @@ function run(agentId: string) {
   if (!agent || !agent.agentName || !agent.session) {
     queue.pending = []
     queue.summary = false
+    queue.compact = false
     return
   }
   const adapter = adapterFor(agent.agentName)
   if (!adapter) {
     queue.pending = []
     queue.summary = false
+    queue.compact = false
     return
   }
   if (queue.whisper !== undefined) {
@@ -419,6 +489,11 @@ function run(agentId: string) {
   if (queue.summary) {
     queue.summary = false
     writeSummary(agent, adapter)
+    return
+  }
+  if (queue.compact) {
+    queue.compact = false
+    compactSession(agent)
     return
   }
   if (queue.pending.length === 0 && !queue.carry) return
@@ -435,6 +510,8 @@ function run(agentId: string) {
     agent.agentName,
     agent.session,
     introduce(agent) + envelope(body, seen.skipped, seen.summary, adapter.reply === "stdout", agent.agentName === "claude"),
+    agent.modelPick,
+    agent.effortPick,
   )
   const hop = queue.hops
   const trigger = queue.trigger
@@ -471,7 +548,7 @@ function run(agentId: string) {
       run(agentId)
       return
     } else if (failure) {
-      postSystem(`唤起 ${agent.name} 没成功：${explain(agent.agentName, failure)}`)
+      reportFailure(agent, log, failure, out, `唤起 ${agent.name} `)
     } else if (adapter.reply === "stdout" && still && out) {
       try {
         // Posted while the run is still open, so the message links to it.
@@ -492,7 +569,7 @@ function run(agentId: string) {
 function writeSummary(agent: NonNullable<ReturnType<typeof agentState>>, adapter: Adapter) {
   const byStdout = adapter.reply === "stdout"
   const prompt = summaryPrompt(byStdout)
-  const command = commandFor(agent.agentName ?? "", agent.session ?? "", prompt.text)
+  const command = commandFor(agent.agentName ?? "", agent.session ?? "", prompt.text, agent.modelPick, agent.effortPick)
   if (!command) return
   const queue = lane(agent.id)
   queue.running = true
@@ -509,7 +586,7 @@ function writeSummary(agent: NonNullable<ReturnType<typeof agentState>>, adapter
       // An interjection asks for the summary again afterwards; a plain stop drops it.
       if (queue.whisper !== undefined) queue.summary = true
     } else if (failure) {
-      postSystem(`请 ${agent.name} 写摘要没成功：${explain(agent.agentName, failure)}`)
+      reportFailure(agent, log, failure, out, `请 ${agent.name} 写摘要`)
     } else if (byStdout) {
       try {
         saveSummary(out, agent.name, prompt.upToSeq)
@@ -528,6 +605,59 @@ function writeSummary(agent: NonNullable<ReturnType<typeof agentState>>, adapter
     }
     run(agent.id)
   })
+}
+
+// The user asked to compact a seat's context: one turn of /compact on its
+// session (Claude Code runs it headless; scripts/codex-app.mjs turns it into
+// thread/compact/start). Nothing goes into its conversation besides the
+// summary the client writes itself.
+function tokensText(context: SeatContext | null) {
+  if (!context || context.tokens === null) return null
+  return context.tokens >= 10_000 ? `${(context.tokens / 10_000).toFixed(1)} 万` : `${context.tokens}`
+}
+
+function compactSession(agent: NonNullable<ReturnType<typeof agentState>>) {
+  const command = commandFor(agent.agentName ?? "", agent.session ?? "", "/compact", agent.modelPick, agent.effortPick)
+  if (!command) return
+  const queue = lane(agent.id)
+  queue.running = true
+  const before = seatContext(agent.agentName, agent.session, agent)
+  const log = startRun(agent.id, agent.name, "compact", { project: currentProject() })
+  const seat = busy(agent.id, "在压缩上下文")
+  launch(agent, command, log, seat.live, ({ out, failure, stopped }) => {
+    queue.running = false
+    endRun(log, failure || stopped ? "failed" : "done", stopped ? "被停下了" : failure ? `没成功：${failure}` : undefined)
+    seat.settle()
+    if (failure && !stopped) reportFailure(agent, log, failure, out, `压缩 ${agent.name} 的上下文`)
+    else if (!stopped) {
+      const after = seatContext(agent.agentName, agent.session, agent)
+      // Only a new compaction in its record counts: a short conversation
+      // gets "Not enough messages to compact." and stays as it was.
+      const done = (after?.compacted?.at ?? 0) > (before?.compacted?.at ?? 0)
+      const was = tokensText(before)
+      const now = tokensText(after)
+      postSystem(
+        !done
+          ? `${agent.name} 这次没压缩${out.trim() ? `：${out.trim().slice(0, 200)}` : ""}`
+          : now
+            ? `${agent.name} 的上下文压缩好了${was ? `：${was} → ${now}` : `，现在 ${now}`}`
+            : `${agent.name} 的上下文压缩好了，现在多大要等它下一轮才知道`,
+      )
+    }
+    run(agent.id)
+  })
+}
+
+export function requestCompact(agentId: string) {
+  const agent = wakeable(agentId)
+  if (!CONTEXT_KINDS.includes(agent.agentName ?? "")) {
+    throw new ApiError(400, `${agent.name} 这种客户端房间还不会替它压缩，在它自己的窗口里用 /compact`)
+  }
+  const queue = lane(agent.id)
+  if (queue.running || queue.compact) throw new ApiError(409, `${agent.name} 正在忙，等这一轮做完再压缩`)
+  queue.compact = true
+  run(agent.id)
+  return { started: queue.running }
 }
 
 // Something the user says to one seat alone. It doesn't go into the room and
@@ -550,7 +680,13 @@ function whisperPrompt(text: string, interrupted: boolean) {
 function answerWhisper(agent: NonNullable<ReturnType<typeof agentState>>, text: string) {
   const queue = lane(agent.id)
   const interrupted = Boolean(queue.carry) || queue.summary === true
-  const command = commandFor(agent.agentName ?? "", agent.session ?? "", introduce(agent) + whisperPrompt(text, interrupted))
+  const command = commandFor(
+    agent.agentName ?? "",
+    agent.session ?? "",
+    introduce(agent) + whisperPrompt(text, interrupted),
+    agent.modelPick,
+    agent.effortPick,
+  )
   if (!command) return
   queue.running = true
   const log = startRun(agent.id, agent.name, "private", { project: currentProject(), ask: text })
@@ -561,6 +697,9 @@ function answerWhisper(agent: NonNullable<ReturnType<typeof agentState>>, text: 
       log.answer = out.slice(0, 4000)
       if (agent.fresh) markWoken(agent.id)
     }
+    // Nothing is said in the room about a failed private turn, except that the
+    // account ran out: that one comes with its card.
+    if (failure && !stopped) noteLimit(agent, log, out)
     endRun(log, failure || stopped ? "failed" : "done", stopped ? "被停下了" : failure ? `没成功：${failure}` : undefined)
     seat.settle()
     run(agent.id)
@@ -603,6 +742,7 @@ export function stopAgent(agentId: string) {
   queue.pending = []
   queue.carry = undefined
   queue.summary = false
+  queue.compact = false
   queue.stop()
   return { dropped }
 }
@@ -716,7 +856,7 @@ function announceInterrupted() {
   for (const [project, list] of byProject) {
     try {
       inProject(project, () => {
-        const what = { reply: "回复", private: "单独回话", summary: "写摘要" } as const
+        const what = { reply: "回复", private: "单独回话", summary: "写摘要", compact: "压缩上下文" } as const
         // Its seat still shows the reply it never finished.
         for (const item of list) {
           try {
@@ -741,10 +881,11 @@ function announceInterrupted() {
   }
 }
 
-// Wake a seat again with what a cut-off run was doing.
+// Wake a seat again with what a cut-off run was doing: one the room's restart
+// stopped, or one that ended on the usage limit.
 export function rewake(runId: string) {
   const item = getRun(runId)
-  if (!item || !item.interrupted) throw new ApiError(404, "这次唤起不是被重启打断的，或者记录已经不在了")
+  if (!item || !(item.interrupted || item.limited)) throw new ApiError(404, "这次唤起不是被重启或额度打断的，或者记录已经不在了")
   if (item.resumedAt) throw new ApiError(409, `${item.agentName} 已经重新叫醒过了`)
   if (!item.project) throw new ApiError(400, "这次唤起没记下项目，叫不回去")
   return inProject(item.project, () => {
@@ -757,6 +898,8 @@ export function rewake(runId: string) {
     } else if (item.purpose === "summary") {
       if (summaryJob()) throw new ApiError(409, "有人正在写摘要")
       queue.summary = true
+    } else if (item.purpose === "compact") {
+      queue.compact = true
     } else {
       if (!item.body) throw new ApiError(400, "没记下当时在回哪些消息")
       queue.carry = queue.carry ? `${item.body}\n\n${queue.carry}` : item.body
@@ -764,9 +907,89 @@ export function rewake(runId: string) {
     }
     markResumed(item)
     markInterruptedResumed(item.id, item.resumedAt ?? Date.now())
+    markLimited(item.id, { state: "resumed", at: item.resumedAt ?? Date.now(), note: undefined })
     run(agent.id)
     return { agent: agent.name, started: queue.running }
   })
+}
+
+// ---- After a usage limit: wake the seat again when it resets ----
+// A little after the time the client named, so the window really has reopened.
+const RESUME_MARGIN_MS = 45_000
+// A reset the room finds long past after a restart is not acted on: the user
+// has probably moved on.
+const RESUME_STALE_MS = 6 * 3600_000
+
+function resumeTimers() {
+  return (g().__benchResumeTimers ??= new Map<string, NodeJS.Timeout>())
+}
+
+function armResume(runId: string, at: number) {
+  clearTimeout(resumeTimers().get(runId))
+  const wait = Math.max(0, at - Date.now())
+  // setTimeout can't count past ~24 days; a reset is hours away.
+  resumeTimers().set(runId, setTimeout(() => fireResume(runId), Math.min(wait, 2 ** 31 - 1)))
+}
+
+function fireResume(runId: string) {
+  resumeTimers().delete(runId)
+  const item = getRun(runId)
+  if (!item?.limited?.resumeAt || item.resumedAt || !item.project) return
+  inProject(item.project, () => {
+    try {
+      rewake(runId)
+    } catch (error) {
+      const why = error instanceof Error ? error.message : String(error)
+      setLimited(item, { ...item.limited, resumeAt: undefined })
+      markLimited(runId, { state: "failed", at: Date.now(), note: why })
+      postSystem(`额度重置了，想叫醒 ${item.agentName} 接着做，没成功：${why}`)
+    }
+  })
+}
+
+// What the user chose on the card: "schedule" (wake it after the reset), "now"
+// (wake it now), "cancel" (take the schedule back) or "dismiss".
+export function limitChoice(runId: string, action: string) {
+  const item = getRun(runId)
+  if (!item?.limited) throw new ApiError(404, "这次唤起没撞额度，或者记录已经不在了")
+  if (item.resumedAt) throw new ApiError(409, `${item.agentName} 已经叫醒过了`)
+  if (!item.project) throw new ApiError(400, "这次唤起没记下项目，叫不回去")
+  return inProject(item.project, () => {
+    if (action === "now") return rewake(runId)
+    if (action === "schedule") {
+      const resets = item.limited?.resetsAt
+      if (!resets) throw new ApiError(400, "没读出几点重置，不能定时；可以点「现在重试」")
+      const at = resets + RESUME_MARGIN_MS
+      setLimited(item, { resetsAt: resets, resumeAt: at })
+      markLimited(runId, { state: "scheduled", at, note: undefined })
+      armResume(runId, at)
+      return { scheduled: at }
+    }
+    if (action === "cancel" || action === "dismiss") {
+      clearTimeout(resumeTimers().get(runId))
+      resumeTimers().delete(runId)
+      setLimited(item, { resetsAt: item.limited?.resetsAt })
+      markLimited(runId, { state: action === "cancel" ? "open" : "dismissed", at: undefined })
+      return { ok: true }
+    }
+    throw new ApiError(400, "action 只能是 schedule、now、cancel 或 dismiss")
+  })
+}
+
+// After a restart: the timers are gone, set the ones still owed.
+function rearmResumes() {
+  for (const item of pendingResumes()) {
+    const at = item.limited?.resumeAt
+    if (!at || !item.project) continue
+    if (Date.now() - at > RESUME_STALE_MS) {
+      setLimited(item, { resetsAt: item.limited?.resetsAt })
+      try {
+        inProject(item.project, () => markLimited(item.id, { state: "dismissed", at: undefined, note: "服务器重启时已经过了很久，没有自动继续" }))
+      } catch {}
+      continue
+    }
+    armResume(item.id, at)
+  }
 }
 
 // The user took a message back: a seat it called and that hasn't started on it
@@ -786,6 +1009,7 @@ export function ensureSummon() {
   if (!g().__benchSummonAnnounced) {
     g().__benchSummonAnnounced = true
     announceInterrupted()
+    rearmResumes()
   }
   if (g().__benchSummonBound) return
   g().__benchSummonBound = true

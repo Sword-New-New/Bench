@@ -1,3 +1,4 @@
+import { baseName } from "@/lib/platform"
 import type { RunStep } from "@/lib/types"
 
 // Reads the event stream a woken agent prints (one JSON object per line) and
@@ -36,7 +37,7 @@ function pick(args: Json, keys: string[]) {
 }
 
 function base(file: string) {
-  return file.replace(/\/+$/, "").split("/").pop() || file
+  return baseName(file)
 }
 
 function short(text: string, max = 48) {
@@ -231,6 +232,11 @@ export function createParser() {
     } else if (type === "turn.completed") {
       // Codex: the turn is over.
       ended = true
+    } else if (type === "turn.failed") {
+      // Codex: the turn failed (the usage limit, say). Kept as a step so the
+      // panel and the room can say why; not "ended", the process exits itself.
+      const message = str(obj(event.error).message)
+      if (message) steps.push({ id: "turn-failed", at: now, kind: "note", title: message, state: "failed" })
     }
 
     // Antigravity: {"event": "step_update" | "result"}.

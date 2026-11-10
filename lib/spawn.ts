@@ -5,19 +5,40 @@ import os from "node:os"
 import path from "node:path"
 import { promisify } from "node:util"
 
-import { adapterFor, installed, modelOf } from "@/lib/adapters"
+import { adapterFor, installed, modelOf, summonPath } from "@/lib/adapters"
+import { checkPct, checkWindow, CONTEXT_KINDS } from "@/lib/context"
+import { cliCommand, dataHome } from "@/lib/platform"
+import { checkEffort, checkPick, dshFlags } from "@/lib/models"
 import { ApiError } from "@/lib/http"
 import { KINDS } from "@/lib/kinds"
 import { agentState, currentProjectInfo, sayAs, seatCreated, snapshot, userName } from "@/lib/store"
 
 // 「开新会话」: the room creates a session of an agent kind itself, seats it
 // and, if given a task, hands it over, in the folder picked here: the same
-// one as a seat, a new git worktree, or a path you type. A Claude session only
+// one as a seat, a new git worktree, a path you type, or a scratch folder
+// made for it (newScratch). A Claude session only
 // comes into being on its first wake (the wake script creates it under the id
-// picked here); dsh-agent can't take an id, so a DeepSeek one is made right
-// away (newDshSession).
+// picked here); dsh-agent and agy can't take an id, so a DeepSeek or an
+// Antigravity one is made right away (newDshSession, newAgySession), and so is
+// a Codex one, whose thread id Codex picks too (newCodexSession). CodeBuddy
+// and WorkBuddy take the room's id, but their wakes resume from the session's
+// file, so theirs is made right away too (newBuddySession).
 
-const run = promisify(execFile)
+const execFileAsync = promisify(execFile)
+
+// Commands run with the PATH wakes get (summonPath): the room's own may lack
+// ~/.local/bin, where cursor-agent and agy live, when it was started from the
+// desktop icon rather than a shell.
+// On Windows through Git Bash, which also finds an npm CLI's shell shim
+// (lib/platform.ts cliCommand).
+const run: typeof execFileAsync = ((file: string, args: string[], options: Record<string, unknown> = {}) => {
+  const [program, programArgs] = cliCommand(file, args)
+  return execFileAsync(program, programArgs, {
+    ...options,
+    windowsHide: true,
+    env: { ...((options.env as NodeJS.ProcessEnv) ?? process.env), PATH: summonPath() },
+  })
+}) as typeof execFileAsync
 
 // Kinds the room knows how to create a session for, headless and by an id it
 // picks (`spawn` in lib/kinds.ts). Others are seated by opening them yourself.
@@ -28,6 +49,14 @@ export type Workspace = { label: string; path: string; git: boolean }
 function isDir(dir: string) {
   try {
     return statSync(dir).isDirectory()
+  } catch {
+    return false
+  }
+}
+
+function isFile(file: string) {
+  try {
+    return statSync(file).isFile()
   } catch {
     return false
   }
@@ -95,6 +124,21 @@ function slug(name: string) {
   return `${ascii || "seat"}-${randomBytes(2).toString("hex")}`
 }
 
+// 「临时目录」: an empty folder of the session's own, outside the project (and
+// outside this repository, so git in it finds nothing to touch). Kept after
+// the seat leaves; the user clears it.
+export function scratchRoot() {
+  return path.join(dataHome(), "bench", "scratch")
+}
+
+function newScratch(name: string) {
+  // Keeps Chinese in the name (slug() would turn it into "seat").
+  const label = name.toLowerCase().replace(/[^\p{L}\p{N}]+/gu, "-").replace(/^-|-$/g, "") || "seat"
+  const dir = path.join(scratchRoot(), `${label}-${randomBytes(2).toString("hex")}`)
+  mkdirSync(dir, { recursive: true })
+  return dir
+}
+
 // A new worktree of the repository `base` is in, next to it, on its own branch.
 async function newWorktree(base: string, name: string) {
   const top = await gitTop(base)
@@ -124,14 +168,14 @@ function giveSeat(kind: string, session: string, seat: { agentId: string; token:
 // dsh-agent picks the session id itself: run a short first turn in the
 // folder and read the id from its JSON events. Only sessions made by
 // `dsh-agent exec` can be resumed by a wake later.
-async function newDshSession(dir: string, seat: { name: string; role: string; project: string }) {
+async function newDshSession(dir: string, seat: { name: string; role: string; project: string }, pick: string | null) {
   if (!installed("dsh-agent")) throw new ApiError(501, "没找到 dsh-agent，先装 DeepSeek Harness 的命令行")
   const intro =
     `这是并坐房间为你开的会话：你在「${seat.project}」项目里的席位叫 ${seat.name}，分工是 ${seat.role}。` +
     "房间已经替你入座，不用调用 bench_join。之后有人 @你，房间会把消息转给你，用 bench_say 回复。现在只回一个字：好"
   let stdout = ""
   try {
-    ;({ stdout } = await run("dsh-agent", ["exec", "--json", "--timeout", "120", "-C", dir, intro], {
+    ;({ stdout } = await run("dsh-agent", ["exec", "--json", ...(pick ? dshFlags(pick) : []), "--timeout", "120", "-C", dir, intro], {
       cwd: dir,
       timeout: 150_000,
       maxBuffer: 16 * 1024 * 1024,
@@ -153,6 +197,141 @@ async function newDshSession(dir: string, seat: { name: string; role: string; pr
     }
   }
   throw new ApiError(500, "dsh-agent 跑完了，但没报出会话 id")
+}
+
+// agy also picks the conversation id itself: one short first turn in the
+// folder (print mode, JSON out) and its conversation_id is the seat's. Run on
+// the same quick model the wake command uses unless the user picked another,
+// with the room's tools allowed, as a wake does.
+async function newAgySession(dir: string, seat: { name: string; role: string; project: string }, pick: string | null) {
+  if (!installed("agy")) throw new ApiError(501, "没找到 agy，先装 Antigravity 的命令行")
+  const intro =
+    `这是并坐房间为你开的会话：你在「${seat.project}」项目里的席位叫 ${seat.name}，分工是 ${seat.role}。` +
+    "房间已经替你入座，不用调用 bench_join。之后有人 @你，房间会把消息转给你，你的回答会贴回房间。现在只回一个字：好"
+  const settings = JSON.stringify({ permissions: { allow: ["mcp(bench/*)"] } })
+  let stdout = ""
+  try {
+    ;({ stdout } = await run(
+      "agy",
+      ["--model", pick ?? "gemini-3.8-flash-low", "--settings", settings, "--output-format", "json", "-p", intro],
+      { cwd: dir, timeout: 180_000, maxBuffer: 16 * 1024 * 1024 },
+    ))
+  } catch (error) {
+    const err = error as { stderr?: string; stdout?: string; message?: string }
+    stdout = err.stdout ?? ""
+    if (!stdout.includes("conversation_id")) {
+      const why = (err.stderr || err.message || "").trim().split("\n").slice(-1)[0]
+      throw new ApiError(500, `agy 没开出会话：${why.slice(0, 300)}`)
+    }
+  }
+  const id = stdout.match(/"conversation_id"\s*:\s*"([\w-]+)"/)?.[1]
+  if (!id) throw new ApiError(500, "agy 跑完了，但没报出会话 id")
+  return id
+}
+
+// cursor-agent makes an empty chat and prints its id; the wake command points
+// it at the seat's folder (--workspace "$BENCH_NEW_DIR", lib/kinds.ts).
+async function newCursorSession(dir: string) {
+  if (!installed("cursor-agent")) throw new ApiError(501, "没找到 cursor-agent，先装 Cursor 的命令行")
+  try {
+    const { stdout } = await run("cursor-agent", ["create-chat"], { cwd: dir, timeout: 60_000 })
+    const id = stdout.match(/\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b/)?.[0]
+    if (!id) throw new ApiError(500, `cursor-agent 没报出会话 id：${stdout.trim().slice(0, 200)}`)
+    return id
+  } catch (error) {
+    if (error instanceof ApiError) throw error
+    const err = error as { stderr?: string; message?: string }
+    const why = (err.stderr || err.message || "").trim().split("\n").slice(-1)[0]
+    throw new ApiError(500, `cursor-agent 没开出会话：${why.slice(0, 300)}`)
+  }
+}
+
+// Codex picks the thread id itself: one short first turn with `codex exec
+// --json` in the folder, and its thread.started event names the thread. The
+// bench tools are pre-approved as in codex-wake.sh.
+async function newCodexSession(dir: string, seat: { name: string; role: string; project: string }, pick: string | null) {
+  const bundled = "/usr/lib/chatgpt/resources/codex"
+  const bin = installed("codex") ? "codex" : isFile(bundled) ? bundled : null
+  if (!bin) throw new ApiError(501, "没找到 codex，先装 Codex 的命令行或桌面端")
+  const intro =
+    `这是并坐房间为你开的会话：你在「${seat.project}」项目里的席位叫 ${seat.name}，分工是 ${seat.role}。` +
+    "房间已经替你入座，不用调用 bench_join。之后有人 @你，房间会把消息转给你，你的回答会贴回房间。现在只回一个字：好"
+  const args = ["exec", "--skip-git-repo-check", "--json", ...(pick ? ["-m", pick] : [])]
+  let stdout = ""
+  try {
+    const turn = run(bin, [...args, "-c", 'mcp_servers.bench.default_tools_approval_mode="approve"', "-C", dir, intro], {
+      cwd: dir,
+      timeout: 180_000,
+      maxBuffer: 16 * 1024 * 1024,
+    })
+    // codex exec reads more of the prompt from a stdin that isn't a terminal.
+    turn.child.stdin?.end()
+    ;({ stdout } = await turn)
+  } catch (error) {
+    const err = error as { stderr?: string; stdout?: string; message?: string }
+    stdout = err.stdout ?? ""
+    if (!stdout.includes("thread.started")) {
+      const why = (err.stderr || err.message || "").trim().split("\n").slice(-1)[0]
+      throw new ApiError(500, `codex 没开出会话：${why.slice(0, 300)}`)
+    }
+  }
+  let id: string | undefined
+  for (const line of stdout.split("\n")) {
+    try {
+      const event = JSON.parse(line)
+      if (event?.type === "thread.started" && typeof event.thread_id === "string") id = event.thread_id
+      if (event?.type === "turn.failed") {
+        // The provider's error is often JSON itself: show its message.
+        const raw = String(event.error?.message ?? "")
+        let why = raw
+        try {
+          why = JSON.parse(raw)?.error?.message ?? raw
+        } catch {}
+        throw new ApiError(500, `codex 没开出会话：${why.slice(0, 300)}`)
+      }
+    } catch (error) {
+      if (error instanceof ApiError) throw error
+      // log lines that aren't JSON
+    }
+  }
+  if (!id) throw new ApiError(500, "codex 跑完了，但没报出会话 id")
+  return id
+}
+
+// CodeBuddy and WorkBuddy (the same CLI) take the id the room picks, but a
+// wake (resume-here.sh) finds the session by its file, so run the first turn
+// now. WorkBuddy's sessions live in ~/.workbuddy; the full codebuddy CLI is
+// used when there is one, since the copy inside WorkBuddy has no login of its
+// own (see workbuddy-wake.sh).
+async function newBuddySession(
+  kind: "codebuddy" | "workbuddy",
+  dir: string,
+  seat: { name: string; role: string; project: string },
+  pick: string | null,
+) {
+  const bundled = "/opt/apps/com.tencent.workbuddy/files/resources/app.asar.unpacked/cli/bin/codebuddy"
+  const bin = installed("codebuddy") ? "codebuddy" : kind === "workbuddy" && isFile(bundled) ? bundled : null
+  if (!bin) throw new ApiError(501, "没找到 codebuddy，先装 CodeBuddy Code 的命令行（npm i -g @tencent-ai/codebuddy-code）")
+  const session = randomUUID()
+  const intro =
+    `这是并坐房间为你开的会话：你在「${seat.project}」项目里的席位叫 ${seat.name}，分工是 ${seat.role}。` +
+    "房间已经替你入座，不用调用 bench_join。之后有人 @你，房间会把消息转给你，你的回答会贴回房间。现在只回一个字：好"
+  const env = kind === "workbuddy" ? { ...process.env, CODEBUDDY_CONFIG_DIR: path.join(os.homedir(), ".workbuddy") } : process.env
+  const args = ["--session-id", session, ...(pick ? ["--model", pick] : [])]
+  try {
+    await run(bin, [...args, "--allowedTools", "mcp__bench", "--output-format", "text", "-p", intro], {
+      cwd: dir,
+      env,
+      timeout: 150_000,
+      maxBuffer: 16 * 1024 * 1024,
+    })
+  } catch (error) {
+    const err = error as { stderr?: string; stdout?: string; message?: string }
+    const why = (err.stderr || err.stdout || err.message || "").trim().split("\n").slice(-1)[0]
+    const login = /Authentication required|\/login/i.test(why) ? "（命令行没登录：在终端运行 codebuddy，/login 一次）" : ""
+    throw new ApiError(500, `codebuddy 没开出会话${login}：${why.slice(0, 300)}`)
+  }
+  return session
 }
 
 // Renamed from the page: the seat's bench tools keep its name in their state
@@ -199,26 +378,44 @@ export async function spawnSession(input: Record<string, unknown>) {
   const name = asText(input.name, 24)
   if (!name) throw new ApiError(400, "给新会话起个名字")
   const role = asText(input.role, 24) || "新会话"
+  const pick = checkPick(input.model)
+  const effort = checkEffort(kind.id, input.effort)
+  const window = CONTEXT_KINDS.includes(kind.id) ? checkWindow(input.window) : undefined
+  const compactPct = CONTEXT_KINDS.includes(kind.id) ? checkPct(input.compactPct) : undefined
   const task = asText(input.task, 4000)
 
   const where = input.workspace && typeof input.workspace === "object" ? (input.workspace as Record<string, unknown>) : {}
-  const from = asText(where.path, 1000)
-  if (!from || !path.isAbsolute(from)) throw new ApiError(400, "工作目录要填完整路径，比如 /home/you/project")
-  const base = path.resolve(from.replace(/^~(?=\/|$)/, os.homedir()))
-  if (!isDir(base)) throw new ApiError(400, `${base} 不存在或不是目录`)
+  const temp = where.mode === "temp"
+  const from = temp ? "" : asText(where.path, 1000)
+  if (!temp && (!from || !path.isAbsolute(from))) throw new ApiError(400, "工作目录要填完整路径，比如 /home/you/project 或 C:\\work\\project")
+  const base = temp ? "" : path.resolve(from.replace(/^~(?=\/|$)/, os.homedir()))
+  if (!temp && !isDir(base)) throw new ApiError(400, `${base} 不存在或不是目录`)
   if (snapshot().agents.some((agent) => agent.name === name)) throw new ApiError(409, `已经有人叫 ${name}，换个名字`)
 
   let dir = base
   let branch: string | undefined
-  if (where.mode === "worktree") ({ dir, branch } = await newWorktree(base, name))
+  if (temp) dir = newScratch(name)
+  else if (where.mode === "worktree") ({ dir, branch } = await newWorktree(base, name))
 
   const project = currentProjectInfo()
-  const session = kind.id === "dsh" ? await newDshSession(dir, { name, role, project: project.name }) : randomUUID()
+  const about = { name, role, project: project.name }
+  const session =
+    kind.id === "dsh"
+      ? await newDshSession(dir, about, pick)
+      : kind.id === "antigravity"
+        ? await newAgySession(dir, about, pick)
+        : kind.id === "codex"
+          ? await newCodexSession(dir, about, pick)
+          : kind.id === "cursor"
+            ? await newCursorSession(dir)
+          : kind.id === "codebuddy" || kind.id === "workbuddy"
+          ? await newBuddySession(kind.id, dir, about, pick)
+          : randomUUID()
   // Someone may have taken the name while the session was being made.
   if (snapshot().agents.some((agent) => agent.name === name)) throw new ApiError(409, `已经有人叫 ${name}，换个名字`)
   const adapter = adapterFor(kind.id)
-  const model = kind.id === "claude" ? "Claude Code" : ((adapter && modelOf(adapter)) ?? kind.harness)
-  const seat = seatCreated({ name, role, model, agentName: kind.id, session, workdir: dir })
+  const model = pick ?? (kind.id === "claude" ? "Claude Code" : ((adapter && modelOf(adapter)) ?? kind.harness))
+  const seat = seatCreated({ name, role, model, modelPick: pick, effortPick: effort, windowPick: window, compactPct, agentName: kind.id, session, workdir: dir })
   giveSeat(kind.id, session, { agentId: seat.agent.id, token: seat.token, name, project: project.id })
   // A task is said in the room, so everyone sees what the new seat is for, and
   // it is what wakes the seat for the first time.

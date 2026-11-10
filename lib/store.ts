@@ -19,6 +19,7 @@ import type {
   Actor,
   Attachment,
   InterruptedRun,
+  LimitedRun,
   AgentStatus,
   Message,
   Project,
@@ -396,7 +397,7 @@ function projectFields(body: Record<string, unknown>, current?: ProjectRecord) {
     const raw = (asString(body.dir) ?? "").replace(/^~(?=\/|$)/, homedir())
     if (!raw) dir = undefined
     else {
-      if (!path.isAbsolute(raw)) throw new ApiError(400, "目录要填完整路径，比如 /home/you/project")
+      if (!path.isAbsolute(raw)) throw new ApiError(400, "目录要填完整路径，比如 /home/you/project 或 C:\\work\\project")
       const resolved = path.resolve(raw)
       if (!existsSync(resolved)) throw new ApiError(400, `${resolved} 不存在`)
       dir = resolved
@@ -526,6 +527,10 @@ function present(agent: Agent, now = Date.now()): PublicAgent {
     id: agent.id,
     name: agent.name,
     model: agent.model,
+    modelPick: agent.modelPick,
+    effortPick: agent.effortPick,
+    windowPick: agent.windowPick,
+    compactPct: agent.compactPct,
     role: agent.role,
     strengths: agent.strengths,
     status: run ? "working" : liveStatus(agent.status, agent.lastSeenAt, now),
@@ -824,6 +829,44 @@ export function renameAgent(id: string, input: unknown) {
   return { agent: present(agent) }
 }
 
+// The user picks the model a seat's wakes run on; null goes back to the
+// default of its command or client. Takes effect from its next wake.
+// `window` (the most context it may hold) and `pct` (where it compacts, as a
+// share of that): undefined leaves each as it is.
+export function setSeatModel(
+  id: string,
+  pick: string | null,
+  shown: string,
+  effort: string | null = null,
+  window?: number | null,
+  pct?: number | null,
+) {
+  const agent = findAgent(id)
+  if (!agent) throw new ApiError(404, "这个席位不在了")
+  const sameModel = (agent.modelPick ?? null) === pick
+  const sameEffort = (agent.effortPick ?? null) === effort
+  const sameWindow = window === undefined || (agent.windowPick ?? null) === window
+  const samePct = pct === undefined || (agent.compactPct ?? null) === pct
+  if (sameModel && sameEffort && sameWindow && samePct) return { agent: present(agent) }
+  if (pick) agent.modelPick = pick
+  else delete agent.modelPick
+  if (effort) agent.effortPick = effort
+  else delete agent.effortPick
+  if (window) agent.windowPick = window
+  else if (window === null) delete agent.windowPick
+  if (pct) agent.compactPct = pct
+  else if (pct === null) delete agent.compactPct
+  agent.model = shown
+  const said = [
+    sameModel ? "" : pick ? `改用 ${pick}` : "改回默认模型",
+    sameEffort ? "" : effort ? `思考强度 ${effort}` : "思考强度改回默认",
+    sameWindow ? "" : window ? `最大上下文 ${window / 10_000} 万` : "最大上下文改回模型自带的",
+    samePct ? "" : pct ? `用到 ${pct}% 时自动压缩` : "自动压缩改回客户端自己的设置",
+  ].filter(Boolean)
+  postSystem(`${agent.name} 之后${said.join("，")}，下次被叫醒时生效`)
+  return { agent: present(agent) }
+}
+
 function waitingOf() {
   return (room().waiting ??= new Map())
 }
@@ -1013,6 +1056,10 @@ export function seatCreated(input: {
   name: string
   role: string
   model: string
+  modelPick?: string | null
+  effortPick?: string | null
+  windowPick?: number | null
+  compactPct?: number | null
   agentName: string
   session: string
   workdir: string
@@ -1032,7 +1079,12 @@ export function seatCreated(input: {
   if (agent) {
     agent.workdir = input.workdir
     agent.fresh = true
+    if (input.modelPick) agent.modelPick = input.modelPick
+    if (input.effortPick) agent.effortPick = input.effortPick
+    if (input.windowPick) agent.windowPick = input.windowPick
+    if (input.compactPct) agent.compactPct = input.compactPct
     commit()
+    return { ...result, agent: present(agent) }
   }
   return result
 }
@@ -1352,6 +1404,14 @@ export async function awaitAnswer(input: unknown, signal?: AbortSignal) {
   return { ...result(), timedOut }
 }
 
+// What a seat shows once its question to the user is settled (above). The
+// run that asked is still going, and its progress lines take the seat back
+// from these (summon.ts busy()); before, the seat stayed on 「收到 … 的回答」
+// for the rest of the run and after it.
+export function askSettled(doing: string) {
+  return /^收到 .+ 的回答$/.test(doing) || /^问了 .+，还没回答$/.test(doing)
+}
+
 export const END_MARK = "【本轮结束】"
 
 // The user takes back one of their own messages. Its line stays in the thread
@@ -1410,6 +1470,34 @@ export function postInterrupted(text: string, interrupted: InterruptedRun[]) {
   })
   commit()
   return message
+}
+
+// The note and card for a wake that ended on the usage limit.
+export function postLimited(text: string, limited: LimitedRun) {
+  const message = appendMessage({
+    kind: "system",
+    authorId: "room",
+    authorName: "并坐",
+    authorColor: "#8a8175",
+    authorDemo: false,
+    text: clip(text, 500),
+    mentions: [],
+    limited,
+  })
+  commit()
+  return message
+}
+
+// Where the card has got to; false if it is no longer in this room.
+export function markLimited(runId: string, patch: Partial<LimitedRun>) {
+  for (const message of room().state.messages) {
+    if (message.limited?.runId !== runId) continue
+    Object.assign(message.limited, patch)
+    bumpRev()
+    commit()
+    return true
+  }
+  return false
 }
 
 export function markInterruptedResumed(runId: string, at: number) {
@@ -1677,6 +1765,28 @@ export function actOnTask(input: unknown) {
   const note = clip(asString(body.note) ?? "", 500)
   const now = Date.now()
 
+  // A copy to carry on in: the same title, detail and steps (all to do again),
+  // as a new task. The original is not touched.
+  if (action === "fork") {
+    const owner = task.ownerId ? findAgent(task.ownerId) : undefined
+    const { task: copy } = createTask({
+      ...body,
+      title: task.title,
+      detail: task.detail,
+      owner: owner?.name,
+      steps: (task.steps ?? []).map((step) => step.text),
+    })
+    copy.forkedFrom = { id: task.id, title: task.title }
+    copy.history[0].note = `复制自「${task.title}」（${task.id}）${copy.history[0].note ? `，${copy.history[0].note}` : ""}`
+    commit()
+    return { task: copy }
+  }
+  // A finished task is a record: nothing on it changes (steps, owner, review,
+  // notes). To go on, copy it.
+  if (task.status === "done") {
+    throw new ApiError(409, "这条待办已经完成，不能再改。要接着做，用 fork 复制一份新的（页面上点「复制一份」），或者用 bench_task 新建一条")
+  }
+
   if (action === "claim") {
     if (actor.type !== "agent") throw new ApiError(400, "人不能把自己认成负责人，请交给一个 agent")
     if (task.ownerId && task.ownerId !== actor.id) {
@@ -1756,7 +1866,6 @@ export function actOnTask(input: unknown) {
     return { task, message }
   } else if (action === "review") {
     // Done on the agent's side: the task waits for the user's sign-off.
-    if (task.status === "done") throw new ApiError(400, "这条已经完成了")
     task.review = { state: "waiting", at: now, by: actor.name, note: note || undefined }
     for (const step of task.steps ?? []) {
       if (isReviewStep(step) && step.state !== "done") moveStep(step, "doing", actor.name, now)
@@ -1764,7 +1873,6 @@ export function actOnTask(input: unknown) {
     task.history.push({ at: now, actor: actor.name, action: "请验收", note: note || `做完了，等 ${userName()} 验收` })
   } else if (action === "pass" || action === "reject") {
     if (actor.type !== "human") throw new ApiError(403, `验收只有 ${userName()} 能点：做完了用 review 请他验收`)
-    if (task.status === "done") throw new ApiError(400, "这条已经完成了")
     const pass = action === "pass"
     if (!pass && !note) throw new ApiError(400, "打回要写一句原因，负责人照着改")
     task.review = { state: pass ? "passed" : "rejected", at: now, by: actor.name, note: note || undefined }
@@ -1827,7 +1935,7 @@ export function actOnTask(input: unknown) {
       if (task.status === "open" && state !== "todo") task.status = "doing"
     }
   } else {
-    throw new ApiError(400, `action 只能是 claim、done、block、handoff、step、review，或 ${userName()} 的 pass、reject`)
+    throw new ApiError(400, `action 只能是 claim、done、block、handoff、step、review、fork，或 ${userName()} 的 pass、reject`)
   }
 
   task.updatedAt = now

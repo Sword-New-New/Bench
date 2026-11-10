@@ -8,6 +8,14 @@ export type PublicAgent = {
   id: string
   name: string
   model: string
+  // The model the user picked for it in the room; wakes run on it (lib/models.ts).
+  modelPick?: string
+  // How hard it thinks (Claude, Codex, CodeBuddy/WorkBuddy); unset, the default.
+  effortPick?: string
+  // The most context it may hold, in tokens, and at what percent of that it
+  // compacts by itself (lib/context.ts); unset, the model's and client's own.
+  windowPick?: number
+  compactPct?: number
   role: string
   strengths: string[]
   status: AgentStatus
@@ -101,6 +109,9 @@ export type Message = {
   verdict?: { taskId: string; state: "passed" | "rejected"; ownerId?: string }
   // A room note after a restart: the wakes it cut off.
   interrupted?: InterruptedRun[]
+  // A wake that ended on the account's usage limit, with the card to carry on
+  // after it resets.
+  limited?: LimitedRun
   createdAt: number
 }
 
@@ -135,6 +146,9 @@ export type Task = {
   brief?: TaskBrief
   // The to-do list of this feature: worked, and accepted, one step at a time.
   steps?: TaskStep[]
+  // A finished task is not edited; a copy of it (action "fork") carries on, and
+  // says which it came from.
+  forkedFrom?: { id: string; title: string }
   // The user's sign-off: an agent asks for it when the work is done, and only
   // the user passes it or sends it back with a reason.
   review?: TaskReview
@@ -271,7 +285,8 @@ export type Run = {
   id: string
   agentId: string
   agentName: string
-  purpose: "reply" | "summary" | "private"
+  // compact: the user had the room compact its context (lib/summon.ts compactSession).
+  purpose: "reply" | "summary" | "private" | "compact"
   // A private run: what the user said and what it answered.
   ask?: string
   answer?: string
@@ -288,9 +303,27 @@ export type Run = {
   body?: string
   // The room stopped while it ran; `resumedAt` once the user woke it again.
   interrupted?: boolean
+  // It ended on the account's usage limit (lib/limits.ts). `resumeAt`: the user
+  // chose to have the seat woken again then.
+  limited?: { resetsAt?: number; resumeAt?: number }
   announced?: boolean
   resumedAt?: number
   steps: RunStep[]
+}
+
+// The card under 「撞到额度」: what ran out, when it comes back, and what the
+// user chose. open -> scheduled (woken again at `at`) -> resumed, or failed;
+// or dismissed.
+export type LimitedRun = {
+  runId: string
+  agentId: string
+  agentName: string
+  label: string
+  resetsAt?: number
+  state: "open" | "scheduled" | "resumed" | "failed" | "dismissed"
+  // scheduled: when it will be woken; resumed: when it was.
+  at?: number
+  note?: string
 }
 
 // A wake the room stopped in the middle of, listed so the user can wake it again.

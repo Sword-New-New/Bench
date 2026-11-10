@@ -17,6 +17,12 @@ script="$root/scripts/bench-mcp.mjs"
 node="$(command -v node || true)"
 [[ -n "$node" ]] || node=/usr/local/nodejs/bin/node
 [[ -x "$node" ]] || { echo "找不到 node" >&2; exit 1; }
+# Git Bash on Windows: what goes into a client's config must be a Windows path
+# (C:/Program Files/nodejs/node.exe), not /c/Program Files/….
+if command -v cygpath >/dev/null 2>&1; then
+  script="$(cygpath -m "$script")"
+  node="$(cygpath -m "$node")"
+fi
 
 # Merge the bench entry into a JSON config: merge_json FILE [TOP_JSON] [STYLE] [SERVER_JSON].
 merge_json() {

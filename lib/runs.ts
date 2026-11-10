@@ -92,6 +92,16 @@ export function takeUnannounced() {
   return list
 }
 
+// Runs the user asked to be woken again after a usage limit, not yet done.
+export function pendingResumes() {
+  return runs().filter((run) => run.limited?.resumeAt && !run.resumedAt)
+}
+
+export function setLimited(run: Run, limited: Run["limited"]) {
+  run.limited = limited
+  save()
+}
+
 export function markResumed(run: Run) {
   run.resumedAt = Date.now()
   save()

@@ -17,6 +17,22 @@ if [[ -z "$bin" || ! -x "$bin" ]]; then
   exit 127
 fi
 
+# The model the user picked for this seat in the room, if any.
+model=()
+if [[ -n "${BENCH_MODEL:-}" ]]; then
+  model=(--model "$BENCH_MODEL")
+fi
+# And how hard it thinks (low … max), if picked.
+if [[ -n "${BENCH_EFFORT:-}" ]]; then
+  model+=(--effort "$BENCH_EFFORT")
+fi
+
+# Where its context compacts by itself, if the user set one for this seat
+# (lib/context.ts). The variable beats every settings file.
+if [[ "${BENCH_COMPACT_WINDOW:-}" =~ ^[0-9]+$ ]]; then
+  export CLAUDE_CODE_AUTO_COMPACT_WINDOW="$BENCH_COMPACT_WINDOW"
+fi
+
 # Messages that call the seat while it works reach it mid-turn: after each
 # tool call this hook asks the room for them (lib/summon.ts takeQueued).
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -30,7 +46,7 @@ file="$(ls "$HOME"/.claude/projects/*/"$session".jsonl 2>/dev/null | head -1 || 
 # first turn: start it under that id, in the folder the room picked for it.
 if [[ -z "$file" && -n "${BENCH_NEW_DIR:-}" ]]; then
   cd "$BENCH_NEW_DIR"
-  exec "$bin" --session-id "$session" "${hook[@]}" --allowedTools mcp__bench --disallowedTools AskUserQuestion --permission-prompt-tool mcp__bench__bench_permit --output-format stream-json --verbose -p "$@"
+  exec "$bin" --session-id "$session" "${model[@]}" "${hook[@]}" --allowedTools mcp__bench --disallowedTools AskUserQuestion --permission-prompt-tool mcp__bench__bench_permit --output-format stream-json --verbose -p "$@"
 fi
 if [[ -z "$file" ]]; then
   echo "找不到 Claude Code 会话 $session" >&2
@@ -86,4 +102,4 @@ esac
 # Permission prompts go the same way: bench_permit puts each on the page and
 # waits for the user's allow or deny (lib/permits.ts).
 # stream-json: one event per line, which the room turns into the 「过程」 panel.
-exec "$bin" --resume "$session" "${perm[@]}" "${hook[@]}" --allowedTools mcp__bench --disallowedTools AskUserQuestion --permission-prompt-tool mcp__bench__bench_permit --output-format stream-json --verbose -p "$@"
+exec "$bin" --resume "$session" "${perm[@]}" "${model[@]}" "${hook[@]}" --allowedTools mcp__bench --disallowedTools AskUserQuestion --permission-prompt-tool mcp__bench__bench_permit --output-format stream-json --verbose -p "$@"

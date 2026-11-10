@@ -20,8 +20,26 @@ if [[ "${BENCH_CODEX_EXEC:-}" != "1" ]] && command -v node >/dev/null; then
   CODEX_BIN="$bin" exec node "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/codex-app.mjs" "$id" "$text" < /dev/null
 fi
 
+# Plain `codex exec` would send "/compact" as a message; only the app-server
+# path above can compact (scripts/codex-app.mjs).
+if [[ "$text" == "/compact" ]]; then
+  echo "压缩上下文要走 codex app-server，BENCH_CODEX_EXEC=1 时不行" >&2
+  exit 2
+fi
+
 # --json: one event per line, which the room turns into the 「过程」 panel.
-exec "$bin" exec resume --skip-git-repo-check --json \
+pick=()
+if [[ -n "${BENCH_MODEL:-}" ]]; then
+  pick=(-m "$BENCH_MODEL")
+fi
+if [[ -n "${BENCH_EFFORT:-}" ]]; then
+  pick+=(-c "model_reasoning_effort=\"$BENCH_EFFORT\"")
+fi
+# Where its context compacts by itself, if the user set one (lib/context.ts).
+if [[ "${BENCH_COMPACT_WINDOW:-}" =~ ^[0-9]+$ ]]; then
+  pick+=(-c "model_auto_compact_token_limit=$BENCH_COMPACT_WINDOW")
+fi
+exec "$bin" exec resume --skip-git-repo-check --json "${pick[@]}" \
   -c "mcp_servers.bench.env.BENCH_UUID=\"$id\"" \
   -c 'mcp_servers.bench.default_tools_approval_mode="approve"' \
   "$id" "$text" < /dev/null

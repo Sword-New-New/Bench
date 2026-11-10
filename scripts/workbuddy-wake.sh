@@ -39,7 +39,16 @@ case "$mode" in
   fullAccess | bypassPermissions | acceptEdits | plan | default) perm=(--permission-mode "$mode") ;;
 esac
 
+# The model the user picked for this seat in the room, if any.
+model=()
+if [[ -n "${BENCH_MODEL:-}" ]]; then
+  model=(--model "$BENCH_MODEL")
+fi
+if [[ -n "${BENCH_EFFORT:-}" ]]; then
+  model+=(--effort "$BENCH_EFFORT")
+fi
+
 here="$(cd "$(dirname "$0")" && pwd)"
 exec "$here/resume-here.sh" "$session" "$HOME/.workbuddy:$HOME/.codebuddy" -- \
   bash -c 'CODEBUDDY_CONFIG_DIR="$BENCH_CONFIG_DIR" exec "$0" "$@"' \
-  "$bin" -r "$session" "${perm[@]}" --allowedTools mcp__bench --output-format text -p "$@"
+  "$bin" -r "$session" "${perm[@]}" "${model[@]}" --allowedTools mcp__bench --output-format text -p "$@"

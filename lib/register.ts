@@ -4,6 +4,7 @@ import path from "node:path"
 import { summonPath } from "@/lib/adapters"
 import { ApiError } from "@/lib/http"
 import { kindById } from "@/lib/kinds"
+import { scriptCommand } from "@/lib/platform"
 
 export type RegisterResult = { kind: string; ok: boolean; output: string }
 
@@ -15,10 +16,16 @@ const LIMIT_MS = 60_000
 function registerOne(kind: string): Promise<RegisterResult> {
   const script = path.join(process.cwd(), "scripts", "register-mcp.sh")
   return new Promise((resolve) => {
+    let command: [string, string[]]
+    try {
+      command = scriptCommand(script, [kind])
+    } catch (error) {
+      return resolve({ kind, ok: false, output: (error as Error).message })
+    }
     execFile(
-      script,
-      [kind],
-      { cwd: process.cwd(), timeout: LIMIT_MS, env: { ...process.env, PATH: summonPath() }, maxBuffer: 256_000 },
+      command[0],
+      command[1],
+      { cwd: process.cwd(), timeout: LIMIT_MS, env: { ...process.env, PATH: summonPath() }, maxBuffer: 256_000, windowsHide: true },
       (error, stdout, stderr) => {
         const output = `${stdout}${stderr}`.trim().slice(-1200)
         const why = error?.killed ? "超过 60 秒没结束，已停掉" : ""

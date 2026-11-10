@@ -18,7 +18,16 @@ if (!thread || !/^[A-Za-z0-9._-]+$/.test(thread)) {
 }
 const room = (process.env.BENCH_URL || "http://127.0.0.1:4399").replace(/\/$/, "")
 const key = process.env.BENCH_RUN_KEY
+// The model the user picked for this seat in the room, if any.
+const model = process.env.BENCH_MODEL || undefined
+// And how hard it thinks (minimal … xhigh), if picked.
+const effort = process.env.BENCH_EFFORT || undefined
+// Where its context compacts by itself, if the user set one (lib/context.ts).
+const compactAt = /^\d+$/.test(process.env.BENCH_COMPACT_WINDOW ?? "") ? process.env.BENCH_COMPACT_WINDOW : undefined
 const STEER_EVERY_MS = 2500
+// "/compact" from the room (lib/summon.ts compactSession) isn't a message:
+// it asks the thread to compact its context instead of starting a turn.
+const compacting = text === "/compact"
 
 function codexBin() {
   if (process.env.CODEX_BIN && existsSync(process.env.CODEX_BIN)) return process.env.CODEX_BIN
@@ -38,6 +47,7 @@ const server = spawn(
     `mcp_servers.bench.env.BENCH_UUID="${thread}"`,
     "-c",
     'mcp_servers.bench.default_tools_approval_mode="approve"',
+    ...(compactAt ? ["-c", `model_auto_compact_token_limit=${compactAt}`] : []),
   ],
   { stdio: ["pipe", "pipe", "inherit"] },
 )
@@ -134,6 +144,13 @@ function onMessage(message) {
       finish(failed ? 1 : 0)
       return
     }
+    case "thread/compacted":
+      if (compacting) {
+        out({ type: "item.completed", item: { id: "compact", type: "agent_message", text: "上下文压缩好了" } })
+        out({ type: "turn.completed", usage: {} })
+        finish(0)
+      }
+      return
     case "error":
       out({ type: "error", message: params.error?.message ?? params.message ?? "出错了" })
       return
@@ -187,13 +204,20 @@ try {
   notify("initialized")
   await request("thread/resume", { threadId: thread, approvalPolicy: "never" })
   out({ type: "thread.started", thread_id: thread })
-  const started = await request("turn/start", {
-    threadId: thread,
-    approvalPolicy: "never",
-    input: [{ type: "text", text: text ?? "", text_elements: [] }],
-  })
-  turnId = started?.turn?.id ?? ""
-  out({ type: "turn.started" })
+  if (compacting) {
+    await request("thread/compact/start", { threadId: thread })
+    out({ type: "turn.started" })
+  } else {
+    const started = await request("turn/start", {
+      threadId: thread,
+      approvalPolicy: "never",
+      ...(model ? { model } : {}),
+      ...(effort ? { effort } : {}),
+      input: [{ type: "text", text: text ?? "", text_elements: [] }],
+    })
+    turnId = started?.turn?.id ?? ""
+    out({ type: "turn.started" })
+  }
 } catch (error) {
   console.error(error instanceof Error ? error.message : String(error))
   finish(1)

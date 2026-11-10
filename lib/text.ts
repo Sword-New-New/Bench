@@ -100,3 +100,21 @@ export function splitMentions(
   if (parts.length === 0) return [{ text, mention: false }]
   return parts
 }
+
+// Shell code blocks in messages (components/room/markdown.tsx CodeBox).
+const SHELLS = new Set(["", "bash", "sh", "shell", "zsh", "console", "terminal", "shellsession", "powershell", "ps1", "cmd", "bat"])
+
+export function isShell(lang: string) {
+  return SHELLS.has(lang)
+}
+
+// What the copy button puts on the clipboard. For a shell block written as a
+// session (`$ command` lines with their output between), only the commands,
+// without the `$ `; anything else as it is.
+export function copyText(part: { text: string; lang: string }) {
+  if (!isShell(part.lang)) return part.text
+  const lines = part.text.split("\n")
+  const prompted = lines.filter((line) => /^\s*[$>]\s/.test(line))
+  if (prompted.length === 0) return part.text
+  return prompted.map((line) => line.replace(/^\s*[$>]\s/, "")).join("\n")
+}

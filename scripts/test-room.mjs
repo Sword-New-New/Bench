@@ -224,6 +224,35 @@ async function steps(stamp) {
   const verdictLine = verdicts.data.messages?.find((item) => item.id === passed.data.message.id)
   assert(verdictLine?.verdict?.owner?.id === alpha.data.agent.id && verdictLine.verdict.state === "passed", "bench_messages 里的验收消息要带负责人的席位 id")
 
+  // A finished task is a record: nothing on it changes, from the agent or the
+  // user. Going on means copying it (fork), which leaves the original alone.
+  const taskBefore = JSON.stringify((await request(`/api/v1/room?project=${project}`)).data.tasks.find((item) => item.id === passed.data.task.id))
+  const attempts = [
+    { ...asAlpha, action: "step", add: ["偷偷加一步"] },
+    { ...asAlpha, action: "step", step: 1, state: "todo", note: "想改回去" },
+    { ...asAlpha, action: "review" },
+    { ...asAlpha, action: "block" },
+    { as: "human", action: "step", step: 1, state: "todo" },
+    { as: "human", action: "done" },
+    { as: "human", action: "reject", note: "再打回" },
+  ]
+  for (const body of attempts) {
+    const refused = await request(taskPath, { method: "POST", body })
+    assert(refused.status === 409, `已完成的待办不该能改：${body.action} 得到 ${refused.status}`)
+  }
+  const taskAfter = JSON.stringify((await request(`/api/v1/room?project=${project}`)).data.tasks.find((item) => item.id === passed.data.task.id))
+  assert(taskBefore === taskAfter, "拒绝之后，已完成的待办一点都不该变")
+  const forked = await request(taskPath, { method: "POST", body: { as: "human", action: "fork" } })
+  assert(forked.status === 200 && forked.data.task.id !== passed.data.task.id, `复制失败 ${forked.data.error || forked.status}`)
+  assert(forked.data.task.title === passed.data.task.title && forked.data.task.forkedFrom?.id === passed.data.task.id, "复制出来的待办要写明从哪条来")
+  assert(
+    forked.data.task.steps?.length === passed.data.task.steps.length && forked.data.task.steps.every((step) => step.state === "todo"),
+    "复制出来的步骤要一样多，并且全部重新开始",
+  )
+  assert(forked.data.task.status !== "done", "复制出来的待办不该是已完成")
+  const originalAfterFork = JSON.stringify((await request(`/api/v1/room?project=${project}`)).data.tasks.find((item) => item.id === passed.data.task.id))
+  assert(originalAfterFork === taskBefore, "复制之后原来那条不该变")
+
   // Replies are data an agent can read: the inbox says what each line
   // answers, and /messages hands back a whole chain, structured.
   const question = await request("/api/v1/say", { method: "POST", body: { as: "human", text: "回复链的起点" } })

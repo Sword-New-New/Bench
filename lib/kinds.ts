@@ -16,6 +16,9 @@ export type Kind = {
   // Guess the kind from a free-form model string when agentName is missing.
   match: RegExp
   command: string
+  // The option that picks a model, for commands that don't name one already
+  // (lib/models.ts withModel puts it before -p).
+  modelFlag?: string
   // "stdout": the command prints the agent's answer, post it back as the agent.
   reply: "stdout" | "none"
   uuidHint: string
@@ -49,15 +52,17 @@ export const KINDS: Kind[] = [
     core: true,
     spawn: true,
     match: /deepseek|dsh/i,
-    command: "dsh-agent resume --json {uuid} {text}",
-    was: ["dsh-agent resume {uuid} {text}"],
+    // --timeout 0: dsh-agent's own limit is 30 minutes; the room sets none.
+    command: "dsh-agent resume --json --timeout 0 {uuid} {text}",
+    was: ["dsh-agent resume {uuid} {text}", "dsh-agent resume --json {uuid} {text}"],
     reply: "none",
     uuidHint: "dsh-agent resume 用的会话 id，shell 里的 DSH_SESSION_ID",
   },
   {
     id: "codex",
     label: "GPT",
-    harness: "ChatGPT 桌面端 · Codex",
+    harness: "Codex",
+    spawn: true,
     color: "#10a37f",
     shape: "flower",
     core: true,
@@ -74,8 +79,17 @@ export const KINDS: Kind[] = [
     shape: "pebble",
     core: true,
     match: /grok|cursor|composer|xai/i,
-    command: "cursor-agent --resume {uuid} --model grok-4.7-low-fast --approve-mcps --trust --output-format stream-json -p {text}",
-    was: ["cursor-agent --resume {uuid} --model grok-4.7-low-fast --approve-mcps --trust -p {text}"],
+    spawn: true,
+    // --workspace: a chat keeps no folder of its own; it works wherever it is
+    // resumed. A seat the room opened has one (BENCH_NEW_DIR), others run
+    // from the room's folder as before. grok-4.7-medium: Cursor's free plan
+    // takes Grok 4.7 only at its fixed settings (no -low/-fast).
+    command:
+      'cursor-agent --resume {uuid} --model grok-4.7-medium --workspace "${BENCH_NEW_DIR:-$PWD}" --approve-mcps --trust --output-format stream-json -p {text}',
+    was: [
+      "cursor-agent --resume {uuid} --model grok-4.7-low-fast --approve-mcps --trust -p {text}",
+      "cursor-agent --resume {uuid} --model grok-4.7-low-fast --approve-mcps --trust --output-format stream-json -p {text}",
+    ],
     reply: "stdout",
     uuidHint: "cursor-agent 的 chat id，CURSOR_AGENT_CHAT_ID（没有就看 cursor-agent ls）",
   },
@@ -86,6 +100,7 @@ export const KINDS: Kind[] = [
     color: "#7c6cf0",
     shape: "sparkle",
     core: true,
+    spawn: true,
     match: /gemini|antigravity|agy/i,
     // agy-wake.sh clones a conversation from the desktop app into agy's own
     // store first, so desktop sessions can be woken too.
@@ -115,6 +130,8 @@ export const KINDS: Kind[] = [
     color: "#6c5ce7",
     shape: "cloud",
     match: /codebuddy|\bcbc\b/i,
+    modelFlag: "--model",
+    spawn: true,
     command: "./scripts/resume-here.sh {uuid} ~/.codebuddy -- codebuddy -p {text} -r {uuid} --allowedTools mcp__bench --output-format text",
     reply: "stdout",
     uuidHint: "CodeBuddy Code 的会话 id，CODEBUDDY_SESSION_ID；没有就运行 codebuddy ps",
@@ -126,6 +143,7 @@ export const KINDS: Kind[] = [
     color: "#1f6bff",
     shape: "pill",
     match: /workbuddy/i,
+    spawn: true,
     command: "./scripts/workbuddy-wake.sh {uuid} {text}",
     reply: "stdout",
     uuidHint: "WorkBuddy 的会话 id，CODEBUDDY_SESSION_ID；没有就看 ~/.workbuddy/projects 下最新的 jsonl 文件名",
@@ -170,6 +188,7 @@ export const KINDS: Kind[] = [
     color: "#8957e5",
     shape: "circle",
     match: /copilot/i,
+    modelFlag: "--model",
     command: "copilot --session-id {uuid} -s --allow-tool=bench --no-ask-user -p {text}",
     reply: "stdout",
     uuidHint: "Copilot CLI 的会话 id，COPILOT_AGENT_SESSION_ID；没有就看 ~/.copilot/session-state/ 下最新的文件夹名",

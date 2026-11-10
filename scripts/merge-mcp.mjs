@@ -11,9 +11,10 @@
 
 import { copyFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs"
 import path from "node:path"
+import { fileURLToPath } from "node:url"
 
 const [file, style, kind, top = "{}", server = "{}"] = process.argv.slice(2)
-const script = path.join(path.dirname(new URL(import.meta.url).pathname), "bench-mcp.mjs")
+const script = path.join(path.dirname(fileURLToPath(import.meta.url)), "bench-mcp.mjs")
 const node = process.execPath
 
 let config = {}

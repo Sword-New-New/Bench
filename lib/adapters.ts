@@ -4,6 +4,8 @@ import path from "node:path"
 
 import { ApiError } from "@/lib/http"
 import { KINDS, wakeModel } from "@/lib/kinds"
+import { withEffort, withModel } from "@/lib/models"
+import { commandNames, extraBins, pathDelimiter } from "@/lib/platform"
 
 export type Adapter = {
   name: string
@@ -73,10 +75,10 @@ function shellQuote(value: string) {
   return `'${value.replaceAll("'", `'\\''`)}'`
 }
 
-export function commandFor(name: string, uuid: string, text = "") {
+export function commandFor(name: string, uuid: string, text = "", model?: string | null, effort?: string | null) {
   const adapter = adapterFor(name)
   if (!adapter) return null
-  return adapter.command
+  return withEffort(name, withModel(name, adapter.command, model), effort)
     .replaceAll("{uuid}", shellQuote(uuid))
     .replaceAll("{session}", shellQuote(uuid))
     .replaceAll("{text}", shellQuote(text))
@@ -85,11 +87,9 @@ export function commandFor(name: string, uuid: string, text = "") {
 // The PATH a woken command runs with. A room started from the desktop entry
 // often lacks the user's own bin directories.
 export function summonPath() {
-  const home = os.homedir()
-  const extra = [path.join(home, ".local", "bin"), "/usr/local/nodejs/bin", "/usr/local/bin"]
-  const parts = (process.env.PATH ?? "").split(":").filter(Boolean)
-  for (const dir of extra) if (!parts.includes(dir)) parts.push(dir)
-  return parts.join(":")
+  const parts = (process.env.PATH ?? "").split(pathDelimiter()).filter(Boolean)
+  for (const dir of extraBins()) if (!parts.includes(dir)) parts.push(dir)
+  return parts.join(pathDelimiter())
 }
 
 function executable(file: string) {
@@ -106,11 +106,12 @@ export function installed(command: string) {
   const first = command.trim().match(/^(?:'([^']*)'|"([^"]*)"|(\S+))/)
   const bin = first?.[1] ?? first?.[2] ?? first?.[3]
   if (!bin) return false
-  const expanded = bin.replace(/^~(?=\/)/, os.homedir())
-  if (expanded.includes("/")) return executable(path.resolve(process.cwd(), expanded))
+  const expanded = bin.replace(/^~(?=[\\/])/, os.homedir())
+  if (/[\\/]/.test(expanded)) return executable(path.resolve(process.cwd(), expanded))
+  const names = commandNames(expanded)
   return summonPath()
-    .split(":")
-    .some((dir) => executable(path.join(dir, expanded)))
+    .split(pathDelimiter())
+    .some((dir) => names.some((name) => executable(path.join(dir, name))))
 }
 
 function readHelp() {
@@ -152,7 +153,7 @@ export function replaceAdapters(input: unknown) {
   return next
 }
 
-function tomlString(file: string, key: string, table = "") {
+export function tomlString(file: string, key: string, table = "") {
   try {
     // The keys of one table: top level by default, else that [table].
     const text = readFileSync(file, "utf8")

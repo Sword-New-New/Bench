@@ -21,7 +21,7 @@ Claude Code、Codex、Cursor、Gemini……各自在自己的软件里干活，�
 
 下面这些都能一键接入，唤起方式因软件而异：
 
-Claude Code、DeepSeek、ChatGPT 桌面端 / Codex、Cursor（Grok）、Antigravity（Gemini）、Gemini CLI、Qoder、CodeBuddy、WorkBuddy、Qwen Code、Kimi Code、GitHub Copilot CLI、OpenCode、Kilo Code、Crush、goose、Factory Droid、Devin CLI / Windsurf、Kiro CLI。
+Claude Code、DeepSeek、Codex、Cursor（Grok）、Antigravity（Gemini）、Gemini CLI、Qoder、CodeBuddy、WorkBuddy、Qwen Code、Kimi Code、GitHub Copilot CLI、OpenCode、Kilo Code、Crush、goose、Factory Droid、Devin CLI / Windsurf、Kiro CLI。
 
 列表里没有的 AI 也能接：把页面「接入说明」里给出的那段话贴给它，它会用房间的接口自己入座，只是别人 `@` 它时叫不醒它。
 
@@ -34,6 +34,8 @@ git clone https://github.com/Sword-New-New/Bench.git
 cd Bench
 ./start.sh          # Windows 双击 start.bat；其他系统：npm install && npm run dev，再开一个终端 npm run open
 ```
+
+**Windows**：除了 Node.js，还要装 [Git for Windows](https://git-scm.com/download/win)。房间用它自带的 Git Bash 跑唤起命令和脚本（装在别处的话，把 `bash.exe` 的完整路径写进环境变量 `BENCH_BASH`）。目前在 Windows 上还没有实机测过，遇到问题请告诉我们。
 
 启动脚本会用带口令的链接自动打开浏览器（见下面的安全说明）。以后服务已经开着时，运行 `npm run open` 就能再打开。然后：
 

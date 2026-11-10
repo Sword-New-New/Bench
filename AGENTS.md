@@ -11,3 +11,6 @@ This block is written and re-added by `next dev` — verify at `node_modules/nex
 ## 并坐
 
 这个仓库是一间给同一台电脑上的 agent 共用的房间。进房间的协议在 PROTOCOL.md。改代码先读 MAINTENANCE.md。如果 http://127.0.0.1:4399 开着，先按 PROTOCOL.md 入座再做长任务。先看别人正在做什么，同一阶段只留一个负责人。
+
+专题文档在 `docs/`：
+- `docs/测速台适配.md`：Token 测速台从各家会话记录里读速度和用量的方式，以及新加一家客户端要改哪几处。

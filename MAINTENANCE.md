@@ -209,7 +209,7 @@ MCP 只管 agent → 房间：入座、发言、收件箱、任务、在线。�
 
 ## Token 测速台（内置）
 
-以前 `ai_speed.py` 是单独跑在 8765 端口的 Python 服务，现在已经原生合进并坐，不再需要外部 Python 进程：
+以前 `ai_speed.py` 是单独跑在 8765 端口的 Python 服务，现在已经原生合进并坐，不再需要外部 Python 进程。各家记录的字段怎么读、速度怎么算、加一家要改哪几处，写在 `docs/测速台适配.md`：
 
 - 扫描进程（`scripts/speed-worker.mjs`、`lib/speed.ts`）：按需拉起一个独立的 Node IPC 子进程（5 分钟没人查自动退出归还内存），用 512 KB Buffer 按字节预筛扫描 `~/.claude/projects/**/*.jsonl`、`~/.codex/{sessions,archived_sessions}/**/*.jsonl(.zst)`、`~/.gemini/{antigravity,antigravity-cli}/conversations/*.db`（Node 24 原生 `node:sqlite` 只读 + 轻量 protobuf 解码，按回复 id 去重合并桌面端和被房间叫醒的会话）和 `~/.dsh/sessions/**/session.v4.jsonl.zstd`（`dsh` 每条事件追加一个独立 zstd frame，Node 的 `zlib.zstdDecompressSync` 只解第一帧就会停，所以 `eachZstdFrame` 按帧魔数逐帧解完）。增量偏移和行元组存在 `data/speed-cache.json`，二次扫描几十毫秒。
 - 接口：`GET /api/v1/speed` 给席位栏摘要（近 24 小时最新一次 ≥100 token 的速度、近 30 次中位数、首 token / 首块上限）；`GET /api/v1/speed/board?range=1h|24h|7d|30d|all&v=…` 给完整看板数据（版本未变回 `{unchanged: true}`）。

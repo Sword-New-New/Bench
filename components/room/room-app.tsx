@@ -21,6 +21,7 @@ import { EDIT_EVENT, LIVE_DEMO, Thread } from "@/components/room/thread"
 import { Tour, TOUR_JOIN, TOUR_START } from "@/components/room/tour"
 import { SPEED_OPEN, SpeedPanel } from "@/components/room/speed-panel"
 import { TerminalDialog } from "@/components/room/terminal-dialog"
+import { Trajectory } from "@/components/room/trajectory"
 import { WhisperDialog } from "@/components/room/whisper-dialog"
 import { CommitDialog } from "@/components/room/commit-dialog"
 import { GOTO_EVENT, type Goto } from "@/components/room/refs"
@@ -672,6 +673,8 @@ export function RoomApp() {
                 requestAnimationFrame(() => composerRef.current?.focus())
               }}
             />
+            {/* Over the thread, in the blank to its left; lets the scroll through. */}
+            <Trajectory agents={agents} messages={visibleMessages} onOpenRun={setRunId} />
             <DraftComposer
               agents={agents}
               speakers={speakers}

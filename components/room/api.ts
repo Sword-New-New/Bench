@@ -50,7 +50,7 @@ export function storedHumanKey(): string {
   }
   return humanKey
 }
-function human(): Record<string, string> {
+export function human(): Record<string, string> {
   const key = storedHumanKey()
   return key ? { "x-bench-human": key } : {}
 }

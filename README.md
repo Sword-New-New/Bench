@@ -59,3 +59,9 @@ cd Bench
 - 改这个仓库的人：先读 [MAINTENANCE.md](MAINTENANCE.md)。
 
 技术栈：Next.js 16（App Router）、React 19、Tailwind CSS v4、shadcn/ui。
+
+## 许可
+
+并坐用 [GNU AGPL-3.0](LICENSE)（3.0 或更新版本）发布：可以免费使用、修改、再发布。但凡是把改过的版本发给别人，或者放到网上让别人通过网络使用，都要用同样的许可公开改过的源代码。只在自己电脑上用、不改不发，没有任何义务。
+
+2026-11-10 之前发布的版本用的是 MIT 许可，那些版本仍按 MIT。

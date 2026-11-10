@@ -54,6 +54,7 @@ import {
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
 import { Textarea } from "@/components/ui/textarea"
+import { parseSlash } from "@/lib/commands"
 import { KINDS } from "@/lib/kinds"
 import type { Message, Project, ProjectInfo, PublicAgent, RoomSnapshot, Task } from "@/lib/types"
 
@@ -334,6 +335,45 @@ export function RoomApp() {
     } finally {
       setBusy(false)
     }
+  }
+
+  // A slash command from the input (lib/commands.ts): to each seat @'d in it,
+  // through the seat actions; nothing is said in the room.
+  function sendSlash({ command, targets, text }: NonNullable<ReturnType<typeof parseSlash>>) {
+    if (targets.length === 0) return void toast.error(`/${command.name} 要发给谁？@ 一个席位`)
+    if (command.needsText && !text) return void toast.error(`/${command.name} 后面写上${command.hint}`)
+    void run(async () => {
+      const done: string[] = []
+      // To everyone: the seats it doesn't apply to (not running, no /goal) are passed over quietly.
+      const everyone = targets.includes("所有人")
+      const names = everyone ? agents.map((agent) => agent.name) : targets
+      for (const name of names) {
+        const seat = agents.find((agent) => agent.name === name)
+        if (!seat) continue
+        try {
+          const result = await api<{ dropped?: number; queued?: boolean }>(`/api/v1/agents/${seat.id}`, {
+            method: "POST",
+            body: JSON.stringify({ as: "human", action: command.name, ...(command.name === "goal" ? { text } : {}) }),
+          })
+          done.push(
+            command.name === "stop"
+              ? `${name} 停下了${result.dropped ? `，排队的 ${result.dropped} 条也取消了` : ""}`
+              : command.name === "compact"
+                ? `${name} 开始压缩上下文，好了会在群里说一声`
+                : result.queued
+                  ? `${name} 正在忙，目标排在手上的事后面`
+                  : `${name} 收到目标了`,
+          )
+        } catch (err) {
+          if (!everyone) toast.error(`${name}：${err instanceof Error ? err.message : "没做成"}`)
+        }
+      }
+      if (everyone && done.length === 0) toast.error(`没有席位能 /${command.name}`)
+      if (done.length) {
+        toast.success(done.join("；"))
+        draft.set("")
+      }
+    })
   }
 
   async function debugCall(body: Record<string, unknown>) {
@@ -649,6 +689,14 @@ export function RoomApp() {
               onSend={() => {
                 const text = draft.get().trim()
                 if ((!text && files.length === 0) || files.some((item) => item.uploading)) return
+                const slash = parseSlash(
+                  text,
+                  agents.map((agent) => agent.name),
+                )
+                if (slash) {
+                  sendSlash(slash)
+                  return
+                }
                 const attachments = files.map(({ kind, name, path }) => ({ kind, name, path }))
                 const replyTo = reply?.id
                 // Named seats that are busy get this after what they're doing.

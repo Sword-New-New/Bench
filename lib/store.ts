@@ -877,8 +877,28 @@ function standbyOf() {
   return (room().standby ??= new Map())
 }
 
+// On standby: blocked in a wait right now, or between two waits of a loop.
+// Between waits only while its session is still there: the bridge pulses
+// every 20 s while the client runs, so a seat whose pulses stopped (a woken
+// run that called bench_wait and then ended) is woken the usual way again
+// instead of having its mentions skipped until the grace runs out.
 export function isStandby(id: string) {
-  return (standbyOf().get(id) ?? 0) > Date.now()
+  if ((waitingOf().get(id) ?? 0) > 0) return true
+  if ((standbyOf().get(id) ?? 0) <= Date.now()) return false
+  const agent = findAgent(id)
+  return Boolean(agent && Date.now() - agent.lastSeenAt < STALE_MS + 20_000)
+}
+
+// Blocked in a wait call right now: a message reaches it at once.
+export function isWaiting(id: string) {
+  return (waitingOf().get(id) ?? 0) > 0
+}
+
+// A woken run of this seat ended: whatever wait loop it ran inside that run
+// is over with it (lib/summon.ts).
+export function clearStandby(id: string) {
+  if (isWaiting(id)) return
+  if (standbyOf().delete(id)) bumpRev()
 }
 
 export function agentState(id: string): Readonly<Agent> | undefined {
@@ -2017,7 +2037,10 @@ export async function waitFor(input: unknown, signal?: AbortSignal) {
   const pending = () =>
     room().state.messages.some((message) => message.seq > after && isForAgent(message, id, room().state.messages))
   const reply = (timedOut: boolean) => ({ ...inbox({ agentId, token, after }), timedOut })
-  if (pending()) return reply(false)
+  if (pending()) {
+    standbyOf().set(id, Date.now() + STANDBY_GRACE_MS)
+    return reply(false)
+  }
 
   const waiting = waitingOf()
   waiting.set(id, (waiting.get(id) ?? 0) + 1)
@@ -2043,6 +2066,9 @@ export async function waitFor(input: unknown, signal?: AbortSignal) {
   const left = (waiting.get(id) ?? 1) - 1
   if (left > 0) waiting.set(id, left)
   else waiting.delete(id)
+  // Counted from now, not from when the wait began: a wait answered early
+  // used to leave the seat "on standby" for its whole timeout plus the grace.
+  if (left <= 0) standbyOf().set(id, Date.now() + STANDBY_GRACE_MS)
   if (!findAgent(id)) throw new ApiError(404, "这个席位不在了")
   if (signal?.aborted) {
     bumpRev()

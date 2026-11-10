@@ -28,6 +28,14 @@ const STEER_EVERY_MS = 2500
 // "/compact" from the room (lib/summon.ts compactSession) isn't a message:
 // it asks the thread to compact its context instead of starting a turn.
 const compacting = text === "/compact"
+// "/goal <objective>" and "/goal clear" (lib/summon.ts setGoal): the thread's
+// goal. Once one is set Codex starts a turn on it by itself, and may start
+// more after it until the goal is met, so those turns are followed here.
+const goal = /^\/goal(\s|$)/.test(text ?? "") ? text.slice(5).trim() : null
+const clearing = goal !== null && /^(clear|清除|清掉)$/i.test(goal)
+// After a goal's turn ends, how long to wait for Codex to start the next one.
+const GOAL_NEXT_MS = 8000
+let goalNext = null
 
 function codexBin() {
   if (process.env.CODEX_BIN && existsSync(process.env.CODEX_BIN)) return process.env.CODEX_BIN
@@ -70,6 +78,7 @@ let failed = false
 function finish(code) {
   if (finished) return
   finished = true
+  clearTimeout(goalNext)
   clearInterval(steerTimer)
   try {
     server.kill("SIGTERM")
@@ -131,9 +140,25 @@ function onMessage(message) {
       if (item) out({ type: message.method === "item/started" ? "item.started" : "item.completed", item })
       return
     }
+    case "turn/started":
+      // Codex starts the turns a goal runs in; the room didn't ask for them.
+      if (goal !== null && params.turn?.id) {
+        clearTimeout(goalNext)
+        turnId = params.turn.id
+      }
+      return
     case "turn/completed": {
       const turn = params.turn ?? {}
       if (turnId && turn.id && turn.id !== turnId) return
+      if (goal !== null && !(turn.status === "failed" || turn.error)) {
+        // It may go on with the goal in another turn: end only once it doesn't.
+        clearTimeout(goalNext)
+        goalNext = setTimeout(() => {
+          out({ type: "turn.completed", usage: {} })
+          finish(0)
+        }, GOAL_NEXT_MS)
+        return
+      }
       if (turn.status === "failed" || turn.error) {
         failed = true
         out({ type: "turn.failed", error: { message: turn.error?.message ?? "这一轮失败了" } })
@@ -207,6 +232,27 @@ try {
   if (compacting) {
     await request("thread/compact/start", { threadId: thread })
     out({ type: "turn.started" })
+  } else if (clearing) {
+    const result = await request("thread/goal/clear", { threadId: thread, origin: "user" })
+    out({ type: "item.completed", item: { id: "goal", type: "agent_message", text: result?.cleared ? "目标清掉了" : "本来就没有目标" } })
+    out({ type: "turn.completed", usage: {} })
+    finish(0)
+  } else if (goal !== null) {
+    if (!goal) throw new Error("/goal 后面要写目标，或者 clear")
+    await request("thread/goal/set", {
+      threadId: thread,
+      objective: goal,
+      status: "active",
+      origin: "user",
+    })
+    out({ type: "item.completed", item: { id: "goal", type: "agent_message", text: `Goal set: ${goal}` } })
+    out({ type: "turn.started" })
+    // Set but no turn came (the goal was already met, say): nothing to follow.
+    // Its first turn may have started before this reply came back.
+    if (!turnId) goalNext = setTimeout(() => {
+      out({ type: "turn.completed", usage: {} })
+      finish(0)
+    }, GOAL_NEXT_MS * 2)
   } else {
     const started = await request("turn/start", {
       threadId: thread,

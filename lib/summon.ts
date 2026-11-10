@@ -27,6 +27,8 @@ import {
   postLimited,
   endSummaryJob,
   isStandby,
+  isWaiting,
+  clearStandby,
   markWoken,
   onMessage,
   postSystem,
@@ -82,6 +84,8 @@ type Lane = {
   summary?: boolean
   // The user asked the room to compact this seat's context; runs next.
   compact?: boolean
+  // The user typed /goal for this seat: what came after it ("clear" too).
+  goal?: string
   stop?: () => void
   carry?: string
   whisper?: string
@@ -348,6 +352,9 @@ function launch(
     if (finished) return
     finished = true
     lane(agent.id).stop = undefined
+    // A woken run is one-shot: a wait loop it ran (bench_wait) ends with it,
+    // so later mentions wake it again instead of waiting for a loop that's gone.
+    clearStandby(agent.id)
     clearTimeout(endedTimer)
     clearInterval(quiet)
     if (pending) take(pending)
@@ -475,6 +482,7 @@ function run(agentId: string) {
     queue.pending = []
     queue.summary = false
     queue.compact = false
+    queue.goal = undefined
     return
   }
   const adapter = adapterFor(agent.agentName)
@@ -482,6 +490,7 @@ function run(agentId: string) {
     queue.pending = []
     queue.summary = false
     queue.compact = false
+    queue.goal = undefined
     return
   }
   // Its session is open in a terminal on the page (lib/terminal.ts): what
@@ -505,6 +514,12 @@ function run(agentId: string) {
   if (queue.compact) {
     queue.compact = false
     compactSession(agent)
+    return
+  }
+  if (queue.goal !== undefined) {
+    const text = queue.goal
+    queue.goal = undefined
+    setGoal(agent, adapter, text)
     return
   }
   if (queue.pending.length === 0 && !queue.carry) return
@@ -578,6 +593,11 @@ function run(agentId: string) {
 }
 
 function intoTerminal(agent: NonNullable<ReturnType<typeof agentState>>, queue: ReturnType<typeof lane>) {
+  // A /goal is typed in just as the user wrote it: the client's own command.
+  if (queue.goal !== undefined && accepting(agent.id)) {
+    deliver(agent.id, goalLine(queue.goal))
+    queue.goal = undefined
+  }
   // On its way out: it all waits for the closing, then runs the usual way.
   if ((queue.pending.length === 0 && !queue.carry) || !accepting(agent.id)) return
   const seen = catchUp(agent.id, CATCH_UP_CHARS)
@@ -696,6 +716,77 @@ export function requestCompact(agentId: string) {
   return { started: queue.running }
 }
 
+// /goal from the room's input (components/room/composer.tsx): the client's
+// own goal command, run on the seat's session as it is. Claude Code takes
+// "/goal <condition>" headless and keeps working until the condition holds;
+// scripts/codex-app.mjs turns it into thread/goal/set, and Codex then works
+// on it by itself. The goal stays on the session: later wakes keep at it
+// until it is met or cleared ("/goal clear"). What it says at the end goes
+// into the room as its reply, and messages that call it meanwhile go into
+// the run the way they do in a reply run (takeQueued).
+const GOAL_KINDS = ["claude", "codex"]
+const CLEAR_GOAL = /^(clear|清除|清掉)$/i
+
+function goalLine(text: string) {
+  return CLEAR_GOAL.test(text) ? "/goal clear" : `/goal ${text}`
+}
+
+function setGoal(agent: NonNullable<ReturnType<typeof agentState>>, adapter: Adapter, text: string) {
+  const command = commandFor(agent.agentName ?? "", agent.session ?? "", goalLine(text), agent.modelPick, agent.effortPick)
+  if (!command) return
+  const clearing = CLEAR_GOAL.test(text)
+  const queue = lane(agent.id)
+  queue.running = true
+  const log = startRun(agent.id, agent.name, "goal", { project: currentProject(), ask: text })
+  queue.key = randomBytes(12).toString("hex")
+  queue.project = currentProject()
+  queue.log = log
+  queue.midHop = undefined
+  const seat = busy(agent.id, clearing ? "在清掉目标" : "在按目标干活")
+  launch(agent, command, log, seat.live, ({ out, failure, stopped }) => {
+    queue.running = false
+    queue.key = undefined
+    queue.log = undefined
+    queue.midHop = undefined
+    const still = agentState(agent.id)
+    if (failure && !stopped) reportFailure(agent, log, failure, out, clearing ? `清掉 ${agent.name} 的目标` : `让 ${agent.name} 按目标干活`)
+    else if (!stopped && clearing) postSystem(`${agent.name} 的目标清掉了`)
+    else if (!stopped && adapter.reply === "stdout" && still && out) {
+      try {
+        sayAs({ type: "agent", id: still.id, name: still.name }, { text: out.slice(0, 4000) })
+      } catch (error) {
+        console.error(error)
+      }
+    }
+    if (!failure && agent.fresh) markWoken(agent.id)
+    endRun(log, failure || stopped ? "failed" : "done", stopped ? "被你停下了" : failure ? `没成功：${failure}` : undefined)
+    seat.settle()
+    run(agent.id)
+  })
+}
+
+export function requestGoal(agentId: string, input: unknown) {
+  const agent = wakeable(agentId)
+  const text = typeof input === "string" ? input.trim() : ""
+  if (!text) throw new ApiError(400, "/goal 后面写上要达成什么，或者 clear 清掉目标")
+  if (text.length > 4000) throw new ApiError(400, "目标太长了，4000 字以内")
+  if (!GOAL_KINDS.includes(agent.agentName ?? "")) {
+    throw new ApiError(400, `${agent.name} 这种客户端没有 /goal（现在只有 Claude Code 和 Codex 有）`)
+  }
+  const queue = lane(agent.id)
+  if (queue.goal !== undefined) throw new ApiError(409, `上一条 /goal 还没交给 ${agent.name}，稍等`)
+  queue.goal = text
+  const clearing = CLEAR_GOAL.test(text)
+  postSystem(
+    clearing
+      ? `${userName()} 让 ${agent.name} 清掉目标`
+      : `${userName()} 给 ${agent.name} 定了目标：${text}\n它会一直做到达成为止；要停就 /stop，要撤掉目标就 /goal clear`,
+  )
+  const waiting = queue.running || terminalOpen(agent.id)
+  run(agent.id)
+  return { queued: waiting && !terminalOpen(agent.id) }
+}
+
 // Something the user says to one seat alone. It doesn't go into the room and
 // the answer doesn't either: both are kept on the run, and the 「单独说」
 // dialog lists them.
@@ -779,6 +870,7 @@ export function stopAgent(agentId: string) {
   queue.carry = undefined
   queue.summary = false
   queue.compact = false
+  queue.goal = undefined
   queue.stop()
   return { dropped }
 }
@@ -860,25 +952,59 @@ function wake(message: Message) {
     }
     // A seat on standby picks the message up from its own wait loop; waking it
     // with a command would start a second run on the same session.
-    if (isStandby(agent.id)) continue
-    if (!agent.agentName || !agent.session) {
-      if (cooled(`${agent.id}:session`, NOTE_GAP_MS)) {
-        postSystem(`${agent.name} 被点到了，但还没报 agent 和 uuid，叫不醒`)
+    if (isStandby(agent.id)) {
+      // Blocked in the wait now: it has the message already. Between two
+      // waits, say so, or the room looks like it ignored the mention; and if
+      // the loop turns out to be gone without taking it, wake it after all.
+      if (!isWaiting(agent.id)) {
+        if (cooled(`${agent.id}:standby`, NOTE_GAP_MS)) {
+          postSystem(`${agent.name} 正在守着房间（bench_wait），这会儿在处理上一条：消息排着等它来取。它要是不再守了，房间会改成直接叫醒它`)
+        }
+        watchStandby(agent.id, message, hop)
       }
       continue
     }
-    if (!adapterFor(agent.agentName)) {
-      if (cooled(`${agent.id}:config`, NOTE_GAP_MS)) {
-        postSystem(`${agent.name} 被点到了，还没有 ${agent.agentName} 的唤起命令`)
-      }
-      continue
-    }
-    const queue = lane(agent.id)
-    queue.pending.push({ id: message.id, line: `${message.authorName}：${withAttachments(message.text, message.attachments)}` })
-    queue.hops = Math.max(queue.hops, hop)
-    queue.trigger = message.id
-    run(agent.id)
+    enqueue(agent, message, hop)
   }
+}
+
+// Queue a message for a seat and wake it, or say why it can't be woken.
+function enqueue(agent: { id: string; name: string; agentName?: string; session?: string }, message: Message, hop: number) {
+  if (!agent.agentName || !agent.session) {
+    if (cooled(`${agent.id}:session`, NOTE_GAP_MS)) {
+      postSystem(`${agent.name} 被点到了，但还没报 agent 和 uuid，叫不醒`)
+    }
+    return
+  }
+  if (!adapterFor(agent.agentName)) {
+    if (cooled(`${agent.id}:config`, NOTE_GAP_MS)) {
+      postSystem(`${agent.name} 被点到了，还没有 ${agent.agentName} 的唤起命令`)
+    }
+    return
+  }
+  const queue = lane(agent.id)
+  queue.pending.push({ id: message.id, line: `${message.authorName}：${withAttachments(message.text, message.attachments)}` })
+  queue.hops = Math.max(queue.hops, hop)
+  queue.trigger = message.id
+  run(agent.id)
+}
+
+// A mention held for a seat between two of its waits. Once the seat has read
+// past it, done; while it is still on standby, look again later; once it no
+// longer is (its session went away without another wait), wake it the usual
+// way so the mention isn't lost.
+const STANDBY_CHECK_MS = 30_000
+function watchStandby(agentId: string, message: Message, hop: number) {
+  const check = bindProject(() => {
+    const agent = agentState(agentId)
+    if (!agent || (agent.seenSeq ?? 0) >= message.seq) return
+    if (isStandby(agentId)) {
+      setTimeout(check, STANDBY_CHECK_MS)
+      return
+    }
+    enqueue(agent, message, hop)
+  })
+  setTimeout(check, STANDBY_CHECK_MS)
 }
 
 // After a restart: say in each project which wakes were cut off, once, so
@@ -892,7 +1018,7 @@ function announceInterrupted() {
   for (const [project, list] of byProject) {
     try {
       inProject(project, () => {
-        const what = { reply: "回复", private: "单独回话", summary: "写摘要", compact: "压缩上下文" } as const
+        const what = { reply: "回复", private: "单独回话", summary: "写摘要", compact: "压缩上下文", goal: "按目标干活" } as const
         // Its seat still shows the reply it never finished.
         for (const item of list) {
           try {
@@ -936,6 +1062,9 @@ export function rewake(runId: string) {
       queue.summary = true
     } else if (item.purpose === "compact") {
       queue.compact = true
+    } else if (item.purpose === "goal") {
+      if (!item.ask) throw new ApiError(400, "没记下当时的目标")
+      queue.goal = item.ask
     } else {
       if (!item.body) throw new ApiError(400, "没记下当时在回哪些消息")
       queue.carry = queue.carry ? `${item.body}\n\n${queue.carry}` : item.body

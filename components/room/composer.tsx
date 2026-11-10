@@ -9,6 +9,7 @@ import { Button } from "@/components/ui/button"
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from "@/components/ui/dropdown-menu"
 import { Label } from "@/components/ui/label"
 import { Textarea } from "@/components/ui/textarea"
+import { SLASH_COMMANDS, parseSlash } from "@/lib/commands"
 import { KINDS, kindOf } from "@/lib/kinds"
 import { escapeRegExp, unknownMentions } from "@/lib/text"
 import type { Message, PublicAgent } from "@/lib/types"
@@ -112,6 +113,15 @@ export function Composer({
     query === null || exact
       ? []
       : agents.filter((agent) => agent.name.toLowerCase().includes(query.toLowerCase())).slice(0, 6)
+  // Typing a command's name at the very start: the commands that fit.
+  // (After the @s the names below put in front, too.)
+  const slashQuery = value.match(/^(?:@\S+\s+)*\/([a-z]*)$/)?.[1] ?? null
+  const slashMatches =
+    slashQuery === null ? [] : SLASH_COMMANDS.filter((item) => item.name.startsWith(slashQuery) && item.name !== slashQuery)
+  const slash = parseSlash(
+    value,
+    agents.map((agent) => agent.name),
+  )
   const unknown = unknownMentions(
     value,
     agents.map((agent) => agent.name),
@@ -127,6 +137,11 @@ export function Composer({
     return picked.map((seat) => ({ kind, seat, label: picked.length > 1 ? seat.name : kind.label }))
   })
   const ordered = chips.sort(targets)
+
+  function insertCommand(name: string) {
+    onChange(value.replace(/\/[a-z]*$/, `/${name} `))
+    inputRef.current?.focus()
+  }
 
   function insert(name: string) {
     onChange(value.replace(/@([\p{L}\p{N}_-]*)$/u, `@${name} `))
@@ -178,6 +193,22 @@ export function Composer({
             </div>
           ) : null}
         </Reveal>
+        <Reveal open={slashMatches.length > 0}>
+          <div className="flex flex-col gap-0.5 border-b border-foreground/8 px-2 py-2">
+            {slashMatches.map((item) => (
+              <button
+                key={item.name}
+                type="button"
+                className="flex items-baseline gap-2 rounded-lg px-2 py-1 text-left text-xs hover:bg-foreground/6"
+                onClick={() => insertCommand(item.name)}
+              >
+                <span className="font-mono font-medium">/{item.name}</span>
+                {item.hint ? <span className="font-mono text-muted-foreground">{item.hint}</span> : null}
+                <span className="min-w-0 flex-1 truncate text-right text-muted-foreground">{item.about}</span>
+              </button>
+            ))}
+          </div>
+        </Reveal>
         <Reveal open={matches.length > 0 && !picked}>
           <div className="flex flex-wrap gap-1 border-b border-foreground/8 px-2 py-2">
             {matches.map((agent) => {
@@ -214,7 +245,7 @@ export function Composer({
           ref={inputRef}
           id="composer"
           value={value}
-          placeholder={dragging ? "松手就附上" : "说点什么，@ 谁就唤起谁 · 可以粘贴图片、拖文件进来 · Enter 发送"}
+          placeholder={dragging ? "松手就附上" : "说点什么，@ 谁就唤起谁 · / 是命令 · 可以粘贴图片、拖文件进来 · Enter 发送"}
           className="max-h-60 min-h-14 resize-none border-0 bg-transparent px-4 pt-3.5 shadow-none placeholder:text-foreground/45 focus-visible:ring-0 dark:bg-transparent"
           onChange={(event) => {
             setPicked(false)
@@ -228,6 +259,10 @@ export function Composer({
           onKeyDown={(event) => {
             if (event.key === "Enter" && !event.shiftKey && !event.nativeEvent.isComposing) {
               event.preventDefault()
+              if (slashMatches.length > 0) {
+                insertCommand(slashMatches[0].name)
+                return
+              }
               if (matches.length > 0 && !picked) {
                 insert(matches[0].name)
                 return
@@ -303,6 +338,17 @@ export function Composer({
           </Button>
         </div>
       </div>
+      <Reveal open={slash !== null}>
+        <p className="pill mx-auto mt-1.5 w-fit max-w-3xl rounded-full px-3 py-0.5 text-[11px] text-muted-foreground">
+          {slash === null
+            ? null
+            : slash.targets.length === 0
+              ? `/${slash.command.name} 要发给谁？@ 一个席位，或点下面的名字`
+              : slash.command.needsText && !slash.text
+                ? `/${slash.command.name} 后面写上${slash.command.hint}`
+                : `/${slash.command.name} 只发给 ${slash.targets.join("、")}，不进群聊`}
+        </p>
+      </Reveal>
       <Reveal open={unknown.length > 0}>
         <p className="pill mx-auto mt-1.5 w-fit max-w-3xl rounded-full px-3 py-0.5 text-[11px] text-amber-700 dark:text-amber-300">
           房间里还没有 {unknown.map((name) => `@${name}`).join("、")}，这句不会叫醒谁

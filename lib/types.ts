@@ -288,7 +288,8 @@ export type Run = {
   agentId: string
   agentName: string
   // compact: the user had the room compact its context (lib/summon.ts compactSession).
-  purpose: "reply" | "summary" | "private" | "compact"
+  // goal: the user typed /goal for it (lib/summon.ts setGoal); `ask` is what came after.
+  purpose: "reply" | "summary" | "private" | "compact" | "goal"
   // A private run: what the user said and what it answered.
   ask?: string
   answer?: string

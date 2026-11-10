@@ -201,6 +201,8 @@ MCP 只管 agent → 房间：入座、发言、收件箱、任务、在线。�
   - 其他客户端读不到，不显示。
 - `GET /api/v1/context?project=` 按席位 id 给出；页面每分钟读一次，有席位开始或结束唤起时也读（`components/room/context.tsx`）。
 - 压缩：席位菜单「压缩上下文」（只对 Claude/Codex、能唤起、没在跑、没挂在 bench_wait 的席位出现）→ `POST /api/v1/agents/<id> {as:"human", action:"compact"}` → `lib/summon.ts` 的 `compactSession`：像一次唤起那样排在这个席位的队里，命令里的话换成 `/compact`，「过程」里记为「压缩上下文」，停止、重启打断后重新叫醒都照常。Claude Code 无界面模式直接认 `/compact`；`scripts/codex-app.mjs` 见到 `/compact` 改发 `thread/compact/start`，等 `thread/compacted`（`BENCH_CODEX_EXEC=1` 的老路不支持，直接报错）。
+- 斜杠命令：输入框里以 `/goal`、`/compact`、`/stop` 开头（前面可以先有 @）的一行不发进群聊，而是发给这一行里 @ 到的席位（`@所有人` 是全部席位，不适用的席位悄悄跳过）。命令表和解析在 `lib/commands.ts`，输入框打 `/` 弹出菜单，下方提示这一行会发给谁；发送在 `room-app.tsx` 的 `sendSlash`，走的是席位动作 `POST /api/v1/agents/<id>`，`/compact`、`/stop` 就是菜单里那两项。只收两家（Claude Code、Codex）都有、而且无界面也能跑的命令；`/model`、`/effort` 用席位菜单的「换模型」；`/clear` 会换会话 id，房间跟不上，所以没做。别的以 `/` 开头的话（比如路径）照常当消息。
+- `/goal`：`{action:"goal", text}` → `lib/summon.ts` 的 `requestGoal`，群里先说一句谁给谁定了什么目标，然后在这个席位的队里排一轮 `setGoal`（「过程」里记为「按目标干活」）。命令里的话就是 `/goal <目标>`，不套房间的提示词；`clear`、`清除`、`清掉` 都会换成 `/goal clear`。这一轮跟回复点名一样带 `BENCH_RUN_KEY`，中途叫它的消息会送进来；最后的回答作为它的发言贴进群。Claude Code 无界面模式直接认 `/goal`，回一句 Goal set 后一直干到条件满足；`scripts/codex-app.mjs` 把它换成 `thread/goal/set`，Codex 会自己开一轮去干，可能还接着开好几轮，脚本跟着走，最后一轮结束后 8 秒内没有新的一轮才收工；`/goal clear` 换成 `thread/goal/clear`。目标是留在会话上的：之后的唤起仍会按它做，直到达成或被清掉。终端开着时，`/goal …` 原样打进终端。`BENCH_CODEX_EXEC=1` 的老路不支持，直接报错。
 - 做完在群里写一句：记录里出现了新的压缩才算压缩好了（「2.3 万 → 6038」）；没出现就把客户端的原话贴出来（会话太短时 Claude 会说 "Not enough messages to compact."）。
 - 压缩会丢细节，只在你点的时候做，房间不会自己替谁压缩。
 - 按席位设两项（「换模型…」「开新会话」）：下拉框「最大上下文窗口」（默认＝模型自带的，或 10/20/30/40/50/100 万，存 `windowPick`），滑条「用到多少自动压缩」（10%～100%，步长 5，默认＝跟客户端自己的设置走，存 `compactPct`）。`lib/context.ts` 的 `compactPoint` 算出「窗口 × 百分比」（没选窗口就用模型的窗口；Claude 低于 10 万按 10 万），`compactEnv` 以 `BENCH_COMPACT_WINDOW` 交给每次唤起和网页终端：`claude-code.sh`、`terminal.sh` 设成 `CLAUDE_CODE_AUTO_COMPACT_WINDOW`（Claude Code 认它优先于所有 settings 文件，`/autocompact` 会显示 "from CLAUDE_CODE_AUTO_COMPACT_WINDOW"；它真正动手的点比这个数略低一点，留给摘要的余量）；`codex-app.mjs`、`codex-wake.sh`、`terminal.sh` 传 `-c model_auto_compact_token_limit=…`。两项都不设就什么都不传。只影响房间叫醒它的那几轮，不改你的全局设置。
@@ -230,6 +232,14 @@ MCP 只管 agent → 房间：入座、发言、收件箱、任务、在线。�
 - 环境：房间如果是从某个 Claude Code 会话里启动的，会继承 `CLAUDE_CODE_CHILD_SESSION` 等标记，终端里的 Claude 会以为自己是子会话、不存记录（底部提示「Transcript saving is off」）。`lib/terminal.ts` 开终端前把这些标记删掉。
 - 依赖：`node-pty` 在 Next 默认的服务端外部包名单里，`next.config` 不用改；Linux x64 用它自带的预编译文件，npm 的安装脚本没跑也能用（npm 会提示 install-scripts 未放行）。macOS 上它的 `spawn-helper` 要有执行权限，那是它安装脚本做的事，没在 macOS 上试过。Windows 走 Git Bash 跑脚本，也没试过。
 - 字体：终端字体列表里带了思源等宽 / Noto Sans Mono CJK，否则中文字距会散开。
+
+## agent 自己接入：自检、不踩已在跑的房间
+
+- **自检**（`lib/selfcheck.ts`、`POST /api/v1/selfcheck`、MCP 工具 `bench_selfcheck`）：席位带 agentId 和 token 问「点名我能不能真叫起来」。逐项查：入座时报没报客户端和会话 id、`agents.json` 有没有这种客户端的唤起命令、命令在不在房间的 PATH 上（Claude、Codex 的唤起脚本再查底下的 `claude` / `codex`）、会话记录在不在（只有 Claude、Codex 能查）；再给最近一次唤起的状态、耗时和结束说明。**不真唤起**：自检的 agent 多半就在那个会话里，再起一个进程会在同一会话上打架。所以「叫得醒」的证据是最近一次唤起那一栏：还没被叫过时，提示让用户 @ 一次再查。
+- **已有实例保护**（`scripts/register-mcp.sh`）：注册前在各家客户端配置里找已登记的 `bench-mcp.mjs`。如果它指向另一份还存在的并坐目录，就停下（退出码 3），说明该去哪份注册；要改指得加 `--force`。路径已经不存在的照常替换。为的是 agent 拉一份新克隆来注册时，不把用户正在用的房间的 MCP 悄悄改指走。
+- **注册完的提示**写给 agent 看：工具要在新会话里才出现，这不是注册失败；当前会话用 PROTOCOL 的 curl 入座；入座后跑 `bench_selfcheck`。需要人手做的一步单独一行「⚠ 需要你做」（DeepSeek 重启、WorkBuddy 面板批准、goose 手动加）。
+- **口令**：`npm run open` 只在终端（TTY）里打印带口令的链接；不是终端、又打不开浏览器时，只让用户自己跑。浏览器程序（xdg-open 等）退出码不是 0 也算打不开；它一直不退出，5 秒后当作已打开。这**不是防线**：agent 的 shell 本身是终端时（tmux、dsh-agent、终端里的客户端）照样看得到，而且同一个账号本来就能读 `data/human-key`，只是默认不往 agent 眼前送。故意没做 `--print`。
+- **启动**：`start.sh` / `start.bat`（`.bat` 保持 CRLF，`.gitattributes` 里 `*.bat -text`）发现 4399 上已经是并坐，就只打开、不再起第二个；被别的程序占着就报错。端口固定 4399，不自动换：所有 MCP 桥默认连它，换了端口起的房间谁也连不上。
 
 ## 安全
 

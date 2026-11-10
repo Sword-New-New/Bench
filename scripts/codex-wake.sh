@@ -26,6 +26,10 @@ if [[ "$text" == "/compact" ]]; then
   echo "压缩上下文要走 codex app-server，BENCH_CODEX_EXEC=1 时不行" >&2
   exit 2
 fi
+if [[ "$text" == "/goal" || "$text" == "/goal "* ]]; then
+  echo "设目标要走 codex app-server，BENCH_CODEX_EXEC=1 时不行" >&2
+  exit 2
+fi
 
 # --json: one event per line, which the room turns into the 「过程」 panel.
 pick=()

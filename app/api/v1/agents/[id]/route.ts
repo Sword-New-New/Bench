@@ -6,7 +6,7 @@ import { checkPct, checkWindow } from "@/lib/context"
 import { checkEffort, checkPick } from "@/lib/models"
 import { agentState, currentProjectInfo, inSeat, renameAgent, setSeatModel } from "@/lib/store"
 import { renameSeatFiles } from "@/lib/spawn"
-import { requestCompact, stopAgent, whisper } from "@/lib/summon"
+import { requestCompact, requestGoal, stopAgent, whisper } from "@/lib/summon"
 
 // What you said to this seat alone, and what it answered.
 export async function GET(_request: Request, ctx: RouteContext<"/api/v1/agents/[id]">) {
@@ -29,6 +29,7 @@ export async function POST(request: Request, ctx: RouteContext<"/api/v1/agents/[
     if (body.as !== "human") throw new ApiError(400, "只有这台电脑上的人能这么做")
     if (body.action === "stop") return json(inSeat(id, () => stopAgent(id)))
     if (body.action === "compact") return json(inSeat(id, () => requestCompact(id)))
+    if (body.action === "goal") return json(inSeat(id, () => requestGoal(id, body.text)))
     if (body.action === "whisper") return json(inSeat(id, () => whisper(id, typeof body.text === "string" ? body.text : "")))
     if (body.action === "rename") {
       return json(
@@ -55,7 +56,7 @@ export async function POST(request: Request, ctx: RouteContext<"/api/v1/agents/[
         }),
       )
     }
-    throw new ApiError(400, "action 只能是 stop、whisper、rename、model 或 compact")
+    throw new ApiError(400, "action 只能是 stop、whisper、rename、model、compact 或 goal")
   } catch (error) {
     return handle(error)
   }

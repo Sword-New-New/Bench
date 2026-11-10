@@ -445,6 +445,12 @@ const tools = [
     },
   },
   {
+    name: "bench_selfcheck",
+    description:
+      "入座后自检：别人 @ 你时房间能不能真把你叫起来。逐项查客户端和会话 id、唤起命令、命令在不在房间的 PATH 上、会话记录在不在，再给出你最近一次被唤起的结果。不会真的唤起你。接入完成后跑一次，把结果告诉用户。",
+    inputSchema: { type: "object", properties: {} },
+  },
+  {
     name: "bench_task",
     description:
       "建一条待办（任务），显示在房间右栏。用户要做新功能时必须先建：title 写功能，steps 拆成几步，owner 填自己。之后用 bench_step 一步一步推进。",
@@ -777,6 +783,15 @@ async function runTool(name, args = {}, signal) {
     case "bench_summary": {
       await seatCall("/api/v1/summary", { action: "write", text: args.text })
       return "摘要交上去了。"
+    }
+    case "bench_selfcheck": {
+      const data = await seatCall("/api/v1/selfcheck", {})
+      const mark = (ok) => (ok === true ? "✓" : ok === false ? "✗" : "？")
+      const lines = data.checks.map((check) => `${mark(check.ok)} ${check.name}：${check.detail}`)
+      const run = data.lastRun
+        ? `最近一次唤起：${data.lastRun.state === "done" ? "成功" : data.lastRun.state === "running" ? "还在跑" : "没成功"} · ${data.lastRun.took} · ${data.lastRun.note}（过程：${ROOM}/api/v1/runs/${data.lastRun.id}）`
+        : "最近一次唤起：还没被唤起过"
+      return [`${data.seat} 的自检`, ...lines, run, data.summary].join("\n")
     }
     case "bench_leave": {
       await seatCall("/api/v1/leave", {})

@@ -33,6 +33,29 @@ const [command, args] =
       ? ["open", [url]]
       : ["xdg-open", [url]]
 const child = spawn(command, args, { stdio: "ignore", detached: true })
-child.on("error", () => console.log(`打不开浏览器，手动打开：${url}`))
-child.unref()
-console.log(`房间：${base}（已带口令打开）`)
+
+// The link carries the key, so it is printed only to a terminal. That keeps it
+// out of what a spawned agent reads, but an agent whose shell is itself a
+// terminal still sees it: this is no barrier (the same account can read
+// data/human-key anyway), just not handing it out by default.
+let said = false
+const say = (text) => {
+  if (said) return
+  said = true
+  console.log(text)
+}
+const failed = () =>
+  say(
+    process.stdout.isTTY
+      ? `打不开浏览器，手动打开：${url}`
+      : `打不开浏览器。带口令的链接不打印在这里：请用户在自己的终端里运行 npm run open。房间：${base}`,
+  )
+child.on("error", failed)
+// xdg-open and friends can start and still fail (no display, no default
+// browser, over SSH): only a clean exit counts as opened.
+child.on("close", (code) => (code === 0 ? say(`房间：${base}（已带口令打开）`) : failed()))
+// One that keeps running has handed the link to a browser; don't wait on it.
+setTimeout(() => {
+  say(`房间：${base}（已带口令打开）`)
+  child.unref()
+}, 5000).unref()

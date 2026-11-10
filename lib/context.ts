@@ -324,6 +324,16 @@ function codexContext(thread: string): SeatContext | null {
 const cache = new Map<string, { mtimeMs: number; size: number; value: SeatContext | null }>()
 
 // With the seat's picks, which win over what the client's settings say.
+// Where a seat's own session record is, for the clients whose records the
+// room can read; null when there is none (a wrong id, or a session the room
+// created and never woke). undefined: the room can't tell for this kind.
+export function sessionRecord(kind: string | undefined, session: string | undefined): string | null | undefined {
+  if (!session) return null
+  if (kind === "claude") return claudeFile(session) ?? null
+  if (kind === "codex") return codexFile(session) ?? null
+  return undefined
+}
+
 export function seatContext(kind: string | undefined, session: string | undefined, picks: Picks = {}): SeatContext | null {
   const value = recordContext(kind, session)
   if (!value || (!picks.windowPick && !picks.compactPct)) return value

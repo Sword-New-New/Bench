@@ -148,6 +148,11 @@ export function activeRun(agentId: string) {
   return runs().findLast((run) => run.agentId === agentId && run.state === "running") ?? null
 }
 
+// A seat's latest wake of any kind: what the self-check shows (lib/selfcheck.ts).
+export function lastRunOf(agentId: string) {
+  return runs().findLast((run) => run.agentId === agentId)
+}
+
 export function listRuns(agentId: string, purpose: Run["purpose"]) {
   return runs().filter((run) => run.agentId === agentId && run.purpose === purpose)
 }

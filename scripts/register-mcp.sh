@@ -4,14 +4,23 @@
 # for this user. Running it again replaces the old entry.
 set -euo pipefail
 
+# --force: point the clients here even though another copy of 并坐 is in use.
+force=0
+kinds=()
+for arg in "$@"; do
+  if [[ "$arg" == "--force" ]]; then force=1; else kinds+=("$arg"); fi
+done
+
 # Several kinds: one run each, and carry on past one that fails.
-if [[ $# -gt 1 ]]; then
+if [[ ${#kinds[@]} -gt 1 ]]; then
   failed=0
-  for each in "$@"; do "$0" "$each" || failed=1; done
+  for each in "${kinds[@]}"; do
+    if [[ $force -eq 1 ]]; then "$0" "$each" --force || failed=1; else "$0" "$each" || failed=1; fi
+  done
   exit "$failed"
 fi
 
-kind="${1:-}"
+kind="${kinds[0]:-}"
 root="$(cd "$(dirname "$0")/.." && pwd)"
 script="$root/scripts/bench-mcp.mjs"
 node="$(command -v node || true)"
@@ -23,6 +32,36 @@ if command -v cygpath >/dev/null 2>&1; then
   script="$(cygpath -m "$script")"
   node="$(cygpath -m "$node")"
 fi
+
+# Another copy of 并坐 already in use? Clients that point at its bench-mcp.mjs
+# are talking to the room the user has open. Registering from here would
+# quietly repoint them at this checkout (a fresh clone an agent just pulled,
+# say), so stop and say so. A path that no longer exists is fine to replace.
+if [[ $force -eq 0 && "$kind" != "" ]]; then
+  configs=(
+    "$HOME/.claude.json" "${CODEX_HOME:-$HOME/.codex}/config.toml" "$HOME/.cursor/mcp.json"
+    "$HOME/.gemini/settings.json" "$HOME/.gemini/antigravity/mcp_config.json"
+    "${DSH_HOME:-$HOME/.dsh}/profiles/web/cordis.patch.yml" "${DSH_HOME:-$HOME/.dsh}/profiles/headless/cordis.patch.yml"
+    "$HOME/.qoder/settings.json" "$HOME/.codebuddy/.mcp.json" "$HOME/.workbuddy/mcp.json" "$HOME/.qwen/settings.json"
+    "$HOME/.kimi-code/mcp.json" "$HOME/.kiro/settings/mcp.json" "${COPILOT_HOME:-$HOME/.copilot}/mcp-config.json"
+    "$HOME/.config/opencode/opencode.json" "$HOME/.config/kilo/kilo.json" "$HOME/.config/crush/crush.json" "$HOME/.factory/mcp.json"
+  )
+  others=()
+  while IFS= read -r found; do
+    [[ -n "$found" && "$found" != "$script" && -f "$found" ]] && others+=("$found")
+  done < <(grep -hoE '[^"]*scripts/bench-mcp\.mjs' "${configs[@]}" 2>/dev/null | sed -E "s/^[[:space:],'[]*//; s/^(args|command)[[:space:]]*[:=][[:space:]]*[['\"]*//" | sort -u || true)
+  if [[ ${#others[@]} -gt 0 ]]; then
+    other_root="$(cd "$(dirname "${others[0]}")/.." && pwd)"
+    echo "⚠ 没有注册：这台电脑上已经有一份并坐在用（$other_root），客户端的 MCP 指向它。" >&2
+    echo "  从这里（$root）注册会把 $kind 的 MCP 悄悄改指到这份，用户正在用的那间房就收不到它了。" >&2
+    echo "  要接入正在用的房间：在 $other_root 里运行 scripts/register-mcp.sh $kind，或者什么都不做（多半已经注册过了）。" >&2
+    echo "  确定要改指到这里：加 --force 再运行。" >&2
+    exit 3
+  fi
+fi
+
+# What the user still has to do by hand after this, said once at the end.
+todo=""
 
 # Merge the bench entry into a JSON config: merge_json FILE [TOP_JSON] [STYLE] [SERVER_JSON].
 merge_json() {
@@ -96,6 +135,7 @@ case "$kind" in
 EOF
       echo "已写入 $patch"
     done
+    todo="重启 DeepSeek Harness（网页端和 dsh-agent 都要）才会加载 bench。"
     ;;
   qoder)
     # The `qoder` on PATH may be the desktop app; only qodercli is surely the CLI.
@@ -119,7 +159,7 @@ EOF
     # server it didn't add itself stays "trust-pending" and never starts until you
     # approve it in WorkBuddy's MCP panel (kept in ~/.workbuddy/mcp-approvals.json).
     merge_json "$HOME/.workbuddy/mcp.json"
-    echo "WorkBuddy：重开后到它的 MCP 面板里批准 bench，不批准它不会启动 bench。"
+    todo="重开 WorkBuddy 后，到它的 MCP 面板里批准 bench，不批准它不会启动 bench。"
     ;;
   qwen)
     if command -v qwen >/dev/null; then
@@ -173,7 +213,7 @@ EOF
     ;;
   goose)
     # Goose keeps extensions in YAML; adding to it by hand is safer than a blind append.
-    echo "goose：运行 goose configure → Add Extension → Command-line Extension，命令填：" >&2
+    echo "⚠ 需要你做：goose 没有自动注册。运行 goose configure → Add Extension → Command-line Extension，命令填：" >&2
     echo "  $node $script --agent goose"
     exit 0
     ;;
@@ -183,4 +223,10 @@ EOF
     ;;
 esac
 
-echo "并坐 MCP 已注册到 $kind。重开一个会话后，让它「接入并坐」即可。"
+room="${BENCH_URL:-http://127.0.0.1:4399}"
+echo "并坐 MCP 已注册到 $kind。"
+[[ -z "$todo" ]] || echo "⚠ 需要你做：$todo"
+# Read by the agent that ran this as often as by a person.
+echo "给 agent：bench_* 工具要在新开的 $kind 会话里才出现。现在这个会话里看不到它们是正常的，不是注册失败，不要重复注册。"
+echo "  这个会话要入座，直接按 PROTOCOL.md 用 curl：POST $room/api/v1/join；之后的新会话说「接入并坐」即可。"
+echo "  入座后跑一次 bench_selfcheck（或 POST $room/api/v1/selfcheck，带 agentId 和 token），把结果给用户看：它说明别人 @ 你时能不能真把你叫起来。"

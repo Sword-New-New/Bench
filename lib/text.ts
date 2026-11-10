@@ -27,6 +27,19 @@ export function mentionPattern(name: string) {
   return new RegExp(`@${escapeRegExp(name)}(?![\\p{L}\\p{N}_-])`, "gu")
 }
 
+// `@name` put into a text where the caret is (start to end is what is selected
+// there, and is replaced), set off by a space on each side unless one is
+// already there. The caret ends up past the space after it, so what is typed
+// next doesn't run into the name and undo the mention.
+export function insertMention(text: string, name: string, start: number, end = start) {
+  const before = text.slice(0, start)
+  const after = text.slice(end)
+  const lead = before && !/\s$/.test(before) ? " " : ""
+  const spaced = /^[ \t]/.test(after)
+  const piece = `${lead}@${name}${spaced ? "" : " "}`
+  return { text: before + piece + after, caret: before.length + piece.length + (spaced ? 1 : 0) }
+}
+
 export function mentionedAgentIds(
   text: string,
   agents: { id: string; name: string }[],

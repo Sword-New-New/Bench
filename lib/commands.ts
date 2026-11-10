@@ -26,8 +26,8 @@ export const SLASH_COMMANDS: SlashCommand[] = [
   { name: "stop", hint: "", about: "停下它手上在做的，排着的也取消", needsText: false },
 ]
 
-// "/goal 测试全过 @Opus" or "@Opus /goal 测试全过" (the names under the input
-// put the @ in front) → the command, whom it is for, and the rest of the line.
+// "/goal 测试全过 @Opus" or "@Opus /goal 测试全过" (the @ may be anywhere in
+// the line) → the command, whom it is for, and the rest of the line.
 // Anything else, including a path like "/home/…", is a message.
 export function parseSlash(text: string, names: string[]) {
   let rest = text

@@ -27,7 +27,7 @@ import { CommitDialog } from "@/components/room/commit-dialog"
 import { GOTO_EVENT, type Goto } from "@/components/room/refs"
 import { SpawnDialog } from "@/components/room/spawn-dialog"
 import { type Pending } from "@/components/room/attachments"
-import { api, inOpenProject, setOpenProject, storedHumanKey, type AdapterInfo } from "@/components/room/api"
+import { api, human, inOpenProject, setOpenProject, storedHumanKey, type AdapterInfo } from "@/components/room/api"
 import { ModelDialog } from "@/components/room/model-field"
 import { ProjectDialog, ProjectMenu, ProjectPlace } from "@/components/room/project-menu"
 import { ProjectRail } from "@/components/room/project-rail"
@@ -56,6 +56,7 @@ import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
 import { Textarea } from "@/components/ui/textarea"
 import { parseSlash } from "@/lib/commands"
+import { namedAgentIds } from "@/lib/text"
 import { KINDS } from "@/lib/kinds"
 import type { Message, Project, ProjectInfo, PublicAgent, RoomSnapshot, Task } from "@/lib/types"
 
@@ -114,6 +115,9 @@ function rememberProject(id: string) {
   url.searchParams.set("project", id)
   window.history.replaceState(null, "", url)
 }
+
+// How long a snapshot fetched ahead of a switch stays good to use.
+const AHEAD_FOR = 4000
 
 export function RoomApp() {
   const [projects, setProjects] = useState<Project[] | null>(null)
@@ -202,16 +206,47 @@ export function RoomApp() {
   // snapshot arrives, then swaps both in one transition: the bench and the
   // roster change in the same commit, so the seats fly between them
   // (components/room/project-rail.tsx).
-  const openProject = useCallback((id: string) => {
-    setProjectId((current) => {
-      if (current !== id) {
+  // The project id changes only together with its snapshot: changing it on
+  // the click re-drew the whole old room once before the fetch even started
+  // (200–400ms in dev). The rail asks for the snapshot ahead while the
+  // pointer is on a project (`prefetch`).
+  const ahead = useRef(new Map<string, { at: number; snapshot: Promise<RoomSnapshot> }>())
+  const prefetch = useCallback((id: string) => {
+    const kept = ahead.current.get(id)
+    if (kept && Date.now() - kept.at < AHEAD_FOR) return kept.snapshot
+    const snapshot = fetch(`/api/v1/room?project=${encodeURIComponent(id)}`, { cache: "no-store", headers: human() }).then(
+      (res) => (res.ok ? (res.json() as Promise<RoomSnapshot>) : Promise.reject(new Error(String(res.status)))),
+    )
+    ahead.current.set(id, { at: Date.now(), snapshot })
+    snapshot.catch(() => ahead.current.delete(id))
+    return snapshot
+  }, [])
+  const openedId = useRef<string | null>(null)
+  useEffect(() => {
+    openedId.current = projectId
+  }, [projectId])
+  const wanted = useRef<string | null>(null)
+  const openProject = useCallback(
+    (id: string) => {
+      wanted.current = id
+      if (id === openedId.current) return
+      const go = (snapshot: RoomSnapshot | null) => {
+        // Only the last project picked.
+        if (wanted.current !== id || id === openedId.current) return
+        ahead.current.delete(id)
         setFocusId(null)
         setReply(null)
         draft.set("")
+        startTransition(() => {
+          setProjectId(id)
+          // Without it (the fetch failed) the room's own pull takes over.
+          if (snapshot?.project.id === id) setRoom(snapshot)
+        })
       }
-      return id
-    })
-  }, [])
+      prefetch(id).then(go, () => go(null))
+    },
+    [prefetch],
+  )
 
   // The project whose room is on screen (committed). Until the new project's
   // room is, every snapshot of it goes in as a transition: the first one often
@@ -252,7 +287,8 @@ export function RoomApp() {
         })
     }
     pullRef.current = pull
-    pull()
+    // Opened from the rail, the snapshot is already on screen.
+    if (shown.current !== projectId) pull()
     let streaming = false
     // The stream is the main feed; polling only covers the gaps while it reconnects.
     const poll = setInterval(() => {
@@ -472,6 +508,7 @@ export function RoomApp() {
         projects={projects ?? []}
         current={room?.project.id ?? projectId}
         onPick={openProject}
+        onPrefetch={prefetch}
         onCreate={() => setProjectDialog({ editing: null })}
         onEdit={(project) => setProjectDialog({ editing: project })}
       />
@@ -716,7 +753,9 @@ export function RoomApp() {
                 const attachments = files.map(({ kind, name, path }) => ({ kind, name, path }))
                 const replyTo = reply?.id
                 // Named seats that are busy get this after what they're doing.
-                const queued = agents.filter((agent) => agent.runId && text.includes(`@${agent.name}`))
+                // Whole names, the way the room takes them: @Opus2 is not @Opus.
+                const named = new Set(namedAgentIds(text, agents))
+                const queued = agents.filter((agent) => agent.runId && named.has(agent.id))
                 void run(async () => {
                   await api("/api/v1/say", {
                     method: "POST",
@@ -756,19 +795,6 @@ export function RoomApp() {
                     return saved
                   }}
                 />
-              }
-              onCreate={(title, ownerId, steps) =>
-                void run(() =>
-                  api("/api/v1/tasks", {
-                    method: "POST",
-                    body: JSON.stringify({
-                      as: "human",
-                      title,
-                      owner: ownerId ?? undefined,
-                      steps,
-                    }),
-                  }).then(() => undefined),
-                )
               }
               onStep={(task, step, state) =>
                 void run(() =>

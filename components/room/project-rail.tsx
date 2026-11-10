@@ -1,6 +1,6 @@
 "use client"
 
-import { useEffect, useSyncExternalStore, ViewTransition } from "react"
+import { useEffect, useRef, useState, useSyncExternalStore, ViewTransition } from "react"
 import { Plus, Settings2 } from "lucide-react"
 
 import { Avatar, seatLook } from "@/components/room/bits"
@@ -62,22 +62,49 @@ export function seatFlight(id: string) {
 // Seats hop once when they said something after the page loaded.
 const PAGE_AT = typeof window === "undefined" ? 0 : Date.now()
 
-type Item = { project: Project; on: boolean; unread: boolean; notes: string[] }
+// `picked`: clicked, its room still on the way; shown at once so the click
+// is felt, without touching `on` (that would empty the bench before the
+// seats can fly).
+type Item = { project: Project; on: boolean; picked: boolean; unread: boolean; notes: string[] }
 
 export function ProjectRail({
   projects,
   current,
   onPick,
+  onPrefetch,
   onCreate,
   onEdit,
 }: {
   projects: Project[]
   current: string | null
   onPick: (id: string) => void
+  // Fetch a project's room ahead, while the pointer is on it.
+  onPrefetch?: (id: string) => void
   onCreate: () => void
   onEdit: (project: Project) => void
 }) {
   const seenAt = useSyncExternalStore(subscribe, seenMap, () => EMPTY)
+  const [picked, setPicked] = useState<string | null>(null)
+  const hoverTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
+  useEffect(() => () => {
+    if (hoverTimer.current) clearTimeout(hoverTimer.current)
+  }, [])
+  const handlers: Handlers = {
+    onPick: (id) => {
+      setPicked(id)
+      onPick(id)
+    },
+    onEdit,
+    // A short rest on a project before fetching, so sweeping the pointer
+    // across the rail doesn't fetch every room; a press fetches at once.
+    ahead: (id, now) => {
+      if (hoverTimer.current) clearTimeout(hoverTimer.current)
+      hoverTimer.current = null
+      if (!onPrefetch || id === null || id === current) return
+      if (now) onPrefetch(id)
+      else hoverTimer.current = setTimeout(() => onPrefetch(id), AHEAD_AFTER)
+    },
+  }
 
   // The open project counts as read up to now; a project the browser has
   // never recorded starts as read, so a first visit isn't all dots.
@@ -101,26 +128,27 @@ export function ProjectRail({
 
   const items: Item[] = projects.map((project) => {
     const on = project.id === current
+    const isPicked = !on && project.id === picked
     const unread = !on && project.lastOtherAt > (seenAt[project.id] ?? project.lastOtherAt)
     const notes = [
       project.waiting ? `${project.waiting} 件等你处理` : "",
       project.working ? `${project.working} 个在干活` : "",
       unread ? "有新消息" : "",
     ].filter(Boolean)
-    return { project, on, unread, notes }
+    return { project, on, picked: isPicked, unread, notes }
   })
 
   return (
     <>
       <nav aria-label="项目" className="hidden w-16 shrink-0 flex-col items-center gap-2 overflow-y-auto py-3 lg:flex xl:hidden">
         {items.map((item) => (
-          <Tile key={item.project.id} item={item} onPick={onPick} onEdit={onEdit} />
+          <Tile key={item.project.id} item={item} {...handlers} />
         ))}
         <NewButton onCreate={onCreate} className="size-11" />
       </nav>
       <nav aria-label="项目" data-tour="project-rail" className="hidden w-[176px] shrink-0 flex-col gap-2 overflow-y-auto py-3 pr-1 pl-3 xl:flex">
         {items.map((item) => (
-          <Card key={item.project.id} item={item} onPick={onPick} onEdit={onEdit} />
+          <Card key={item.project.id} item={item} {...handlers} />
         ))}
         <NewButton onCreate={onCreate} className="h-11 w-full" label="新建项目" />
       </nav>
@@ -129,7 +157,22 @@ export function ProjectRail({
   )
 }
 
-type Handlers = { onPick: (id: string) => void; onEdit: (project: Project) => void }
+type Handlers = {
+  onPick: (id: string) => void
+  onEdit: (project: Project) => void
+  // Pointer on a project (now: pressed), or off it (null).
+  ahead: (id: string | null, now?: boolean) => void
+}
+
+const AHEAD_AFTER = 120
+
+function aheadProps(id: string, ahead: Handlers["ahead"]) {
+  return {
+    onPointerEnter: () => ahead(id),
+    onPointerLeave: () => ahead(null),
+    onPointerDown: () => ahead(id, true),
+  }
+}
 
 // A right click on a project opens its settings, the way a chat app's group
 // list does.
@@ -140,14 +183,14 @@ function settingsOnRightClick(project: Project, onEdit: (project: Project) => vo
   }
 }
 
-function Tile({ item, onPick, onEdit }: { item: Item } & Handlers) {
-  const { project, on, unread, notes } = item
+function Tile({ item, onPick, onEdit, ahead }: { item: Item } & Handlers) {
+  const { project, on, picked, unread, notes } = item
   return (
     <div className="group relative flex w-full justify-center" onContextMenu={settingsOnRightClick(project, onEdit)}>
       <span
         aria-hidden="true"
         className={`absolute top-1/2 left-0 w-1 -translate-y-1/2 rounded-r-full bg-foreground transition-all duration-200 ${
-          on ? "h-8" : unread ? "h-2" : "h-0"
+          on || picked ? "h-8" : unread ? "h-2" : "h-0"
         }`}
       />
       <button
@@ -155,11 +198,13 @@ function Tile({ item, onPick, onEdit }: { item: Item } & Handlers) {
         data-wreck={project.id}
         data-wreck-kind="tile"
         onClick={() => onPick(project.id)}
+        {...aheadProps(project.id, ahead)}
+        aria-busy={picked || undefined}
         aria-current={on ? "page" : undefined}
         aria-label={[project.name, ...notes].join("，")}
         title={[project.name, ...notes].join(" · ")}
         className={`relative grid size-11 place-items-center text-base font-semibold text-white transition-all duration-200 ${
-          on ? "rounded-xl" : "rounded-2xl hover:rounded-xl"
+          on || picked ? "rounded-xl" : "rounded-2xl hover:rounded-xl"
         } ${project.working ? "ring-2 ring-emerald-500 ring-offset-2 ring-offset-background" : ""}`}
         style={{ background: tint(project.id) }}
       >
@@ -171,8 +216,8 @@ function Tile({ item, onPick, onEdit }: { item: Item } & Handlers) {
   )
 }
 
-function Card({ item, onPick, onEdit }: { item: Item } & Handlers) {
-  const { project, on, unread, notes } = item
+function Card({ item, onPick, onEdit, ahead }: { item: Item } & Handlers) {
+  const { project, on, picked, unread, notes } = item
   const rest = Math.max(0, project.seats - project.bench.length)
   return (
     <div
@@ -184,16 +229,18 @@ function Card({ item, onPick, onEdit }: { item: Item } & Handlers) {
       <button
         type="button"
         onClick={() => onPick(project.id)}
+        {...aheadProps(project.id, ahead)}
+        aria-busy={picked || undefined}
         aria-current={on ? "page" : undefined}
         aria-label={[project.name, ...notes].join("，")}
         title={[project.name, ...notes, project.names.length ? `席位：${project.names.join("、")}` : ""].filter(Boolean).join(" · ")}
         className={`relative w-full rounded-2xl px-3 pt-2 pb-2.5 text-left transition-colors duration-200 ${
-          on ? "frost ring-1 ring-foreground/15" : "hover:bg-foreground/[0.04]"
+          on ? "frost ring-1 ring-foreground/15" : picked ? "bg-foreground/[0.07] ring-1 ring-foreground/10" : "hover:bg-foreground/[0.04]"
         }`}
       >
         <span className="flex items-center gap-1.5">
           <span className="size-2 shrink-0 rounded-full" style={{ background: tint(project.id) }} aria-hidden="true" />
-          <span className={`min-w-0 flex-1 truncate text-[13px] leading-5 ${on || unread ? "font-semibold" : "font-medium text-foreground/80"}`}>
+          <span className={`min-w-0 flex-1 truncate text-[13px] leading-5 ${on || picked || unread ? "font-semibold" : "font-medium text-foreground/80"}`}>
             {project.name}
           </span>
           {project.waiting ? (

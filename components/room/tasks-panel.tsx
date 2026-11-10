@@ -9,15 +9,7 @@ import {
   DropdownMenuItem,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu"
-import { Input } from "@/components/ui/input"
 import { Textarea } from "@/components/ui/textarea"
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from "@/components/ui/select"
 import { awaitingReview } from "@/lib/review"
 import { TASK_STATUS_LABEL, clock } from "@/lib/status"
 import type { PublicAgent, Task, TaskStatus, TaskStep, TaskStepState } from "@/lib/types"
@@ -39,7 +31,6 @@ export function TasksPanel({
   agents,
   highlightId,
   busy,
-  onCreate,
   onAskHandoff,
   onStatus,
   onStep,
@@ -51,9 +42,8 @@ export function TasksPanel({
   agents: PublicAgent[]
   highlightId: string | null
   busy: boolean
-  // Shown above the new-task form, such as the room summary.
+  // Shown above the tasks, such as the room summary.
   header?: React.ReactNode
-  onCreate: (title: string, ownerId: string | null, steps: string[]) => void
   onAskHandoff: (task: Task, agent: PublicAgent) => void
   onStatus: (task: Task, action: "done" | "block") => void
   onStep: (task: Task, step: number, state: TaskStepState) => void
@@ -61,19 +51,8 @@ export function TasksPanel({
   // A finished task is not edited; this makes a copy to carry on in.
   onFork: (task: Task) => void
 }) {
-  const [title, setTitle] = useState("")
-  const [steps, setSteps] = useState("")
-  const [owner, setOwner] = useState("none")
   const active = tasks.filter((task) => task.status !== "done")
   const done = tasks.filter((task) => task.status === "done")
-  const items = [
-    { value: "none", label: "先不指定" },
-    ...agents.map((agent) => ({
-      value: agent.id,
-      label: `${agent.name} · ${agent.role}`,
-    })),
-  ]
-
   return (
     <div className="flex h-full min-h-0 flex-col">
       <div className="flex items-baseline justify-between px-4 pt-3 pb-3">
@@ -84,59 +63,10 @@ export function TasksPanel({
       </div>
       <div className="min-h-0 flex-1 overflow-y-auto px-1 pt-2 pb-6">
       {header}
-      <form
-        className="note mx-3 mb-5 space-y-2 p-2.5"
-        data-tilt="a"
-        onSubmit={(event) => {
-          event.preventDefault()
-          if (!title.trim()) return
-          const list = steps
-            .split("\n")
-            .map((line) => line.trim())
-            .filter(Boolean)
-          onCreate(title.trim(), owner === "none" ? null : owner, list)
-          setTitle("")
-          setSteps("")
-          setOwner("none")
-        }}
-      >
-        <Input
-          value={title}
-          onChange={(event) => setTitle(event.target.value)}
-          placeholder="新待办：要做的功能"
-          aria-label="待办标题"
-          className="border-0 bg-transparent px-1 shadow-none placeholder:text-current placeholder:opacity-55 focus-visible:ring-0 dark:bg-transparent"
-        />
-        <Textarea
-          value={steps}
-          onChange={(event) => setSteps(event.target.value)}
-          placeholder="拆成几步，一行一步（可以不填）"
-          aria-label="步骤，一行一步"
-          rows={2}
-          className="min-h-0 resize-none border-0 bg-transparent px-1 py-0.5 text-xs shadow-none placeholder:text-current placeholder:opacity-55 focus-visible:ring-0 dark:bg-transparent"
-        />
-        <div className="flex gap-2">
-          <Select items={items} value={owner} onValueChange={(value) => setOwner(value ?? "none")}>
-            <SelectTrigger className="w-full min-w-0 flex-1 border-current/15 bg-white/40 dark:bg-black/15" aria-label="负责人">
-              <SelectValue placeholder="先不指定" />
-            </SelectTrigger>
-            <SelectContent>
-              {items.map((item) => (
-                <SelectItem key={item.value} value={item.value}>
-                  {item.label}
-                </SelectItem>
-              ))}
-            </SelectContent>
-          </Select>
-          <Button type="submit" size="sm" className="h-8" disabled={busy || title.trim().length === 0}>
-            派出去
-          </Button>
-        </div>
-      </form>
       <div className="space-y-5 px-3">
         {tasks.length === 0 ? (
           <div className="rounded-sm border border-dashed border-foreground/15 px-3 py-4 text-xs leading-5 text-muted-foreground">
-            还没有待办。写下要做的功能、拆好步骤并指定负责人；在对话里让 AI 做新功能时，它也会自己在这里建一条，做一步勾一步。
+            还没有待办。在对话里让 AI 做新功能时，它会先在这里建一条，拆成几步，做一步勾一步。
           </div>
         ) : null}
         {active.map((task, index) => (
@@ -445,34 +375,38 @@ function StepDrawer({
         </span>
         <ChevronDown className={`size-3.5 shrink-0 transition-transform ${open ? "rotate-180" : ""}`} />
       </button>
+      {/* Built only while open (Reveal keeps the last one for the fold): a
+          room's many tasks each drawing every step slowed switching projects. */}
       <Reveal open={open}>
-        <ol className="space-y-1 px-2 pb-2 text-[11px] leading-5">
-          {steps.map((step, index) => (
-            <li key={step.id} className="flex gap-1.5">
-              <button
-                type="button"
-                className={`mt-0.5 grid size-4 shrink-0 place-items-center rounded-full border border-current/35 ${
-                  step.state === "done" ? "bg-current/70" : step.state === "doing" ? "bg-current/25" : ""
-                }`}
-                title={locked ? `${STEP_LABEL[step.state]}（已完成的待办不能再改）` : `${STEP_LABEL[step.state]}，点一下改成${STEP_LABEL[NEXT[step.state]]}`}
-                aria-label={locked ? `第 ${index + 1} 步${STEP_LABEL[step.state]}` : `第 ${index + 1} 步${STEP_LABEL[step.state]}，改成${STEP_LABEL[NEXT[step.state]]}`}
-                disabled={busy || locked}
-                onClick={() => onStep(index + 1, NEXT[step.state])}
-              >
-                {step.state === "done" ? <Check className="size-2.5 text-background" /> : null}
-              </button>
-              <div className="min-w-0 flex-1">
-                <p className={step.state === "done" ? "line-through opacity-60" : step.state === "doing" ? "font-medium" : ""}>
-                  {index + 1}. {step.text}
-                </p>
-                <p className="text-muted-foreground">
-                  {STEP_LABEL[step.state]} · {step.by} {clock(step.updatedAt)}
-                  {step.note ? `：${step.note}` : ""}
-                </p>
-              </div>
-            </li>
-          ))}
-        </ol>
+        {open ? (
+          <ol className="space-y-1 px-2 pb-2 text-[11px] leading-5">
+            {steps.map((step, index) => (
+              <li key={step.id} className="flex gap-1.5">
+                <button
+                  type="button"
+                  className={`mt-0.5 grid size-4 shrink-0 place-items-center rounded-full border border-current/35 ${
+                    step.state === "done" ? "bg-current/70" : step.state === "doing" ? "bg-current/25" : ""
+                  }`}
+                  title={locked ? `${STEP_LABEL[step.state]}（已完成的待办不能再改）` : `${STEP_LABEL[step.state]}，点一下改成${STEP_LABEL[NEXT[step.state]]}`}
+                  aria-label={locked ? `第 ${index + 1} 步${STEP_LABEL[step.state]}` : `第 ${index + 1} 步${STEP_LABEL[step.state]}，改成${STEP_LABEL[NEXT[step.state]]}`}
+                  disabled={busy || locked}
+                  onClick={() => onStep(index + 1, NEXT[step.state])}
+                >
+                  {step.state === "done" ? <Check className="size-2.5 text-background" /> : null}
+                </button>
+                <div className="min-w-0 flex-1">
+                  <p className={step.state === "done" ? "line-through opacity-60" : step.state === "doing" ? "font-medium" : ""}>
+                    {index + 1}. {step.text}
+                  </p>
+                  <p className="text-muted-foreground">
+                    {STEP_LABEL[step.state]} · {step.by} {clock(step.updatedAt)}
+                    {step.note ? `：${step.note}` : ""}
+                  </p>
+                </div>
+              </li>
+            ))}
+          </ol>
+        ) : null}
       </Reveal>
     </div>
   )

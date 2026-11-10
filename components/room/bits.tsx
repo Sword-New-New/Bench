@@ -111,9 +111,10 @@ export function useFold(text: string) {
   useEffect(() => {
     if (!node || open) return
     const measure = () => setLong(node.scrollHeight > node.clientHeight + 1)
+    // The observer reports the first size by itself once laid out; measuring
+    // here as well forced a layout per message while a room was drawn.
     const observer = new ResizeObserver(measure)
     observer.observe(node)
-    measure()
     return () => observer.disconnect()
   }, [node, open, text])
   const toggle = () => {

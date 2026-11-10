@@ -1,4 +1,4 @@
-import { useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode } from "react"
+import { startTransition, useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode } from "react"
 import { ArrowRight, Check, ChevronDown, ListTree, Reply, Undo2, X, Zap } from "lucide-react"
 import { toast } from "sonner"
 
@@ -24,6 +24,7 @@ const EXAMPLES = [
 
 // How many thread items (a reply chain counts as one) are drawn at first and per click.
 const PAGE = 40
+const FIRST = 12
 
 export function Thread({
   messages,
@@ -114,7 +115,14 @@ export function Thread({
 
   // A long room is slow to draw whole: show the latest stretch, and let a
   // click at the top bring in an earlier one without moving what you are reading.
-  const [limit, setLimit] = useState(PAGE)
+  // A fresh thread (page load, another project) first draws only the last
+  // few, which is all that shows at the bottom, then the rest of the page
+  // right after in the background: switching projects waits for less.
+  const [limit, setLimit] = useState(FIRST)
+  useEffect(() => {
+    const frame = requestAnimationFrame(() => startTransition(() => setLimit((value) => Math.max(value, PAGE))))
+    return () => cancelAnimationFrame(frame)
+  }, [])
   const anchor = useRef<number | null>(null)
   const items = threadItems(messages)
   const hidden = Math.max(0, items.length - limit)

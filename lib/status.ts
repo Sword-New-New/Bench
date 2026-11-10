@@ -43,9 +43,10 @@ export function ago(ts: number, now = Date.now()): string {
   return `${Math.round(hours / 24)} 天前`
 }
 
+// One formatter for all: making one per call was a good part of drawing a
+// room (every message and task step shows a time).
+const CLOCK = new Intl.DateTimeFormat("zh-CN", { hour: "2-digit", minute: "2-digit" })
+
 export function clock(ts: number): string {
-  return new Intl.DateTimeFormat("zh-CN", {
-    hour: "2-digit",
-    minute: "2-digit",
-  }).format(ts)
+  return CLOCK.format(ts)
 }

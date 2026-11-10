@@ -11,22 +11,13 @@ import { Label } from "@/components/ui/label"
 import { Textarea } from "@/components/ui/textarea"
 import { SLASH_COMMANDS, parseSlash } from "@/lib/commands"
 import { KINDS, kindOf } from "@/lib/kinds"
-import { escapeRegExp, unknownMentions } from "@/lib/text"
+import { escapeRegExp, insertMention, unknownMentions } from "@/lib/text"
 import type { Message, PublicAgent } from "@/lib/types"
 
 export const DOCK_EVENT = "bench-dock"
 
 function hasMention(text: string, name: string) {
   return new RegExp(`@${escapeRegExp(name)}(?![\\p{L}\\p{N}_-])`, "u").test(text)
-}
-
-function toggleMention(text: string, name: string) {
-  if (hasMention(text, name)) {
-    return text
-      .replace(new RegExp(`@${escapeRegExp(name)}(?![\\p{L}\\p{N}_-])\\s?`, "u"), "")
-      .replace(/^\s+/, "")
-  }
-  return `@${name} ${text}`
 }
 
 export function Composer({
@@ -120,7 +111,7 @@ export function Composer({
       ? []
       : agents.filter((agent) => agent.name.toLowerCase().includes(query.toLowerCase())).slice(0, 6)
   // Typing a command's name at the very start: the commands that fit.
-  // (After the @s the names below put in front, too.)
+  // (After any @s in front of it, too.)
   const slashQuery = value.match(/^(?:@\S+\s+)*\/([a-z]*)$/)?.[1] ?? null
   const slashMatches =
     slashQuery === null ? [] : SLASH_COMMANDS.filter((item) => item.name.startsWith(slashQuery) && item.name !== slashQuery)
@@ -153,6 +144,26 @@ export function Composer({
     onChange(value.replace(/@([\p{L}\p{N}_-]*)$/u, `@${name} `))
     setPicked(true)
     inputRef.current?.focus()
+  }
+
+  // A name under the input goes in where the caret is, not at the front. The
+  // text comes back through `value`, so the caret is put after the name once
+  // that has rendered.
+  const caret = useRef<number | null>(null)
+  useLayoutEffect(() => {
+    if (caret.current === null) return
+    inputRef.current?.setSelectionRange(caret.current, caret.current)
+    caret.current = null
+  }, [value, inputRef])
+
+  function mention(name: string) {
+    const input = inputRef.current
+    // An input that was never clicked into has its caret at the end.
+    const start = input?.selectionStart ?? value.length
+    const next = insertMention(value, name, start, input?.selectionEnd ?? start)
+    caret.current = next.caret
+    onChange(next.text)
+    input?.focus()
   }
 
   return (
@@ -314,8 +325,7 @@ export function Composer({
                 dragHandlers={chips.handlers(seat.id, ordered.map((item) => item.seat.id))}
                 onPick={() => {
                   if (chips.justDragged()) return
-                  onChange(toggleMention(value, seat.name))
-                  inputRef.current?.focus()
+                  mention(seat.name)
                 }}
               >
                 <span className="size-1.5 rounded-full" style={{ background: kind.color }} />
@@ -326,10 +336,7 @@ export function Composer({
               <Pick
                 gone={hasMention(value, "所有人")}
                 title="@所有人"
-                onPick={() => {
-                  onChange(toggleMention(value, "所有人"))
-                  inputRef.current?.focus()
-                }}
+                onPick={() => mention("所有人")}
               >
                 所有人
               </Pick>

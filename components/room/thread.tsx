@@ -267,9 +267,10 @@ export function Thread({
         }}
         aria-live="polite"
       >
+        {/* --live-gap: this column's gap, for a 「正在做」 row to give back as it closes (live-close). */}
         <div
           ref={content}
-          className="mx-auto flex max-w-3xl flex-col gap-1 px-4 pt-6 pb-[calc(var(--dock,8rem)+1rem)] md:px-6"
+          className="mx-auto flex max-w-3xl flex-col gap-1 px-4 pt-6 pb-[calc(var(--dock,8rem)+1rem)] md:px-6 [&>.live-slot]:[--live-gap:0.25rem]"
         >
           <PinnedAsks asks={pinned} />
           {!talked ? <Welcome onExample={onExample} /> : null}

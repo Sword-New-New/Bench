@@ -655,9 +655,12 @@
   80%, 100% { opacity: 0; transform: scaleX(0.015); }
 }
 
+/* A closed row still holds the gap its column puts between rows, until it is
+ * dropped, and the thread would hop by that much then. So it gives the gap
+ * back as it closes: --live-gap, set by the column (thread.tsx). */
 @keyframes live-close {
-  0%, 74% { grid-template-rows: 1fr; animation-timing-function: cubic-bezier(0.4, 0, 0.2, 1); }
-  100% { grid-template-rows: 0fr; }
+  0%, 74% { grid-template-rows: 1fr; margin-top: 0; animation-timing-function: cubic-bezier(0.4, 0, 0.2, 1); }
+  100% { grid-template-rows: 0fr; margin-top: calc(-1 * var(--live-gap, 0px)); }
 }
 
 @media (prefers-reduced-motion: reduce) {

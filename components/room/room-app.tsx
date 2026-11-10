@@ -322,6 +322,18 @@ export function RoomApp() {
     })
   }, [room?.messages, focusAgent])
 
+  // Who spoke in the room, latest first, for the composer's chips.
+  const speakers = useMemo(() => {
+    const seats = new Set((room?.agents ?? []).map((agent) => agent.id))
+    const out: string[] = []
+    const messages = room?.messages ?? []
+    for (let index = messages.length - 1; index >= 0 && out.length < 10; index--) {
+      const { kind, authorId } = messages[index]
+      if (kind !== "system" && seats.has(authorId) && !out.includes(authorId)) out.push(authorId)
+    }
+    return out
+  }, [room?.messages, room?.agents])
+
   const seated = agents.filter((agent) => agent.status !== "offline").length
   const working = agents.filter((agent) => agent.status === "working").length
 
@@ -662,6 +674,7 @@ export function RoomApp() {
             />
             <DraftComposer
               agents={agents}
+              speakers={speakers}
               reply={reply}
               busy={busy}
               inputRef={composerRef}

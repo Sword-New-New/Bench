@@ -41,6 +41,7 @@ export function Composer({
   notice,
   files,
   onFiles,
+  speakers = [],
 }: {
   agents: PublicAgent[]
   value: string
@@ -55,10 +56,15 @@ export function Composer({
   // Attachments going out with the next message.
   files: Pending[]
   onFiles: (update: (current: Pending[]) => Pending[]) => void
+  // Seat ids that spoke in the room, latest first (one each).
+  speakers?: string[]
 }) {
   const [picked, setPicked] = useState(false)
   const [dragging, setDragging] = useState(false)
   const chips = useChipOrder()
+  // The (up to) three chips of whoever spoke last, taken when you click into
+  // the input to type, and kept while you do so the row doesn't move under you.
+  const [recent, setRecent] = useState<string[]>([])
   const uploading = files.some((item) => item.uploading)
 
   // Pasted or dropped: shown at once, then swapped for the saved copy.
@@ -136,7 +142,7 @@ export function Composer({
     const picked = reachable.length > 0 ? reachable : seats.slice(0, 1)
     return picked.map((seat) => ({ kind, seat, label: picked.length > 1 ? seat.name : kind.label }))
   })
-  const ordered = chips.sort(targets)
+  const ordered = upFront(chips.sort(targets), recent)
 
   function insertCommand(name: string) {
     onChange(value.replace(/\/[a-z]*$/, `/${name} `))
@@ -247,6 +253,11 @@ export function Composer({
           value={value}
           placeholder={dragging ? "松手就附上" : "说点什么，@ 谁就唤起谁 · / 是命令 · 可以粘贴图片、拖文件进来 · Enter 发送"}
           className="max-h-60 min-h-14 resize-none border-0 bg-transparent px-4 pt-3.5 shadow-none placeholder:text-foreground/45 focus-visible:ring-0 dark:bg-transparent"
+          onFocus={() => {
+            const ids = new Set(targets.map((item) => item.seat.id))
+            const next = speakers.filter((id) => ids.has(id)).slice(0, RECENT_UP_FRONT)
+            setRecent((current) => (current.join() === next.join() ? current : next))
+          }}
           onChange={(event) => {
             setPicked(false)
             onChange(event.target.value)
@@ -408,6 +419,20 @@ function Pick({
 }
 
 const ORDER_KEY = "bench-chip-order"
+const RECENT_UP_FRONT = 3
+
+// The given seats first, in that order; the rest keep theirs.
+function upFront<T extends { seat: { id: string } }>(items: T[], ids: string[]) {
+  if (ids.length === 0) return items
+  const rank = (id: string) => {
+    const index = ids.indexOf(id)
+    return index < 0 ? ids.length : index
+  }
+  return items
+    .map((item, index) => ({ item, index }))
+    .sort((a, b) => rank(a.item.seat.id) - rank(b.item.seat.id) || a.index - b.index)
+    .map(({ item }) => item)
+}
 
 // How far a slide in progress has moved a chip sideways.
 function shiftOf(node: HTMLElement) {

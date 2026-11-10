@@ -8,6 +8,8 @@ import { createParser, liveLine } from "@/lib/events"
 import { ApiError } from "@/lib/http"
 import { detectLimit, whenText } from "@/lib/limits"
 import { commandLine, killTree } from "@/lib/platform"
+import { accepting, deliver, openTerminal } from "@/lib/terminal"
+import { onTerminalClosed, terminalOpen } from "@/lib/terminal-state"
 import { endRun, getRun, markResumed, pendingResumes, putStep, setLimited, startRun, takeUnannounced } from "@/lib/runs"
 import {
   agentState,
@@ -17,6 +19,7 @@ import {
   currentProjectInfo,
   catchUp,
   inProject,
+  inSeat,
   markInterruptedResumed,
   markLimited,
   markReached,
@@ -96,6 +99,7 @@ type Lane = {
 type SummonGlobal = typeof globalThis & {
   __benchSummonBound?: boolean
   __benchSummonAnnounced?: boolean
+  __benchTermBound?: boolean
   // Runs the user asked to be woken again after a usage limit: when.
   __benchResumeTimers?: Map<string, NodeJS.Timeout>
   __benchSummonHandler?: (message: Message) => void
@@ -480,6 +484,13 @@ function run(agentId: string) {
     queue.compact = false
     return
   }
+  // Its session is open in a terminal on the page (lib/terminal.ts): what
+  // calls it is typed in there. A summary, a compaction or a word in private
+  // waits until the terminal closes.
+  if (terminalOpen(agentId)) {
+    intoTerminal(agent, queue)
+    return
+  }
   if (queue.whisper !== undefined) {
     const text = queue.whisper
     queue.whisper = undefined
@@ -564,6 +575,31 @@ function run(agentId: string) {
     seat.settle()
     run(agentId)
   })
+}
+
+function intoTerminal(agent: NonNullable<ReturnType<typeof agentState>>, queue: ReturnType<typeof lane>) {
+  // On its way out: it all waits for the closing, then runs the usual way.
+  if ((queue.pending.length === 0 && !queue.carry) || !accepting(agent.id)) return
+  const seen = catchUp(agent.id, CATCH_UP_CHARS)
+  const fresh = seen.text || queue.pending.map((item: { line: string }) => item.line).join("\n\n")
+  const carried = queue.carry
+  queue.carry = undefined
+  const body = carried ? `【刚才被打断、还没回的】\n${carried}${fresh ? `\n\n【之后的新消息】\n${fresh}` : ""}` : fresh
+  queue.pending = []
+  queue.hops = 0
+  queue.trigger = undefined
+  // Typed in, there is no answer to read off stdout: it replies with bench_say.
+  // Its permission prompts show in the terminal itself, not on the page.
+  deliver(agent.id, introduce(agent) + envelope(body, seen.skipped, seen.summary, false, false))
+}
+
+// The user opens a seat's terminal. Not while a headless wake runs on the
+// same session: they would both write to it.
+export function openSeatTerminal(agentId: string, cols?: unknown, rows?: unknown) {
+  const agent = agentState(agentId)
+  if (!agent) throw new ApiError(404, "这个席位不在了")
+  if (lane(agentId).running) throw new ApiError(409, `${agent.name} 正在跑一轮，等它做完或先停下，再开终端`)
+  return openTerminal(agentId, cols, rows)
 }
 
 function writeSummary(agent: NonNullable<ReturnType<typeof agentState>>, adapter: Adapter) {
@@ -1006,6 +1042,15 @@ export function forgetMessage(messageId: string) {
 
 export function ensureSummon() {
   g().__benchSummonHandler = wake
+  if (!g().__benchTermBound) {
+    g().__benchTermBound = true
+    // What waited while the terminal was open runs now, the usual way.
+    onTerminalClosed((agentId) => {
+      try {
+        inSeat(agentId, () => run(agentId))
+      } catch {}
+    })
+  }
   if (!g().__benchSummonAnnounced) {
     g().__benchSummonAnnounced = true
     announceInterrupted()

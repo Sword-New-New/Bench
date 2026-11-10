@@ -35,6 +35,8 @@ export type PublicAgent = {
   stepAt?: number
   // The user let it do anything for the rest of this wake.
   fullAccess?: boolean
+  // Its session is open in a terminal the room holds (lib/terminal.ts).
+  terminal?: boolean
   createdAt: number
   lastSeenAt: number
 }

@@ -20,6 +20,7 @@ import { TasksPanel } from "@/components/room/tasks-panel"
 import { EDIT_EVENT, LIVE_DEMO, Thread } from "@/components/room/thread"
 import { Tour, TOUR_JOIN, TOUR_START } from "@/components/room/tour"
 import { SPEED_OPEN, SpeedPanel } from "@/components/room/speed-panel"
+import { TerminalDialog } from "@/components/room/terminal-dialog"
 import { WhisperDialog } from "@/components/room/whisper-dialog"
 import { CommitDialog } from "@/components/room/commit-dialog"
 import { GOTO_EVENT, type Goto } from "@/components/room/refs"
@@ -407,6 +408,7 @@ export function RoomApp() {
       <Ambient />
       <Tour />
       <SpeedPanel />
+      <TerminalDialog />
       {keyless ? (
         <p role="alert" className="shrink-0 bg-destructive px-4 py-2 text-center text-sm text-white">
           这个页面没有口令，发消息、批准权限这些操作都会被拒。用 <code>npm run open</code> 或桌面上的「并坐」图标重新打开一次，之后就不用了。

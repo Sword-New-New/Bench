@@ -203,7 +203,7 @@ MCP 只管 agent → 房间：入座、发言、收件箱、任务、在线。�
 - 压缩：席位菜单「压缩上下文」（只对 Claude/Codex、能唤起、没在跑、没挂在 bench_wait 的席位出现）→ `POST /api/v1/agents/<id> {as:"human", action:"compact"}` → `lib/summon.ts` 的 `compactSession`：像一次唤起那样排在这个席位的队里，命令里的话换成 `/compact`，「过程」里记为「压缩上下文」，停止、重启打断后重新叫醒都照常。Claude Code 无界面模式直接认 `/compact`；`scripts/codex-app.mjs` 见到 `/compact` 改发 `thread/compact/start`，等 `thread/compacted`（`BENCH_CODEX_EXEC=1` 的老路不支持，直接报错）。
 - 做完在群里写一句：记录里出现了新的压缩才算压缩好了（「2.3 万 → 6038」）；没出现就把客户端的原话贴出来（会话太短时 Claude 会说 "Not enough messages to compact."）。
 - 压缩会丢细节，只在你点的时候做，房间不会自己替谁压缩。
-- 按席位设两项（「换模型…」「开新会话」）：下拉框「最大上下文窗口」（默认＝模型自带的，或 10/20/30/40/50/100 万，存 `windowPick`），滑条「用到多少自动压缩」（10%～100%，步长 5，默认＝跟客户端自己的设置走，存 `compactPct`）。`lib/context.ts` 的 `compactPoint` 算出「窗口 × 百分比」（没选窗口就用模型的窗口；Claude 低于 10 万按 10 万），`compactEnv` 以 `BENCH_COMPACT_WINDOW` 交给每次唤起：`claude-code.sh` 设成 `CLAUDE_CODE_AUTO_COMPACT_WINDOW`（Claude Code 认它优先于所有 settings 文件，`/autocompact` 会显示 "from CLAUDE_CODE_AUTO_COMPACT_WINDOW"；它真正动手的点比这个数略低一点，留给摘要的余量）；`codex-app.mjs`、`codex-wake.sh`、`terminal.sh` 传 `-c model_auto_compact_token_limit=…`。两项都不设就什么都不传。只影响房间叫醒它的那几轮，不改你的全局设置。
+- 按席位设两项（「换模型…」「开新会话」）：下拉框「最大上下文窗口」（默认＝模型自带的，或 10/20/30/40/50/100 万，存 `windowPick`），滑条「用到多少自动压缩」（10%～100%，步长 5，默认＝跟客户端自己的设置走，存 `compactPct`）。`lib/context.ts` 的 `compactPoint` 算出「窗口 × 百分比」（没选窗口就用模型的窗口；Claude 低于 10 万按 10 万），`compactEnv` 以 `BENCH_COMPACT_WINDOW` 交给每次唤起和网页终端：`claude-code.sh`、`terminal.sh` 设成 `CLAUDE_CODE_AUTO_COMPACT_WINDOW`（Claude Code 认它优先于所有 settings 文件，`/autocompact` 会显示 "from CLAUDE_CODE_AUTO_COMPACT_WINDOW"；它真正动手的点比这个数略低一点，留给摘要的余量）；`codex-app.mjs`、`codex-wake.sh`、`terminal.sh` 传 `-c model_auto_compact_token_limit=…`。两项都不设就什么都不传。只影响房间叫醒它的那几轮，不改你的全局设置。
 - 上下文条：满格＝最大窗口，竖线＝压缩点（选了的用选的，没选的 Claude 用 settings 里的 `autoCompactWindow`，Codex 不知道就不画）；颜色看离压缩点多近：70% 变黄、90% 变红。
 - 为什么交给客户端、不由房间接管：客户端在一轮中途、快满的那一刻就能压；房间只能在两轮之间压，一轮里读了大文件照样会撑爆。
 
@@ -214,6 +214,22 @@ MCP 只管 agent → 房间：入座、发言、收件箱、任务、在线。�
 - 扫描进程（`scripts/speed-worker.mjs`、`lib/speed.ts`）：按需拉起一个独立的 Node IPC 子进程（5 分钟没人查自动退出归还内存），用 512 KB Buffer 按字节预筛扫描 `~/.claude/projects/**/*.jsonl`、`~/.codex/{sessions,archived_sessions}/**/*.jsonl(.zst)`、`~/.gemini/{antigravity,antigravity-cli}/conversations/*.db`（Node 24 原生 `node:sqlite` 只读 + 轻量 protobuf 解码，按回复 id 去重合并桌面端和被房间叫醒的会话）和 `~/.dsh/sessions/**/session.v4.jsonl.zstd`（`dsh` 每条事件追加一个独立 zstd frame，Node 的 `zlib.zstdDecompressSync` 只解第一帧就会停，所以 `eachZstdFrame` 按帧魔数逐帧解完）。增量偏移和行元组存在 `data/speed-cache.json`，二次扫描几十毫秒。
 - 接口：`GET /api/v1/speed` 给席位栏摘要（近 24 小时最新一次 ≥100 token 的速度、近 30 次中位数、首 token / 首块上限）；`GET /api/v1/speed/board?range=1h|24h|7d|30d|all&v=…` 给完整看板数据（版本未变回 `{unchanged: true}`）。
 - 页面：席位栏额度下面挂 `components/room/speed-line.tsx`（3 分钟内活跃用该家颜色，否则变灰，点开弹窗且不顺带 `@`）；设置菜单和速度行打开 `components/room/speed-panel.tsx` 大弹窗（内置 `components/room/speed-board.tsx`：四家概览卡与 sparkline、速度走势散点+滚动中位数、输入/输出缓存分桶堆叠柱状图、按模型/项目用量表、按模型速度表、速度分布直方图、最近 150 条请求明细）；「在新标签页打开」跳同源的 `/speed`（`app/speed/page.tsx`，自带滚动容器和深浅色切换）。
+
+## 实时终端（席位开在房间的终端里）
+
+平时唤起是无界面跑一轮（`claude -p --output-format stream-json`、`codex exec --json`），看得到的只有整理过的「过程」。实时终端是另一条路：房间用伪终端（`node-pty`）把席位的会话开在客户端自己的交互界面里，网页用 xterm.js 显示，用户能看、能直接打字接管。
+
+它是高级功能，标着 Beta（`terminal-dialog.tsx` 的 `BetaTag`）：席位菜单里放在最下面单独的「高级」一组，席位下的「终端开着」和弹窗标题旁也带这个标。用户还没亲手验证过，正式验收之前别去掉这个标，也别把入口挪回常用项里。
+
+- 文件：`lib/terminal.ts`（开关、输出缓存、打字）、`lib/terminal-state.ts`（谁开着，无依赖，给 store 和唤起队列查）、`scripts/terminal.sh`（按种类进会话目录，`claude --resume` / `codex resume`；带 `BENCH_MODEL`、`BENCH_EFFORT`）、`app/api/v1/terminal/[id]/route.ts`、`components/room/terminal-dialog.tsx`。席位菜单「在终端里打开… / 看终端」，开着时席位下面显示「终端开着」，席位快照里 `terminal: true`。
+- 只接了 Claude Code 和 Codex（`TERMINAL_KINDS`）。**Codex 只写了脚本，没实测过**；Claude 2026-11-09 在测试副本里实测。
+- 权限：开、打字、看画面都要用户口令。看画面是 `GET` 的 SSE，EventSource 带不了请求头，页面用 fetch 读流。画面先补发最近 256 KB，再推新输出。
+- 关掉弹窗终端照样开着；「关掉终端」发 SIGHUP（客户端会存好会话），5 秒没退就 SIGKILL。正在关的这几秒里不让重开，也不往里打字。客户端自己退出（`/exit`）也算关。房间服务重启，终端跟着没了。
+- 和唤起共存：同一会话两个进程会互相踩，所以终端开着时 `run()` 不再起无界面进程，点名的话（`introduce` + `envelope`，按「用 bench_say 回」的说法）用 bracketed paste 打进去，300ms 后补回车；它用 MCP 的 bench_say 回群。写摘要、压缩、单独说先排着，终端关了再按平常方式跑（`onTerminalClosed` 触发 `run`）。正在跑一轮时不让开终端（409）。终端里客户端自己的权限确认就在终端里点，不弹到网页。
+- 回群靠 MCP 认席位：`bench-mcp.mjs` 按 `<种类>-<会话 id>` 找本机凭据。会话自己 bench_join 入座过的有凭据；只用接口建的席位没有，它会重新入座成新名字（测试时踩过）。
+- 环境：房间如果是从某个 Claude Code 会话里启动的，会继承 `CLAUDE_CODE_CHILD_SESSION` 等标记，终端里的 Claude 会以为自己是子会话、不存记录（底部提示「Transcript saving is off」）。`lib/terminal.ts` 开终端前把这些标记删掉。
+- 依赖：`node-pty` 在 Next 默认的服务端外部包名单里，`next.config` 不用改；Linux x64 用它自带的预编译文件，npm 的安装脚本没跑也能用（npm 会提示 install-scripts 未放行）。macOS 上它的 `spawn-helper` 要有执行权限，那是它安装脚本做的事，没在 macOS 上试过。Windows 走 Git Bash 跑脚本，也没试过。
+- 字体：终端字体列表里带了思源等宽 / Noto Sans Mono CJK，否则中文字距会散开。
 
 ## 安全
 

@@ -1,11 +1,13 @@
 import { useState, ViewTransition } from "react"
-import { AtSign, Cpu, Ellipsis, Loader2, MessageCircle, PencilLine, Plus, Shrink, Square } from "lucide-react"
+import { AtSign, Cpu, Ellipsis, Loader2, MessageCircle, PencilLine, Plus, Shrink, Square, SquareTerminal } from "lucide-react"
 
 import { Button } from "@/components/ui/button"
 import {
   DropdownMenu,
   DropdownMenuContent,
+  DropdownMenuGroup,
   DropdownMenuItem,
+  DropdownMenuLabel,
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu"
@@ -13,6 +15,7 @@ import { Avatar, Lamp } from "@/components/room/bits"
 import { seatFlight } from "@/components/room/project-rail"
 import { ContextLine, useContexts } from "@/components/room/context"
 import { QuotaLines, useQuotas } from "@/components/room/quota"
+import { BetaTag, openTerminalFor } from "@/components/room/terminal-dialog"
 import { SpeedLine, useSpeeds } from "@/components/room/speed-line"
 import type { AdapterInfo } from "@/components/room/api"
 import { KINDS, kindOf, type Kind } from "@/lib/kinds"
@@ -227,6 +230,18 @@ function SeatRow({ agent, ...props }: Props & { agent: PublicAgent }) {
         )}
       </button>
       <ContextLine context={context} now={props.now} />
+      {agent.terminal ? (
+        <button
+          type="button"
+          className="mt-0.5 flex items-center gap-1 text-left text-xs text-emerald-700 hover:underline dark:text-emerald-300"
+          title="它的会话开在房间的终端里，点名会打进那里。点开看"
+          onClick={() => openTerminalFor(agent.id, agent.name)}
+        >
+          <SquareTerminal className="size-3 shrink-0" />
+          终端开着
+          <BetaTag />
+        </button>
+      ) : null}
       {agent.runId ? (
         <>
           {/* Woken right now: the line follows its current step; click to watch. */}
@@ -269,7 +284,7 @@ function SeatRow({ agent, ...props }: Props & { agent: PublicAgent }) {
         >
           <Ellipsis className="size-4" />
         </DropdownMenuTrigger>
-        <DropdownMenuContent align="end" className="min-w-44">
+        <DropdownMenuContent align="end" className="w-auto min-w-44">
           <DropdownMenuItem onClick={() => props.onMention(agent.name)}>
             <AtSign />
             点名 {agent.name}
@@ -313,6 +328,22 @@ function SeatRow({ agent, ...props }: Props & { agent: PublicAgent }) {
           <DropdownMenuItem onClick={() => props.onFocus(focused ? null : agent.id)}>
             {focused ? "看全部对话" : "只看和他有关的"}
           </DropdownMenuItem>
+          {agent.hasSession && !agent.demo && (agent.agentName === "claude" || agent.agentName === "codex") ? (
+            <>
+              <DropdownMenuSeparator />
+              <DropdownMenuGroup>
+                <DropdownMenuLabel>高级</DropdownMenuLabel>
+                <DropdownMenuItem
+                  title="把它自己的界面开在网页里，你能看着它做、直接打字接管"
+                  onClick={() => openTerminalFor(agent.id, agent.name)}
+                >
+                  <SquareTerminal />
+                  <span className="whitespace-nowrap">{agent.terminal ? "看终端" : "在终端里打开…"}</span>
+                  <BetaTag />
+                </DropdownMenuItem>
+              </DropdownMenuGroup>
+            </>
+          ) : null}
           <DropdownMenuSeparator />
           <DropdownMenuItem variant="destructive" onClick={() => props.onLeave(agent)}>
             请离席

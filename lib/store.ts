@@ -11,6 +11,7 @@ import { ApiError, asRecord, asString } from "@/lib/http"
 import { hasFull, permitsFor } from "@/lib/permits"
 import { activeRun } from "@/lib/runs"
 import { liveStatus } from "@/lib/status"
+import { terminalOpen } from "@/lib/terminal-state"
 import { awaitingReview, isReviewStep } from "@/lib/review"
 import { mentionedAgentIds, mentionPattern, namedAgentIds, withAttachments } from "@/lib/text"
 import type {
@@ -545,6 +546,7 @@ function present(agent: Agent, now = Date.now()): PublicAgent {
     runStartedAt: run?.startedAt,
     stepAt: run ? (run.steps.at(-1)?.at ?? run.startedAt) : undefined,
     fullAccess: hasFull(agent.id) || undefined,
+    terminal: terminalOpen(agent.id) || undefined,
     createdAt: agent.createdAt,
     lastSeenAt: agent.lastSeenAt,
   }

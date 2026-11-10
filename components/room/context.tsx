@@ -48,8 +48,9 @@ function tone(near: number) {
   return "bg-sky-500"
 }
 
-export function ContextLine({ context, now }: { context: SeatContext | undefined; now: number }) {
-  if (!context) return null
+// How close it is to compacting (0–100+), where its own compaction sits on the
+// bar, and the full story for a hover.
+export function contextFacts(context: SeatContext, now: number) {
   const { tokens, window, percent, compacted, compactAt } = context
   const mark = compactAt ? Math.min(100, Math.round((compactAt / window) * 100)) : null
   const near = tokens !== null && compactAt ? Math.round((tokens / compactAt) * 100) : (percent ?? 0)
@@ -67,28 +68,53 @@ export function ContextLine({ context, now }: { context: SeatContext | undefined
   ]
     .filter(Boolean)
     .join("\n")
+  const amount = tokens === null ? `刚压缩 / ${tokensShort(window)}` : `${tokensShort(tokens)} / ${tokensShort(window)}`
+  return { near, mark, title, amount }
+}
+
+// At this (percent of the way to compacting) the roster adds a line with the
+// numbers and a 「压缩」 next to the seat.
+export const CONTEXT_WARN = 70
+
+function Meter({ context, near, mark, className }: { context: SeatContext; near: number; mark: number | null; className: string }) {
+  const { percent } = context
+  return (
+    <span
+      className={`relative shrink-0 overflow-hidden rounded-full bg-muted ${className}`}
+      role="meter"
+      aria-label="上下文已用"
+      aria-valuenow={percent ?? 0}
+      aria-valuemin={0}
+      aria-valuemax={100}
+    >
+      {percent !== null ? (
+        <span className={`absolute inset-y-0 left-0 rounded-full ${tone(near)}`} style={{ width: `${Math.max(percent, 2)}%` }} />
+      ) : null}
+      {/* Where it compacts by itself. */}
+      {mark !== null && mark < 100 ? <span className="absolute inset-y-[-1px] w-px bg-foreground/60" style={{ left: `${mark}%` }} /> : null}
+    </span>
+  )
+}
+
+// The roster's seat row: just a hair of a bar, numbers on hover.
+export function ContextHair({ context, now }: { context: SeatContext | undefined; now: number }) {
+  if (!context) return null
+  const { near, mark, title } = contextFacts(context, now)
+  return (
+    <span className="flex h-4 shrink-0 items-center" title={title}>
+      <Meter context={context} near={near} mark={mark} className="h-[3px] w-7" />
+    </span>
+  )
+}
+
+export function ContextLine({ context, now }: { context: SeatContext | undefined; now: number }) {
+  if (!context) return null
+  const { near, mark, title, amount } = contextFacts(context, now)
   return (
     <span className="mt-0.5 flex items-center gap-1.5 text-[11px] leading-4 text-muted-foreground" title={title}>
       <span className="shrink-0">上下文</span>
-      <span
-        className="relative h-1.5 w-14 shrink-0 overflow-hidden rounded-full bg-muted"
-        role="meter"
-        aria-label="上下文已用"
-        aria-valuenow={percent ?? 0}
-        aria-valuemin={0}
-        aria-valuemax={100}
-      >
-        {percent !== null ? (
-          <span className={`absolute inset-y-0 left-0 rounded-full ${tone(near)}`} style={{ width: `${Math.max(percent, 2)}%` }} />
-        ) : null}
-        {/* Where it compacts by itself. */}
-        {mark !== null && mark < 100 ? (
-          <span className="absolute inset-y-[-1px] w-px bg-foreground/60" style={{ left: `${mark}%` }} />
-        ) : null}
-      </span>
-      <span className="min-w-0 truncate tabular-nums">
-        {tokens === null ? `刚压缩 / ${tokensShort(window)}` : `${tokensShort(tokens)} / ${tokensShort(window)}`}
-      </span>
+      <Meter context={context} near={near} mark={mark} className="h-1.5 w-14" />
+      <span className="min-w-0 truncate tabular-nums">{amount}</span>
     </span>
   )
 }

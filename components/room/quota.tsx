@@ -1,6 +1,7 @@
 "use client"
 
-import { useEffect, useState } from "react"
+import { useEffect, useState, type ReactNode } from "react"
+import { Tooltip as TooltipPrimitive } from "@base-ui/react/tooltip"
 
 import { api } from "@/components/room/api"
 import { ago } from "@/lib/status"
@@ -117,5 +118,98 @@ function Line({ window, now }: { window: QuotaWindow; now: number }) {
       </span>
       <span className="min-w-0 truncate">{reset.short}</span>
     </span>
+  )
+}
+
+// The allowance that is closest to running out; it stands for the whole client.
+export function topWindow(quota: Quota | undefined) {
+  if (!quota?.account) return null
+  return quota.windows.reduce<QuotaWindow | null>((top, window) => (!top || window.percent > top.percent ? window : top), null)
+}
+
+const RING = { ok: "text-emerald-500", warn: "text-amber-500", full: "text-red-500" }
+
+// A client's entry in the roster, folded: one ring for the most-used
+// allowance, green until 80%, then amber with its name and number, red once
+// used up. A short amber word when the allowance can't be read. Hover floats
+// every allowance out (`card` adds whatever else belongs there) without
+// moving anything; a click is the caller's, usually unfolding the entry.
+export function QuotaRing({
+  quota,
+  now,
+  heading,
+  card,
+  expanded,
+  onClick,
+}: {
+  quota: Quota | undefined
+  now: number
+  heading: string
+  card?: ReactNode
+  expanded: boolean
+  onClick: () => void
+}) {
+  if (!quota?.account) return null
+  const top = topWindow(quota)
+  if (!top && !quota.error) return null
+  const full = Boolean(top && (top.percent >= 100 || quota.blocked))
+  const state = !top ? "warn" : full ? "full" : top.percent >= 80 ? "warn" : "ok"
+  const label = !top ? "读不到额度" : full ? "用完" : top.percent >= 80 ? `${top.label} ${top.percent}%` : ""
+  return (
+    <TooltipPrimitive.Root>
+      <TooltipPrimitive.Trigger
+        className="flex h-7 min-w-0 shrink items-center gap-1 rounded-lg px-1 text-[11px] transition-colors hover:bg-sidebar-accent"
+        aria-expanded={expanded}
+        aria-label={`${heading} 的额度${label ? `：${label}` : ""}，点开看详情`}
+        onClick={onClick}
+      >
+        {label ? (
+          <span
+            className={`min-w-0 truncate tabular-nums ${
+              state === "full" ? "text-red-600 dark:text-red-400" : "text-amber-700 dark:text-amber-400"
+            }`}
+          >
+            {label}
+          </span>
+        ) : null}
+        {top ? (
+          <svg viewBox="0 0 16 16" className={`size-4 shrink-0 -rotate-90 ${RING[state]}`} aria-hidden="true">
+            <circle cx="8" cy="8" r="6" fill="none" stroke="currentColor" strokeOpacity={0.14} strokeWidth={2.6} />
+            <circle
+              cx="8"
+              cy="8"
+              r="6"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth={2.6}
+              strokeLinecap="round"
+              pathLength={100}
+              strokeDasharray={`${Math.max(2, Math.min(100, top.percent))} 100`}
+            />
+          </svg>
+        ) : null}
+      </TooltipPrimitive.Trigger>
+      <TooltipPrimitive.Portal>
+        <TooltipPrimitive.Positioner side="right" align="start" sideOffset={10} className="isolate z-50">
+          <TooltipPrimitive.Popup className="w-60 origin-(--transform-origin) rounded-xl border bg-popover/95 px-3 py-2 text-popover-foreground shadow-lg backdrop-blur-xl transition-[opacity,scale] data-ending-style:scale-95 data-ending-style:opacity-0 data-starting-style:scale-95 data-starting-style:opacity-0">
+            <span className="block text-xs font-semibold">{heading}</span>
+            {top ? (
+              <>
+                <QuotaLines quota={quota} now={now} />
+                {top.resetsAt ? (
+                  <span className="mt-1 block text-[11px] leading-4 text-muted-foreground">
+                    {top.group ? `${top.group} ` : ""}
+                    {top.label}：{resetText(top.resetsAt, now).full}
+                  </span>
+                ) : null}
+              </>
+            ) : (
+              <span className="mt-1 block text-[11px] text-muted-foreground">额度读不到：{quota.error}</span>
+            )}
+            {card}
+          </TooltipPrimitive.Popup>
+        </TooltipPrimitive.Positioner>
+      </TooltipPrimitive.Portal>
+    </TooltipPrimitive.Root>
   )
 }

@@ -1,5 +1,19 @@
 import { useState, ViewTransition } from "react"
-import { AtSign, Cpu, Ellipsis, Loader2, MessageCircle, PencilLine, Plus, Shrink, Square, SquareTerminal } from "lucide-react"
+import {
+  AtSign,
+  ChevronRight,
+  ChevronsDownUp,
+  ChevronsUpDown,
+  Cpu,
+  Ellipsis,
+  Loader2,
+  MessageCircle,
+  PencilLine,
+  Plus,
+  Shrink,
+  Square,
+  SquareTerminal,
+} from "lucide-react"
 
 import { Button } from "@/components/ui/button"
 import {
@@ -13,8 +27,9 @@ import {
 } from "@/components/ui/dropdown-menu"
 import { Avatar, Lamp } from "@/components/room/bits"
 import { seatFlight } from "@/components/room/project-rail"
-import { ContextLine, useContexts } from "@/components/room/context"
-import { QuotaLines, useQuotas } from "@/components/room/quota"
+import { CONTEXT_WARN, ContextHair, contextFacts, useContexts } from "@/components/room/context"
+import { QuotaLines, QuotaRing, useQuotas } from "@/components/room/quota"
+import { Reveal } from "@/components/room/reveal"
 import { BetaTag, openTerminalFor } from "@/components/room/terminal-dialog"
 import { SpeedLine, useSpeeds } from "@/components/room/speed-line"
 import type { AdapterInfo } from "@/components/room/api"
@@ -24,6 +39,12 @@ import type { SeatContext } from "@/lib/context"
 import type { Quota } from "@/lib/quota"
 import type { Speed } from "@/lib/speed"
 import type { PublicAgent } from "@/lib/types"
+
+// The left column keeps to one line per client and one per seat. Whatever
+// else there is sits in three tiers (MAINTENANCE.md): always there (name,
+// lamp, allowance ring, context hair), there only when something is up (an
+// allowance at 80%, a context near compacting, a seat at work, an open
+// terminal), and there only when asked for (a client unfolded, a hover card).
 
 type Props = {
   agents: PublicAgent[]
@@ -63,10 +84,18 @@ function reach(kind: Kind, seats: PublicAgent[], adapters: AdapterInfo[] | null)
   return { text: "离线 · 没报会话", tone: "warn" as const }
 }
 
-const TONE = {
-  ok: "text-emerald-700 dark:text-emerald-400",
-  warn: "text-amber-700 dark:text-amber-400",
-  muted: "text-muted-foreground",
+const WARN = "text-amber-700 dark:text-amber-400"
+
+// Which clients are unfolded, kept per browser.
+const OPEN_KEY = "bench-roster-open"
+
+function readOpen(): string[] {
+  try {
+    const value = typeof window === "undefined" ? null : JSON.parse(localStorage.getItem(OPEN_KEY) ?? "[]")
+    return Array.isArray(value) ? value.filter((item) => typeof item === "string") : []
+  } catch {
+    return []
+  }
 }
 
 export function Roster(props: Props) {
@@ -79,32 +108,79 @@ export function Roster(props: Props) {
   const speeds = useSpeeds()
   // Read again whenever a seat starts or ends a wake.
   const contexts = useContexts(agents.map((agent) => agent.runId ?? "").join(","))
+  const [open, setOpen] = useState<string[]>(readOpen)
+  const save = (next: string[]) => {
+    setOpen(next)
+    try {
+      localStorage.setItem(OPEN_KEY, JSON.stringify(next))
+    } catch {}
+  }
+  const toggle = (id: string) => save(open.includes(id) ? open.filter((item) => item !== id) : [...open, id])
+
+  const seatsOf = (kind: Kind) => agents.filter((agent) => kindOf(agent)?.id === kind.id)
+  // An empty room lists every client in full, as the way in; otherwise the
+  // ones without a seat fold into a small line each, after the others.
+  const empty = agents.length === 0
+  const withSeats = shown.filter((kind) => seatsOf(kind).length > 0)
+  const without = shown.filter((kind) => seatsOf(kind).length === 0)
+  const allOpen = withSeats.length > 0 && withSeats.every((kind) => open.includes(kind.id))
+
+  const group = (kind: Kind, folding: boolean) => {
+    const seats = seatsOf(kind)
+    return (
+      <KindGroup
+        key={kind.id}
+        kind={kind}
+        seats={seats}
+        state={reach(kind, seats, adapters)}
+        quota={quotas.find((item) => item.kind === kind.id)}
+        speed={speeds.find((item) => item.kind === kind.id)}
+        open={folding ? open.includes(kind.id) : true}
+        onToggle={folding ? () => toggle(kind.id) : null}
+        {...props}
+        contexts={contexts}
+      />
+    )
+  }
 
   return (
     <div className="flex h-full min-h-0 flex-col">
-      <div className="flex items-center justify-between px-4 pt-4 pb-2">
-        <h2 className="text-xs font-semibold tracking-wider text-muted-foreground uppercase">入口</h2>
+      <div className="flex items-center justify-between gap-1 px-4 pt-4 pb-2">
+        <h2 className="flex-1 text-xs font-semibold tracking-wider text-muted-foreground uppercase">入口</h2>
+        {withSeats.length > 0 ? (
+          <Button
+            type="button"
+            variant="ghost"
+            size="icon-xs"
+            title={allOpen ? "全部收起" : "全部展开"}
+            aria-label={allOpen ? "全部收起" : "全部展开"}
+            onClick={() =>
+              save(allOpen ? open.filter((id) => !withSeats.some((kind) => kind.id === id)) : [...new Set([...open, ...withSeats.map((kind) => kind.id)])])
+            }
+          >
+            {allOpen ? <ChevronsDownUp /> : <ChevronsUpDown />}
+          </Button>
+        ) : null}
         <Button type="button" variant="ghost" size="xs" onClick={() => props.onJoin()}>
           <Plus />
           接入
         </Button>
       </div>
       <div className="min-h-0 flex-1 space-y-1 overflow-y-auto px-2 pb-3">
-        {shown.map((kind) => {
-          const seats = agents.filter((agent) => kindOf(agent)?.id === kind.id)
-          return (
-            <KindGroup
-              key={kind.id}
-              kind={kind}
-              seats={seats}
-              state={reach(kind, seats, adapters)}
-              quota={quotas.find((item) => item.kind === kind.id)}
-              speed={speeds.find((item) => item.kind === kind.id)}
-              {...props}
-              contexts={contexts}
-            />
-          )
-        })}
+        {empty ? (
+          shown.map((kind) => group(kind, false))
+        ) : (
+          <>
+            {withSeats.map((kind) => group(kind, true))}
+            {without.length > 0 ? (
+              <div className="pt-1">
+                {without.map((kind) => (
+                  <KindStub key={kind.id} kind={kind} state={reach(kind, [], adapters)} onJoin={props.onJoin} />
+                ))}
+              </div>
+            ) : null}
+          </>
+        )}
 
         {others.length > 0 ? (
           <section className="pt-3">
@@ -119,12 +195,33 @@ export function Roster(props: Props) {
   )
 }
 
+// A client nobody here uses yet: one small line, a click brings it in.
+function KindStub({ kind, state, onJoin }: { kind: Kind; state: ReturnType<typeof reach>; onJoin: (kind?: string) => void }) {
+  return (
+    <button
+      type="button"
+      className="group/stub flex w-full items-center gap-3 rounded-xl px-3 py-1 text-left transition-colors hover:bg-sidebar-accent/70"
+      title={`把 ${kind.label} 接进来`}
+      onClick={() => onJoin(kind.id)}
+    >
+      <span className="grid w-9 shrink-0 place-items-center opacity-60 grayscale-[.4] group-hover/stub:opacity-100 group-hover/stub:grayscale-0">
+        <Avatar name={kind.label} color={kind.color} kind={kind} size="sm" />
+      </span>
+      <span className="truncate text-[13px] text-muted-foreground group-hover/stub:text-foreground">{kind.label}</span>
+      <span className={`shrink-0 text-[11px] ${state.tone === "warn" ? WARN : "text-muted-foreground/70"}`}>{state.text}</span>
+      <Plus className="ml-auto size-3.5 shrink-0 text-muted-foreground" />
+    </button>
+  )
+}
+
 function KindGroup({
   kind,
   seats,
   state,
   quota,
   speed,
+  open,
+  onToggle,
   ...props
 }: Props & {
   kind: Kind
@@ -132,6 +229,9 @@ function KindGroup({
   state: ReturnType<typeof reach>
   quota: Quota | undefined
   speed: Speed | undefined
+  open: boolean
+  // null: always unfolded (the empty room), no arrow.
+  onToggle: (() => void) | null
 }) {
   const [hover, setHover] = useState(false)
   const primary = seats.find((agent) => agent.status !== "offline") ?? seats.find((agent) => agent.callable) ?? seats[0]
@@ -140,42 +240,64 @@ function KindGroup({
   const best =
     seats.find((agent) => agent.status === "working")?.status ??
     (primary?.status === "offline" && primary.callable ? "idle" : primary?.status)
+  const toggle = onToggle ?? (() => {})
 
   return (
-    <section className="p-1">
-      <button
-        type="button"
-        className="flex w-full items-center gap-3 rounded-xl px-2 py-2 text-left transition-colors hover:bg-sidebar-accent/70"
-        onPointerEnter={() => setHover(true)}
-        onPointerLeave={() => setHover(false)}
-        onClick={() => (primary ? props.onMention(primary.name) : props.onJoin(kind.id))}
-        title={primary ? `@${primary.name}` : `把 ${kind.label} 接进来`}
-      >
-        <Avatar name={kind.label} color={kind.color} kind={kind} size="lg" status={best} hover={hover} />
-        <span className="min-w-0 flex-1">
-          <span className="flex items-baseline justify-between gap-2">
-            <span className="truncate text-sm font-semibold">{kind.label}</span>
-            <span className={`shrink-0 text-[11px] ${TONE[state.tone]}`}>{state.text}</span>
-          </span>
+    <section className="p-1" onPointerEnter={() => setHover(true)} onPointerLeave={() => setHover(false)}>
+      <div className="flex items-center gap-1 rounded-xl px-2 py-1.5">
+        {/* Avatar and name: @ this client's seat, as before. */}
+        <button
+          type="button"
+          className="flex min-w-0 flex-1 items-center gap-3 rounded-lg text-left"
+          onClick={() => (primary ? props.onMention(primary.name) : props.onJoin(kind.id))}
+          title={primary ? `@${primary.name}` : `把 ${kind.label} 接进来`}
+        >
+          <Avatar name={kind.label} color={kind.color} kind={kind} size="lg" status={best} hover={hover} />
+          <span className="truncate text-sm font-semibold hover:underline">{kind.label}</span>
+          {/* Only when something is wrong (or, in an empty room, that it isn't here yet). */}
+          {state.tone !== "ok" ? (
+            <span className={`min-w-0 shrink truncate text-[11px] ${state.tone === "warn" ? WARN : "text-muted-foreground"}`}>
+              {state.text}
+            </span>
+          ) : null}
+        </button>
+        {onToggle ? (
+          <>
+            <QuotaRing
+              quota={quota}
+              now={props.now}
+              heading={`${kind.label} · ${kind.harness}`}
+              card={<SpeedLine speed={speed} color={kind.color} now={props.now} />}
+              expanded={open}
+              onClick={toggle}
+            />
+            <button
+              type="button"
+              className="grid size-6 shrink-0 place-items-center rounded-lg text-muted-foreground transition-colors hover:bg-sidebar-accent hover:text-foreground"
+              aria-expanded={open}
+              aria-label={open ? `收起 ${kind.label}` : `展开 ${kind.label}`}
+              title={open ? "收起" : "展开：客户端、额度、速度、开新会话"}
+              onClick={toggle}
+            >
+              <ChevronRight className={`size-4 transition-transform duration-200 ${open ? "rotate-90" : ""}`} />
+            </button>
+          </>
+        ) : null}
+      </div>
+      <Reveal open={open}>
+        <div className="pr-2 pb-1 pl-14">
           {/* Each session picks its own model, so the entry names only the client;
               the seats below say which model each one runs. */}
           <span className="block truncate text-xs text-muted-foreground">
             {kind.harness}
-            {seats.length > 1 ? ` · ${seats.length} 个会话` : ""}
+            {seats.length > 0 ? ` · ${seats.length} 个会话` : ""}
           </span>
           <QuotaLines quota={quota} now={props.now} />
           <SpeedLine speed={speed} color={kind.color} now={props.now} />
-        </span>
-      </button>
-      {seats.length > 0 || kind.spawn ? (
-        <div className="mt-0.5 ml-[1.35rem] border-l pl-2">
-          {seats.map((agent) => (
-            <SeatRow key={agent.id} agent={agent} {...props} />
-          ))}
           {kind.spawn ? (
             <button
               type="button"
-              className="flex w-full items-center gap-1.5 rounded-xl px-2 py-1 text-left text-xs text-muted-foreground transition-colors hover:bg-sidebar-accent/70 hover:text-foreground"
+              className="-ml-1.5 mt-1 flex items-center gap-1.5 rounded-lg px-1.5 py-0.5 text-left text-xs text-muted-foreground transition-colors hover:bg-sidebar-accent/70 hover:text-foreground"
               title={`让房间在后台开一个新的 ${kind.label} 会话并入座`}
               onClick={() => props.onSpawn(kind.id, null)}
             >
@@ -183,6 +305,13 @@ function KindGroup({
               开新会话
             </button>
           ) : null}
+        </div>
+      </Reveal>
+      {seats.length > 0 ? (
+        <div className="mt-0.5 ml-[1.35rem] border-l pl-2">
+          {seats.map((agent) => (
+            <SeatRow key={agent.id} agent={agent} {...props} />
+          ))}
         </div>
       ) : null}
     </section>
@@ -192,48 +321,145 @@ function KindGroup({
 function SeatRow({ agent, ...props }: Props & { agent: PublicAgent }) {
   const focused = props.focusId === agent.id
   const context = props.contexts?.[agent.id]
+  const facts = context ? contextFacts(context, props.now) : null
+  // Same rule as the menu's 「压缩上下文」.
+  const compactable = Boolean(context && agent.callable && !agent.demo && !agent.runId && !agent.standby)
+  const busy = Boolean(agent.runId) || agent.status === "working" || agent.status === "blocked"
+  // What used to be lines under the name, now on hover.
+  const tip = [
+    `@${agent.name}`,
+    `${agent.model} · ${agent.role}`,
+    agent.status === "offline" ? `最后在线 ${ago(agent.lastSeenAt, props.now)}` : STATUS_LABEL[agent.status],
+    busy ? "" : agent.doing,
+  ]
+    .filter(Boolean)
+    .join("\n")
   return (
-    <div
-      className={`group flex items-start gap-2 rounded-xl px-2 py-1.5 transition-colors ${focused ? "bg-sidebar-accent" : "hover:bg-sidebar-accent/70"}`}
-    >
-      {/* Shares its name with this seat on the project rail's bench: switching
-          projects flies the seat between the two (components/room/project-rail.tsx). */}
-      <span className="pt-1.5">
+    <div className={`group rounded-xl px-2 py-1 transition-colors ${focused ? "bg-sidebar-accent" : "hover:bg-sidebar-accent/70"}`}>
+      <div className="flex items-center gap-2">
+        {/* Shares its name with this seat on the project rail's bench: switching
+            projects flies the seat between the two (components/room/project-rail.tsx). */}
         <ViewTransition name={seatFlight(agent.id)} share="bench-out" default="none">
           <span className="block">
             <Lamp status={agent.status} />
           </span>
         </ViewTransition>
-      </span>
-      <div className="min-w-0 flex-1">
-      <button type="button" className="block w-full text-left" onClick={() => props.onMention(agent.name)}>
-        <span className="flex items-baseline gap-1.5">
+        <button
+          type="button"
+          className="flex min-w-0 flex-1 items-baseline gap-1.5 text-left"
+          title={tip}
+          onClick={() => props.onMention(agent.name)}
+        >
           <span className="truncate text-[13px] font-medium">{agent.name}</span>
           {agent.demo ? <span className="shrink-0 text-[10px] text-muted-foreground">演示</span> : null}
           {agent.standby && agent.status !== "offline" ? (
             <span
-              className="ml-auto shrink-0 rounded-full bg-emerald-500/12 px-1.5 text-[10px] font-medium text-emerald-700 dark:text-emerald-300"
+              className="shrink-0 rounded-full bg-emerald-500/12 px-1.5 text-[10px] font-medium text-emerald-700 dark:text-emerald-300"
               title="正挂在 bench_wait 里，点它会立刻收到"
             >
               待命
             </span>
-          ) : (
-            <span className="ml-auto shrink-0 text-[10px] text-muted-foreground">
-              {agent.status === "offline" ? ago(agent.lastSeenAt, props.now) : STATUS_LABEL[agent.status]}
-            </span>
-          )}
-        </span>
-        {agent.runId ? null : (
-          <span className="block truncate text-xs text-muted-foreground">
-            {agent.doing || `${agent.model} · ${agent.role}`}
+          ) : null}
+        </button>
+        <ContextHair context={context} now={props.now} />
+        <DropdownMenu>
+          <DropdownMenuTrigger
+            className="shrink-0 rounded-md p-0.5 text-muted-foreground opacity-0 group-focus-within:opacity-100 group-hover:opacity-100 hover:bg-muted focus-visible:opacity-100 aria-expanded:opacity-100 [@media(hover:none)]:opacity-60"
+            aria-label={`${agent.name} 的席位菜单`}
+          >
+            <Ellipsis className="size-4" />
+          </DropdownMenuTrigger>
+          <DropdownMenuContent align="end" className="w-auto min-w-44">
+            <DropdownMenuItem onClick={() => props.onMention(agent.name)}>
+              <AtSign />
+              点名 {agent.name}
+            </DropdownMenuItem>
+            {agent.callable && !agent.demo ? (
+              <DropdownMenuItem onClick={() => props.onWhisper(agent)}>
+                <MessageCircle />
+                单独说…
+              </DropdownMenuItem>
+            ) : null}
+            {kindOf(agent)?.spawn && !agent.demo ? (
+              <DropdownMenuItem onClick={() => props.onSpawn(kindOf(agent)!.id, agent)}>
+                <Plus />
+                在同目录开新会话…
+              </DropdownMenuItem>
+            ) : null}
+            {agent.runId ? (
+              <DropdownMenuItem onClick={() => props.onStop(agent)}>
+                <Square />
+                停下这次唤起
+              </DropdownMenuItem>
+            ) : null}
+            {compactable ? (
+              <DropdownMenuItem onClick={() => props.onCompact(agent)}>
+                <Shrink />
+                压缩上下文
+              </DropdownMenuItem>
+            ) : null}
+            {agent.demo ? null : (
+              <DropdownMenuItem onClick={() => props.onRename(agent)}>
+                <PencilLine />
+                改名…
+              </DropdownMenuItem>
+            )}
+            {agent.callable && !agent.demo ? (
+              <DropdownMenuItem onClick={() => props.onModel(agent)}>
+                <Cpu />
+                换模型…
+              </DropdownMenuItem>
+            ) : null}
+            <DropdownMenuItem onClick={() => props.onFocus(focused ? null : agent.id)}>
+              {focused ? "看全部对话" : "只看和他有关的"}
+            </DropdownMenuItem>
+            {agent.hasSession && !agent.demo && (agent.agentName === "claude" || agent.agentName === "codex") ? (
+              <>
+                <DropdownMenuSeparator />
+                <DropdownMenuGroup>
+                  <DropdownMenuLabel>高级</DropdownMenuLabel>
+                  <DropdownMenuItem
+                    title="把它自己的界面开在网页里，你能看着它做、直接打字接管"
+                    onClick={() => openTerminalFor(agent.id, agent.name)}
+                  >
+                    <SquareTerminal />
+                    <span className="whitespace-nowrap">{agent.terminal ? "看终端" : "在终端里打开…"}</span>
+                    <BetaTag />
+                  </DropdownMenuItem>
+                </DropdownMenuGroup>
+              </>
+            ) : null}
+            <DropdownMenuSeparator />
+            <DropdownMenuItem variant="destructive" onClick={() => props.onLeave(agent)}>
+              请离席
+            </DropdownMenuItem>
+          </DropdownMenuContent>
+        </DropdownMenu>
+      </div>
+
+      {/* Near compacting: the numbers, and 「压缩」 when it can be done now. */}
+      {facts && facts.near >= CONTEXT_WARN ? (
+        <div className={`flex items-center gap-2 pl-4 text-[11px] leading-5 ${WARN}`}>
+          <span className="min-w-0 truncate tabular-nums" title={facts.title}>
+            上下文 {facts.amount}
           </span>
-        )}
-      </button>
-      <ContextLine context={context} now={props.now} />
+          {compactable ? (
+            <button
+              type="button"
+              className="ml-auto shrink-0 rounded-full bg-amber-500/15 px-1.5 text-[10px] font-medium leading-4 hover:bg-amber-500/25"
+              title="让它压缩自己的上下文"
+              onClick={() => props.onCompact(agent)}
+            >
+              压缩
+            </button>
+          ) : null}
+        </div>
+      ) : null}
+
       {agent.terminal ? (
         <button
           type="button"
-          className="mt-0.5 flex items-center gap-1 text-left text-xs text-emerald-700 hover:underline dark:text-emerald-300"
+          className="flex items-center gap-1 pl-4 text-left text-xs leading-5 text-emerald-700 hover:underline dark:text-emerald-300"
           title="它的会话开在房间的终端里，点名会打进那里。点开看"
           onClick={() => openTerminalFor(agent.id, agent.name)}
         >
@@ -242,114 +468,52 @@ function SeatRow({ agent, ...props }: Props & { agent: PublicAgent }) {
           <BetaTag />
         </button>
       ) : null}
-      {agent.runId ? (
-        <>
-          {/* Woken right now: the line follows its current step; click to watch. */}
-          <button
-            type="button"
-            className="flex w-full items-center gap-1 text-left text-xs text-sky-700 hover:underline dark:text-sky-300"
-            title="看它这次在做什么"
-            onClick={() => agent.runId && props.onOpenRun(agent.runId)}
-          >
-            <Loader2 className="size-3 shrink-0 animate-spin" />
-            <span className="truncate">{agent.doing || "正在回复"}</span>
-          </button>
-          <span className="mt-1 flex gap-1">
-            <button
-              type="button"
-              className="pill chip flex items-center gap-1 rounded-full px-2 py-0.5 text-[11px]"
-              title="单独对它说一句：先停下手上的事回你，回完接着做"
-              onClick={() => props.onWhisper(agent)}
-            >
-              <MessageCircle className="size-3" />
-              插话
-            </button>
-            <button
-              type="button"
-              className="pill chip flex items-center gap-1 rounded-full px-2 py-0.5 text-[11px] text-muted-foreground hover:text-foreground"
-              title="停掉这次唤起，排在后面的也一起取消"
-              onClick={() => props.onStop(agent)}
-            >
-              <Square className="size-2.5 fill-current" />
-              停止
-            </button>
-          </span>
-        </>
-      ) : null}
-      </div>
-      <DropdownMenu>
-        <DropdownMenuTrigger
-          className="mt-0.5 rounded-md p-0.5 text-muted-foreground opacity-60 group-hover:opacity-100 hover:bg-muted aria-expanded:opacity-100"
-          aria-label={`${agent.name} 的席位菜单`}
-        >
-          <Ellipsis className="size-4" />
-        </DropdownMenuTrigger>
-        <DropdownMenuContent align="end" className="w-auto min-w-44">
-          <DropdownMenuItem onClick={() => props.onMention(agent.name)}>
-            <AtSign />
-            点名 {agent.name}
-          </DropdownMenuItem>
-          {agent.callable && !agent.demo ? (
-            <DropdownMenuItem onClick={() => props.onWhisper(agent)}>
-              <MessageCircle />
-              单独说…
-            </DropdownMenuItem>
-          ) : null}
-          {kindOf(agent)?.spawn && !agent.demo ? (
-            <DropdownMenuItem onClick={() => props.onSpawn(kindOf(agent)!.id, agent)}>
-              <Plus />
-              在同目录开新会话…
-            </DropdownMenuItem>
-          ) : null}
+
+      {/* At work or stuck: what it is doing; while woken, click to watch. */}
+      {busy ? (
+        <div className="flex items-center gap-1 pl-3">
           {agent.runId ? (
-            <DropdownMenuItem onClick={() => props.onStop(agent)}>
-              <Square />
-              停下这次唤起
-            </DropdownMenuItem>
-          ) : null}
-          {context && agent.callable && !agent.demo && !agent.runId && !agent.standby ? (
-            <DropdownMenuItem onClick={() => props.onCompact(agent)}>
-              <Shrink />
-              压缩上下文
-            </DropdownMenuItem>
-          ) : null}
-          {agent.demo ? null : (
-            <DropdownMenuItem onClick={() => props.onRename(agent)}>
-              <PencilLine />
-              改名…
-            </DropdownMenuItem>
+            <button
+              type="button"
+              className="flex min-w-0 flex-1 items-center gap-1 text-left text-xs leading-5 text-sky-700 hover:underline dark:text-sky-300"
+              title="看它这次在做什么"
+              onClick={() => agent.runId && props.onOpenRun(agent.runId)}
+            >
+              <Loader2 className="size-3 shrink-0 animate-spin" />
+              <span className="truncate">{agent.doing || "正在回复"}</span>
+            </button>
+          ) : (
+            <span
+              className={`min-w-0 flex-1 truncate pl-1 text-xs leading-5 ${agent.status === "blocked" ? WARN : "text-sky-700 dark:text-sky-300"}`}
+              title={agent.doing || STATUS_LABEL[agent.status]}
+            >
+              {agent.doing || STATUS_LABEL[agent.status]}
+            </span>
           )}
-          {agent.callable && !agent.demo ? (
-            <DropdownMenuItem onClick={() => props.onModel(agent)}>
-              <Cpu />
-              换模型…
-            </DropdownMenuItem>
-          ) : null}
-          <DropdownMenuItem onClick={() => props.onFocus(focused ? null : agent.id)}>
-            {focused ? "看全部对话" : "只看和他有关的"}
-          </DropdownMenuItem>
-          {agent.hasSession && !agent.demo && (agent.agentName === "claude" || agent.agentName === "codex") ? (
+          {agent.runId ? (
             <>
-              <DropdownMenuSeparator />
-              <DropdownMenuGroup>
-                <DropdownMenuLabel>高级</DropdownMenuLabel>
-                <DropdownMenuItem
-                  title="把它自己的界面开在网页里，你能看着它做、直接打字接管"
-                  onClick={() => openTerminalFor(agent.id, agent.name)}
-                >
-                  <SquareTerminal />
-                  <span className="whitespace-nowrap">{agent.terminal ? "看终端" : "在终端里打开…"}</span>
-                  <BetaTag />
-                </DropdownMenuItem>
-              </DropdownMenuGroup>
+              <button
+                type="button"
+                className="grid size-5 shrink-0 place-items-center rounded-full text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
+                title="插话：单独对它说一句，先停下手上的事回你，回完接着做"
+                aria-label={`和 ${agent.name} 插话`}
+                onClick={() => props.onWhisper(agent)}
+              >
+                <MessageCircle className="size-3" />
+              </button>
+              <button
+                type="button"
+                className="grid size-5 shrink-0 place-items-center rounded-full text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
+                title="停止：停掉这次唤起，排在后面的也一起取消"
+                aria-label={`停下 ${agent.name}`}
+                onClick={() => props.onStop(agent)}
+              >
+                <Square className="size-2.5 fill-current" />
+              </button>
             </>
           ) : null}
-          <DropdownMenuSeparator />
-          <DropdownMenuItem variant="destructive" onClick={() => props.onLeave(agent)}>
-            请离席
-          </DropdownMenuItem>
-        </DropdownMenuContent>
-      </DropdownMenu>
+        </div>
+      ) : null}
     </div>
   )
 }

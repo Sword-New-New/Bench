@@ -1,11 +1,49 @@
 "use client"
 
 import { useState } from "react"
-import { Check, CircleHelp, Loader2, Send } from "lucide-react"
+import { Check, ChevronDown, CircleHelp, Loader2, Send } from "lucide-react"
 import { toast } from "sonner"
 
 import { api } from "@/components/room/api"
+import { clock } from "@/lib/status"
 import type { Message } from "@/lib/types"
+
+// Questions still waiting for an answer whose own card is not on screen (the
+// thread draws only the latest stretch of a long room), pinned at the top: the
+// red count on the project counts them, so they have to be reachable.
+export function PinnedAsks({ asks }: { asks: Message[] }) {
+  const [open, setOpen] = useState(false)
+  if (asks.length === 0) return null
+  const first = asks[0]
+  return (
+    <div className="sticky top-1 z-10 mb-1 rounded-2xl border border-amber-500/40 bg-card/95 px-3 py-1.5 text-xs shadow-sm backdrop-blur">
+      <button
+        type="button"
+        className="flex w-full items-center gap-1.5 text-left font-medium text-amber-700 dark:text-amber-400"
+        aria-expanded={open}
+        onClick={() => setOpen((value) => !value)}
+      >
+        <CircleHelp className="size-3.5 shrink-0" />
+        <span className="min-w-0 flex-1 truncate">
+          还有 {asks.length} 个问题在等你回答 · {first.authorName}：{first.text.replace(/\s+/g, " ")}
+        </span>
+        <ChevronDown className={`size-3.5 shrink-0 transition-transform ${open ? "rotate-180" : ""}`} />
+      </button>
+      {open ? (
+        <div className="mt-2 flex max-h-[50vh] flex-col gap-3 overflow-y-auto pb-1">
+          {asks.map((message) => (
+            <div key={message.id}>
+              <p className="break-words whitespace-pre-wrap text-muted-foreground">
+                {message.authorName} · {clock(message.createdAt)}：{message.text}
+              </p>
+              <AskCard message={message} />
+            </div>
+          ))}
+        </div>
+      ) : null}
+    </div>
+  )
+}
 
 // A question an agent asked with bench_ask, under its message. Pick an option
 // (several, when it allows) or write an answer; it goes out as a reply to the

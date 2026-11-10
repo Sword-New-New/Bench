@@ -44,6 +44,7 @@ export function TasksPanel({
   onStatus,
   onStep,
   onReview,
+  onFork,
   header,
 }: {
   tasks: Task[]
@@ -57,6 +58,8 @@ export function TasksPanel({
   onStatus: (task: Task, action: "done" | "block") => void
   onStep: (task: Task, step: number, state: TaskStepState) => void
   onReview: (task: Task, pass: boolean, note: string) => void
+  // A finished task is not edited; this makes a copy to carry on in.
+  onFork: (task: Task) => void
 }) {
   const [title, setTitle] = useState("")
   const [steps, setSteps] = useState("")
@@ -148,6 +151,7 @@ export function TasksPanel({
             onStatus={onStatus}
             onStep={onStep}
             onReview={onReview}
+            onFork={onFork}
           />
         ))}
         {done.length > 0 ? (
@@ -168,6 +172,7 @@ export function TasksPanel({
                   onStatus={onStatus}
                   onStep={onStep}
                   onReview={onReview}
+                  onFork={onFork}
                 />
               ))}
             </div>
@@ -189,6 +194,7 @@ function TaskCard({
   onStatus,
   onStep,
   onReview,
+  onFork,
 }: {
   tilt: string
   task: Task
@@ -199,6 +205,7 @@ function TaskCard({
   onStatus: (task: Task, action: "done" | "block") => void
   onStep: (task: Task, step: number, state: TaskStepState) => void
   onReview: (task: Task, pass: boolean, note: string) => void
+  onFork: (task: Task) => void
 }) {
   const waiting = awaitingReview(task)
   const others = agents.filter((agent) => agent.id !== task.ownerId)
@@ -223,6 +230,7 @@ function TaskCard({
         {task.ownerName ? `负责人 ${task.ownerName}` : "还没有负责人"}
         {" · "}
         {task.createdByName} 建立
+        {task.forkedFrom ? ` · 复制自「${task.forkedFrom.title}」` : ""}
       </p>
       {waiting ? (
         <ReviewBox task={task} busy={busy} onReview={(pass, note) => onReview(task, pass, note)} />
@@ -232,7 +240,7 @@ function TaskCard({
         </p>
       ) : null}
       {task.steps?.length ? (
-        <StepDrawer steps={task.steps} busy={busy} onStep={(step, state) => onStep(task, step, state)} />
+        <StepDrawer steps={task.steps} busy={busy} locked={task.status === "done"} onStep={(step, state) => onStep(task, step, state)} />
       ) : null}
       {task.brief && task.status !== "done" ? (
         <dl className="mt-2 space-y-1 rounded-sm bg-white/35 px-2 py-1.5 text-[11px] leading-5 dark:bg-black/15">
@@ -260,6 +268,22 @@ function TaskCard({
             </li>
           ))}
         </ol>
+      ) : null}
+      {task.status === "done" ? (
+        <div className="mt-2.5 flex flex-wrap items-center gap-1.5">
+          <Button
+            type="button"
+            size="xs"
+            variant="outline"
+            className="border-current/20 bg-transparent hover:bg-white/40 dark:border-current/20 dark:bg-transparent dark:hover:bg-black/15"
+            title="已完成的待办不能再改；复制出一条新的，标题和步骤照抄，步骤重新开始"
+            disabled={busy}
+            onClick={() => onFork(task)}
+          >
+            复制一份
+          </Button>
+          <span className="text-[10px] text-muted-foreground">已完成的不能再改</span>
+        </div>
       ) : null}
       {task.status !== "done" ? (
         <div className="mt-2.5 flex flex-wrap gap-1">
@@ -390,10 +414,13 @@ const STEP_LABEL: Record<TaskStepState, string> = { todo: "待做", doing: "在�
 function StepDrawer({
   steps,
   busy,
+  locked,
   onStep,
 }: {
   steps: TaskStep[]
   busy: boolean
+  // A finished task: the steps are only read.
+  locked: boolean
   onStep: (step: number, state: TaskStepState) => void
 }) {
   const [open, setOpen] = useState(false)
@@ -427,9 +454,9 @@ function StepDrawer({
                 className={`mt-0.5 grid size-4 shrink-0 place-items-center rounded-full border border-current/35 ${
                   step.state === "done" ? "bg-current/70" : step.state === "doing" ? "bg-current/25" : ""
                 }`}
-                title={`${STEP_LABEL[step.state]}，点一下改成${STEP_LABEL[NEXT[step.state]]}`}
-                aria-label={`第 ${index + 1} 步${STEP_LABEL[step.state]}，改成${STEP_LABEL[NEXT[step.state]]}`}
-                disabled={busy}
+                title={locked ? `${STEP_LABEL[step.state]}（已完成的待办不能再改）` : `${STEP_LABEL[step.state]}，点一下改成${STEP_LABEL[NEXT[step.state]]}`}
+                aria-label={locked ? `第 ${index + 1} 步${STEP_LABEL[step.state]}` : `第 ${index + 1} 步${STEP_LABEL[step.state]}，改成${STEP_LABEL[NEXT[step.state]]}`}
+                disabled={busy || locked}
                 onClick={() => onStep(index + 1, NEXT[step.state])}
               >
                 {step.state === "done" ? <Check className="size-2.5 text-background" /> : null}

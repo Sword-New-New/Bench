@@ -150,6 +150,10 @@ function KindTile({
   )
 }
 
+function matches(kind: Kind, words: string) {
+  return [kind.id, kind.label, kind.harness].some((text) => text.toLowerCase().includes(words))
+}
+
 export function JoinDialog({
   open,
   project,
@@ -208,8 +212,14 @@ export function JoinDialog({
   const prompt = joinPrompt(origin, projectName, userName)
   const ask = `接入并坐的「${projectName}」项目，名字叫 …，分工是 …`
   const words = query.trim().toLowerCase()
-  const shown = KINDS.filter((kind) =>
-    words ? [kind.id, kind.label, kind.harness].some((text) => text.toLowerCase().includes(words)) : true,
+  // Kinds already seated here are in the roster; this page is for the rest.
+  // One you came here from (preset) stays, so its row's 「接入」 still lands.
+  const seatedKinds = new Set(agents.filter((agent) => !agent.demo).map((agent) => kindOf(agent)?.id))
+  const joined = KINDS.filter((kind) => seatedKinds.has(kind.id) && kind.id !== preset)
+  const shown = KINDS.filter(
+    (kind) =>
+      !joined.includes(kind) &&
+      (words ? matches(kind, words) : true),
   )
   // Keep the command in list order, not click order.
   const chosen = KINDS.filter((kind) => picked.includes(kind.id))
@@ -268,7 +278,12 @@ export function JoinDialog({
               />
             ))}
           </div>
-          {shown.length === 0 ? (
+          {joined.length ? (
+            <p className="text-[11px] leading-4 text-muted-foreground">
+              已经接进来的没列出来：{joined.map((kind) => kind.label).join("、")}。要再开一个，去席位栏那一家底下点「开新会话」。
+            </p>
+          ) : null}
+          {shown.length === 0 && words && !joined.some((kind) => matches(kind, words)) ? (
             <div className="rounded-xl border px-3 py-2.5">
               <p className="text-xs leading-5 text-muted-foreground">
                 列表里没有「{query.trim()}」。它也能接：把下面这段说明复制给它，它会用房间的接口自己入座、收发消息，只是别人 @ 它时房间叫不醒它。

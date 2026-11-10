@@ -2,8 +2,8 @@ import { useEffect, useState } from "react"
 import { ChevronDown, ChevronUp } from "lucide-react"
 
 import { Bot, type BotMood } from "@/components/room/bot"
+import { Markdown } from "@/components/room/markdown"
 import { kindOf, type Kind } from "@/lib/kinds"
-import { splitMentions } from "@/lib/text"
 import { STATUS_COLOR, STATUS_LABEL } from "@/lib/status"
 import type { AgentStatus } from "@/lib/types"
 
@@ -105,7 +105,7 @@ export type Fold = ReturnType<typeof useFold>
 export function useFold(text: string) {
   // Whether it overflows is measured while folded, and again whenever the
   // bubble's width changes. The paragraph comes in through a callback ref.
-  const [node, attach] = useState<HTMLParagraphElement | null>(null)
+  const [node, attach] = useState<HTMLElement | null>(null)
   const [open, setOpen] = useState(false)
   const [long, setLong] = useState(false)
   useEffect(() => {
@@ -143,38 +143,29 @@ export function MessageBody({
   names,
   tone = "ink",
   fold: given,
+  from,
 }: {
   text: string
   names: string[]
   tone?: "ink" | "inverse"
+  // Who wrote it (a seat id or "human"): relative file paths are looked up in their folder.
+  from?: string
   // Given, the caller shows its FoldButton; otherwise it goes right under the text.
   fold?: Fold
 }) {
-  const parts = splitMentions(text, names)
-  const mentionClass =
-    tone === "inverse"
-      ? "rounded px-0.5 font-medium bg-white/18"
-      : "rounded px-0.5 font-medium text-mention bg-mention/10"
   const own = useFold(text)
   const { attach, open, long } = given ?? own
   return (
     <>
-      <p
+      {/* Folded to four lines by height, so a code box or a table inside folds too. */}
+      <div
         ref={attach}
-        className={`text-[0.9rem] leading-relaxed break-words whitespace-pre-wrap ${
-          open ? "" : `line-clamp-4 ${long ? "[mask-image:linear-gradient(to_bottom,black_55%,transparent)]" : ""}`
+        className={`text-[0.9rem] leading-relaxed break-words ${
+          open ? "" : `max-h-[4lh] overflow-hidden ${long ? "[mask-image:linear-gradient(to_bottom,black_55%,transparent)]" : ""}`
         }`}
       >
-        {parts.map((part, index) =>
-          part.mention ? (
-            <span key={`${part.text}-${index}`} className={mentionClass}>
-              {part.text}
-            </span>
-          ) : (
-            <span key={`${index}-${part.text.slice(0, 12)}`}>{part.text}</span>
-          ),
-        )}
-      </p>
+        <Markdown text={text} names={names} tone={tone} from={from} />
+      </div>
       {given ? null : (
         <div className="-ml-1">
           <FoldButton fold={own} />
@@ -183,3 +174,4 @@ export function MessageBody({
     </>
   )
 }
+

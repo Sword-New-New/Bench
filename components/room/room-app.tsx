@@ -1,12 +1,13 @@
 "use client"
 
-import { startTransition, useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react"
-import { ListTodo, MessageSquare, Monitor, Moon, Plug, Settings, Sparkles, Sun, TerminalSquare, Users } from "lucide-react"
+import { type ComponentProps, startTransition, useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react"
+import { Gauge, ListTodo, MessageSquare, Monitor, Moon, Plug, Settings, Sparkles, Sun, TerminalSquare, Users } from "lucide-react"
 import { useTheme } from "next-themes"
 import { toast } from "sonner"
 
 import { AdaptersDialog } from "@/components/room/adapters-dialog"
 import { Composer } from "@/components/room/composer"
+import { draft, useDraft } from "@/components/room/draft"
 import { Ambient } from "@/components/room/ambient"
 import { JoinDialog } from "@/components/room/join-dialog"
 import { Mark } from "@/components/room/bits"
@@ -18,10 +19,14 @@ import { DEBUG_MENU, DebugMenu, NO_DEBUG, withDebug, type DebugView } from "@/co
 import { TasksPanel } from "@/components/room/tasks-panel"
 import { EDIT_EVENT, LIVE_DEMO, Thread } from "@/components/room/thread"
 import { Tour, TOUR_JOIN, TOUR_START } from "@/components/room/tour"
+import { SPEED_OPEN, SpeedPanel } from "@/components/room/speed-panel"
 import { WhisperDialog } from "@/components/room/whisper-dialog"
+import { CommitDialog } from "@/components/room/commit-dialog"
+import { GOTO_EVENT, type Goto } from "@/components/room/refs"
 import { SpawnDialog } from "@/components/room/spawn-dialog"
 import { type Pending } from "@/components/room/attachments"
 import { api, inOpenProject, setOpenProject, storedHumanKey, type AdapterInfo } from "@/components/room/api"
+import { ModelDialog } from "@/components/room/model-field"
 import { ProjectDialog, ProjectMenu, ProjectPlace } from "@/components/room/project-menu"
 import { ProjectRail } from "@/components/room/project-rail"
 import { smashProject } from "@/components/room/project-wreck"
@@ -119,12 +124,13 @@ export function RoomApp() {
   const [live, setLive] = useState(false)
   const [now, setNow] = useState(0)
   const [tab, setTab] = useState<TabId>("chat")
-  const [draft, setDraft] = useState("")
+  // The composer's text lives in its own store (draft.ts, draft.set below),
+  // so typing doesn't redraw the room.
   // 「重新编辑」 on a recalled message puts its words back in the composer.
   useEffect(() => {
     const edit = (event: Event) => {
       const text = (event as CustomEvent<string>).detail
-      if (typeof text === "string") setDraft(text)
+      if (typeof text === "string") draft.set(text)
     }
     window.addEventListener(EDIT_EVENT, edit)
     return () => window.removeEventListener(EDIT_EVENT, edit)
@@ -144,6 +150,8 @@ export function RoomApp() {
   }, [])
   const [runId, setRunId] = useState<string | null>(null)
   const [whisperId, setWhisperId] = useState<string | null>(null)
+  // The seat whose model is being picked (「换模型…」).
+  const [modelId, setModelId] = useState<string | null>(null)
   const detail = useSyncExternalStore(onDetailChange, detailSaved, () => false)
   // No key in this browser: whatever the user does here is refused.
   const keyless = useSyncExternalStore(noSubscribe, () => !storedHumanKey(), () => false)
@@ -196,7 +204,7 @@ export function RoomApp() {
       if (current !== id) {
         setFocusId(null)
         setReply(null)
-        setDraft("")
+        draft.set("")
       }
       return id
     })
@@ -336,10 +344,31 @@ export function RoomApp() {
   }
 
   function mention(name: string) {
-    setDraft((current) => `${current}${current && !/\s$/.test(current) ? " " : ""}@${name} `)
+    draft.set((current) => `${current}${current && !/\s$/.test(current) ? " " : ""}@${name} `)
     setTab("chat")
     requestAnimationFrame(() => composerRef.current?.focus())
   }
+
+  // A task id clicked in a message (components/room/refs.ts).
+  const openTaskRef = useRef(openTask)
+  const tasksRef = useRef(room?.tasks)
+  useEffect(() => {
+    openTaskRef.current = openTask
+    tasksRef.current = room?.tasks
+  })
+  useEffect(() => {
+    const onGoto = (event: Event) => {
+      const { kind, id } = (event as CustomEvent<Goto>).detail
+      if (kind !== "task") return
+      if (tasksRef.current && !tasksRef.current.some((task) => task.id === id)) {
+        toast("这个项目里没有这条待办")
+        return
+      }
+      openTaskRef.current(id)
+    }
+    window.addEventListener(GOTO_EVENT, onGoto)
+    return () => window.removeEventListener(GOTO_EVENT, onGoto)
+  }, [])
 
   function openTask(taskId: string) {
     setTab("tasks")
@@ -377,6 +406,7 @@ export function RoomApp() {
     <main className="relative isolate flex h-dvh flex-col">
       <Ambient />
       <Tour />
+      <SpeedPanel />
       {keyless ? (
         <p role="alert" className="shrink-0 bg-destructive px-4 py-2 text-center text-sm text-white">
           这个页面没有口令，发消息、批准权限这些操作都会被拒。用 <code>npm run open</code> 或桌面上的「并坐」图标重新打开一次，之后就不用了。
@@ -473,6 +503,10 @@ export function RoomApp() {
                 <Sparkles />
                 新手引导
               </DropdownMenuItem>
+              <DropdownMenuItem onClick={() => window.dispatchEvent(new Event(SPEED_OPEN))}>
+                <Gauge />
+                Token 测速台
+              </DropdownMenuItem>
             </DropdownMenuContent>
           </DropdownMenu>
           <Button
@@ -521,6 +555,7 @@ export function RoomApp() {
               }}
               onOpenRun={setRunId}
               onWhisper={(agent) => setWhisperId(agent.id)}
+              onModel={(agent) => setModelId(agent.id)}
               onSpawn={(kind, from) => setSpawn({ kind, from })}
               onStop={(agent) =>
                 void run(async () => {
@@ -529,6 +564,15 @@ export function RoomApp() {
                     body: JSON.stringify({ as: "human", action: "stop" }),
                   })
                   toast.success(`${agent.name} 停下了${result.dropped > 0 ? `，排队的 ${result.dropped} 条也取消了` : ""}`)
+                })
+              }
+              onCompact={(agent) =>
+                void run(async () => {
+                  await api(`/api/v1/agents/${agent.id}`, {
+                    method: "POST",
+                    body: JSON.stringify({ as: "human", action: "compact" }),
+                  })
+                  toast.success(`${agent.name} 开始压缩上下文，好了会在群里说一声`)
                 })
               }
               onJoin={(kind) => {
@@ -542,6 +586,9 @@ export function RoomApp() {
               <p className="mx-3 rounded-xl bg-destructive/10 px-4 py-2 text-xs text-destructive">{error} 正在重试。</p>
             ) : null}
             <Thread
+              // A fresh thread per project: it opens at the bottom of the new
+              // room at once, instead of gliding there from the old one's spot.
+              key={room.project.id}
               detail={detail}
               onDetail={showDetail}
               messages={visibleMessages}
@@ -567,17 +614,15 @@ export function RoomApp() {
               }
               onMention={mention}
               onExample={(text) => {
-                setDraft(text)
+                draft.set(text)
                 requestAnimationFrame(() => composerRef.current?.focus())
               }}
             />
-            <Composer
+            <DraftComposer
               agents={agents}
-              value={draft}
               reply={reply}
               busy={busy}
               inputRef={composerRef}
-              onChange={setDraft}
               files={files}
               onFiles={setFiles}
               onClearReply={() => setReply(null)}
@@ -600,7 +645,7 @@ export function RoomApp() {
                 ) : null
               }
               onSend={() => {
-                const text = draft.trim()
+                const text = draft.get().trim()
                 if ((!text && files.length === 0) || files.some((item) => item.uploading)) return
                 const attachments = files.map(({ kind, name, path }) => ({ kind, name, path }))
                 const replyTo = reply?.id
@@ -613,7 +658,7 @@ export function RoomApp() {
                   })
                   for (const item of files) if (item.preview) URL.revokeObjectURL(item.preview)
                   setFiles([])
-                  setDraft("")
+                  draft.set("")
                   setReply(null)
                   if (queued.length > 0) {
                     const first = queued[0]
@@ -689,6 +734,16 @@ export function RoomApp() {
                   }).then(() => undefined),
                 )
               }
+              onFork={(task) =>
+                void run(
+                  () =>
+                    api(`/api/v1/tasks/${task.id}`, {
+                      method: "POST",
+                      body: JSON.stringify({ as: "human", action: "fork" }),
+                    }).then(() => undefined),
+                  "复制成了一条新待办，原来那条没动",
+                )
+              }
             />
           </aside>
         </div>
@@ -738,6 +793,8 @@ export function RoomApp() {
       />
 
       <SpawnDialog kind={spawn?.kind ?? null} from={spawn?.from ?? null} agents={agents} onClose={() => setSpawn(null)} />
+      <ModelDialog agent={agents.find((agent) => agent.id === modelId) ?? null} onClose={() => setModelId(null)} />
+      <CommitDialog />
       <WhisperDialog
         agent={agents.find((agent) => agent.id === whisperId) ?? null}
         onClose={() => setWhisperId(null)}
@@ -930,4 +987,10 @@ export function RoomApp() {
 // The key never changes while the page is open (components/room/api.ts).
 function noSubscribe() {
   return () => {}
+}
+
+// The composer, fed from the draft store: only it redraws as you type.
+function DraftComposer(props: Omit<ComponentProps<typeof Composer>, "value" | "onChange">) {
+  const value = useDraft()
+  return <Composer {...props} value={value} onChange={draft.set} />
 }

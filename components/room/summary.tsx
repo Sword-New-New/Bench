@@ -122,7 +122,7 @@ function SummaryDone({ name, onEnd }: { name: string; onEnd: () => void }) {
     }
   }, [])
   return (
-    <div className="pill flex items-center gap-2 rounded-2xl px-3 py-2 text-xs ring-1 ring-emerald-500/40">
+    <div className="notice flex items-center gap-2 rounded-2xl px-3 py-2 text-xs [--notice-ring:color-mix(in_oklch,var(--color-emerald-500)_45%,transparent)]">
       <span ref={check} className="summary-check grid size-5 shrink-0 place-items-center rounded-full bg-emerald-500 text-white">
         <svg viewBox="0 0 16 16" className="size-3" fill="none" stroke="currentColor" strokeWidth="2.4" strokeLinecap="round" strokeLinejoin="round">
           <path d="M3.5 8.5l3 3 6-7" />
@@ -203,7 +203,7 @@ export function SummaryNudge({
       {done ? (
         <SummaryDone key={done.round} name={done.name} onEnd={() => setDone(null)} />
       ) : writer ? (
-        <div className="summary-writing pill flex items-center gap-2 rounded-2xl px-3 py-2 text-xs text-muted-foreground ring-1 ring-emerald-500/25">
+        <div className="summary-writing notice flex items-center gap-2 rounded-2xl px-3 py-2 text-xs text-muted-foreground [--notice-ring:color-mix(in_oklch,var(--color-emerald-500)_30%,transparent)]">
           <span className="relative grid size-5 shrink-0 place-items-center">
             <span className="absolute inset-0 animate-spin rounded-full border-2 border-emerald-500/20 border-t-emerald-500 motion-reduce:animate-none" />
             <NotebookPen className="size-2.5 text-emerald-600 dark:text-emerald-400" />
@@ -213,7 +213,7 @@ export function SummaryNudge({
           </span>
         </div>
       ) : due ? (
-        <div className="pill rounded-2xl px-3 py-2 text-xs">
+        <div className="notice rounded-2xl px-3 py-2 text-xs">
           <div className="flex items-center gap-2">
             <NotebookPen className="size-3.5 shrink-0 text-muted-foreground" />
             <p className="min-w-0 flex-1 leading-5">

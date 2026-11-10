@@ -3,11 +3,13 @@ import { ArrowRight, Check, ChevronDown, ListTree, Reply, Undo2, X, Zap } from "
 import { toast } from "sonner"
 
 import { api } from "@/components/room/api"
-import { AskCard } from "@/components/room/ask-card"
+import { AskCard, PinnedAsks } from "@/components/room/ask-card"
 import { MessageFiles, previewText } from "@/components/room/attachments"
+import { LimitedCard } from "@/components/room/limited-card"
 import { FullAccessToggle } from "@/components/room/permits"
 import { Avatar, FoldButton, keepTopInView, MessageBody, seatLook, useFold } from "@/components/room/bits"
 import { DOCK_EVENT } from "@/components/room/composer"
+import { GOTO_EVENT, type Goto } from "@/components/room/refs"
 import { Reveal } from "@/components/room/reveal"
 import { RunTrail } from "@/components/room/run-trail"
 import { Button } from "@/components/ui/button"
@@ -117,6 +119,9 @@ export function Thread({
   const items = threadItems(messages)
   const hidden = Math.max(0, items.length - limit)
   const shown = hidden > 0 ? items.slice(hidden) : items
+  // Open questions whose card is in the part not drawn.
+  const drawn = new Set(shown.flatMap((item) => (item.chain ? item.chain : [item.message]).map((message) => message.id)))
+  const pinned = hidden > 0 ? messages.filter((message) => message.ask?.state === "open" && !message.recalled && !drawn.has(message.id)) : []
   const loadEarlier = () => {
     const node = scroller.current
     anchor.current = node ? node.scrollHeight - node.scrollTop : null
@@ -130,8 +135,8 @@ export function Thread({
   }, [limit])
 
   const row = (message: Message, previous?: Message) => (
+    <div key={message.id} data-message={message.id} className="contents">
     <MessageRow
-      key={message.id}
       message={message}
       previous={previous}
       messages={messages}
@@ -144,11 +149,12 @@ export function Thread({
       onMention={onMention}
       detail={detail}
     />
+    </div>
   )
 
   const line = (message: Message, previous: Message | undefined) => (
+    <div key={message.id} data-message={message.id} className="contents">
     <ChainLine
-      key={message.id}
       message={message}
       previous={previous}
       messages={messages}
@@ -159,7 +165,50 @@ export function Thread({
       onOpenRun={onOpenRun}
       onMention={onMention}
     />
+    </div>
   )
+
+  // A message id clicked in some message (components/room/refs.ts): draw far
+  // enough back to include it, open its reply chain if folded there (ReplyChain
+  // listens too), scroll to it and flash it.
+  const latest = useRef({ messages, items, limit })
+  useEffect(() => {
+    latest.current = { messages, items, limit }
+  })
+  useEffect(() => {
+    const onGoto = (event: Event) => {
+      const { kind, id } = (event as CustomEvent<Goto>).detail
+      if (kind !== "message") return
+      const now = latest.current
+      if (!now.messages.some((message) => message.id === id)) {
+        toast("这条消息太早了，页面上没有加载到")
+        return
+      }
+      const index = now.items.findIndex((item) => (item.chain ?? [item.message]).some((message) => message.id === id))
+      stick.current = false
+      if (index >= 0 && index < now.items.length - now.limit) setLimit(now.items.length - index + 3)
+      const find = (tries: number) => {
+        const holder = document.querySelector(`[data-message="${CSS.escape(id)}"]`)
+        const target = holder?.firstElementChild as HTMLElement | null | undefined
+        if (target) {
+          target.scrollIntoView({ block: "center", behavior: "smooth" })
+          target.animate(
+            [
+              { outline: "2px solid color-mix(in oklab, var(--color-mention, #3b82f6) 85%, transparent)", outlineOffset: "4px" },
+              { outline: "2px solid transparent", outlineOffset: "4px" },
+            ],
+            { duration: 1800, delay: 250, easing: "ease-out" },
+          )
+          return
+        }
+        if (tries > 0) requestAnimationFrame(() => find(tries - 1))
+        else toast("这条消息在群聊里没画出来")
+      }
+      requestAnimationFrame(() => find(30))
+    }
+    window.addEventListener(GOTO_EVENT, onGoto)
+    return () => window.removeEventListener(GOTO_EVENT, onGoto)
+  }, [])
 
   // Wakes still going whose reply isn't in yet. A question card (bench_ask)
   // comes from the middle of a run, not its end, so it doesn't count.
@@ -218,7 +267,11 @@ export function Thread({
         }}
         aria-live="polite"
       >
-        <div ref={content} className="mx-auto flex max-w-3xl flex-col gap-1 px-4 pt-6 pb-[calc(var(--dock,8rem)+1rem)] md:px-6">
+        <div
+          ref={content}
+          className="mx-auto flex max-w-3xl flex-col gap-1 px-4 pt-6 pb-[calc(var(--dock,8rem)+1rem)] md:px-6"
+        >
+          <PinnedAsks asks={pinned} />
           {!talked ? <Welcome onExample={onExample} /> : null}
           {hidden > 0 ? (
             <button
@@ -302,6 +355,16 @@ function ReplyChain({
   const top = useRef<HTMLElement>(null)
   const [root, ...replies] = chain
   const middle = replies.slice(0, -1)
+  const middleIds = middle.map((message) => message.id).join(" ")
+  useEffect(() => {
+    const ids = new Set(middleIds.split(" "))
+    const onGoto = (event: Event) => {
+      const { kind, id } = (event as CustomEvent<Goto>).detail
+      if (kind === "message" && ids.has(id)) setOpen(true)
+    }
+    window.addEventListener(GOTO_EVENT, onGoto)
+    return () => window.removeEventListener(GOTO_EVENT, onGoto)
+  }, [middleIds])
   const last = replies[replies.length - 1]
   const people = [...new Set(chain.map((message) => message.authorName))]
   const toggle = () => {
@@ -416,7 +479,7 @@ function ChainLine({
         {detail && message.runId ? <RunTrail runId={message.runId} answer={message.text} /> : null}
         {message.text ? (
           <div className="mt-0.5">
-            <MessageBody text={shown(message, agents)} names={names} fold={fold} />
+            <MessageBody text={shown(message, agents)} names={names} from={message.authorId} fold={fold} />
           </div>
         ) : null}
         {message.attachments?.length ? <MessageFiles files={message.attachments} folded={folded(fold)} /> : null}
@@ -518,6 +581,8 @@ function MessageRow({
 
   if (message.recalled) return <RecalledLine message={message} />
 
+  if (message.kind === "system" && message.limited) return <LimitedCard message={message} />
+
   if (message.kind === "system" && message.interrupted?.length) {
     // After a restart: what it cut off, each with a button to wake it again.
     return (
@@ -573,7 +638,7 @@ function MessageRow({
           {handoff.taskTitle}
         </button>
         <div className="mt-1 text-muted-foreground">
-          <MessageBody text={shown(message, agents)} names={names} />
+          <MessageBody text={shown(message, agents)} names={names} from={message.authorId} />
         </div>
       </article>
     )
@@ -617,7 +682,7 @@ function MessageRow({
           {reply ? <Quote message={reply} align="end" /> : null}
           {message.text ? (
             <div className="bubble mine rounded-2xl rounded-br-md px-3.5 py-2 text-white">
-              <MessageBody text={shown(message, agents)} names={names} tone="inverse" fold={fold} />
+              <MessageBody text={shown(message, agents)} names={names} from={message.authorId} tone="inverse" fold={fold} />
             </div>
           ) : null}
           {message.attachments?.length ? <MessageFiles files={message.attachments} align="end" folded={folded(fold)} /> : null}
@@ -670,7 +735,7 @@ function MessageRow({
             className="bubble rounded-2xl rounded-tl-md bg-card/85 px-3.5 py-2"
             style={{ "--halo": look.color } as CSSProperties}
           >
-            <MessageBody text={shown(message, agents)} names={names} fold={fold} />
+            <MessageBody text={shown(message, agents)} names={names} from={message.authorId} fold={fold} />
           </div>
         ) : null}
         {message.attachments?.length ? <MessageFiles files={message.attachments} folded={folded(fold)} /> : null}

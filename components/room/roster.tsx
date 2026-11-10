@@ -1,5 +1,5 @@
 import { useState, ViewTransition } from "react"
-import { AtSign, Ellipsis, Loader2, MessageCircle, PencilLine, Plus, Square } from "lucide-react"
+import { AtSign, Cpu, Ellipsis, Loader2, MessageCircle, PencilLine, Plus, Shrink, Square } from "lucide-react"
 
 import { Button } from "@/components/ui/button"
 import {
@@ -11,9 +11,15 @@ import {
 } from "@/components/ui/dropdown-menu"
 import { Avatar, Lamp } from "@/components/room/bits"
 import { seatFlight } from "@/components/room/project-rail"
+import { ContextLine, useContexts } from "@/components/room/context"
+import { QuotaLines, useQuotas } from "@/components/room/quota"
+import { SpeedLine, useSpeeds } from "@/components/room/speed-line"
 import type { AdapterInfo } from "@/components/room/api"
 import { KINDS, kindOf, type Kind } from "@/lib/kinds"
 import { ago, STATUS_LABEL } from "@/lib/status"
+import type { SeatContext } from "@/lib/context"
+import type { Quota } from "@/lib/quota"
+import type { Speed } from "@/lib/speed"
 import type { PublicAgent } from "@/lib/types"
 
 type Props = {
@@ -26,8 +32,13 @@ type Props = {
   onFocus: (id: string | null) => void
   onLeave: (agent: PublicAgent) => void
   onRename: (agent: PublicAgent) => void
+  onModel: (agent: PublicAgent) => void
   onOpenRun: (runId: string) => void
   onStop: (agent: PublicAgent) => void
+  // Have the room compact this seat's context (lib/summon.ts requestCompact).
+  onCompact: (agent: PublicAgent) => void
+  // How full each seat's context is, by seat id (filled in by Roster).
+  contexts?: Record<string, SeatContext>
   // Say something to this seat alone, outside the room.
   onWhisper: (agent: PublicAgent) => void
   // Open 「开新会话」 for a kind, starting from this seat's folder if given.
@@ -61,6 +72,10 @@ export function Roster(props: Props) {
   // The five core kinds always get a row; any other kind once it has a seat.
   const seated = new Set(agents.map((agent) => kindOf(agent)?.id))
   const shown = KINDS.filter((kind) => kind.core || seated.has(kind.id))
+  const quotas = useQuotas()
+  const speeds = useSpeeds()
+  // Read again whenever a seat starts or ends a wake.
+  const contexts = useContexts(agents.map((agent) => agent.runId ?? "").join(","))
 
   return (
     <div className="flex h-full min-h-0 flex-col">
@@ -74,14 +89,25 @@ export function Roster(props: Props) {
       <div className="min-h-0 flex-1 space-y-1 overflow-y-auto px-2 pb-3">
         {shown.map((kind) => {
           const seats = agents.filter((agent) => kindOf(agent)?.id === kind.id)
-          return <KindGroup key={kind.id} kind={kind} seats={seats} state={reach(kind, seats, adapters)} {...props} />
+          return (
+            <KindGroup
+              key={kind.id}
+              kind={kind}
+              seats={seats}
+              state={reach(kind, seats, adapters)}
+              quota={quotas.find((item) => item.kind === kind.id)}
+              speed={speeds.find((item) => item.kind === kind.id)}
+              {...props}
+              contexts={contexts}
+            />
+          )
         })}
 
         {others.length > 0 ? (
           <section className="pt-3">
             <h3 className="px-2 pb-1 text-xs font-medium text-muted-foreground">其他席位</h3>
             {others.map((agent) => (
-              <SeatRow key={agent.id} agent={agent} {...props} />
+              <SeatRow key={agent.id} agent={agent} {...props} contexts={contexts} />
             ))}
           </section>
         ) : null}
@@ -94,8 +120,16 @@ function KindGroup({
   kind,
   seats,
   state,
+  quota,
+  speed,
   ...props
-}: Props & { kind: Kind; seats: PublicAgent[]; state: ReturnType<typeof reach> }) {
+}: Props & {
+  kind: Kind
+  seats: PublicAgent[]
+  state: ReturnType<typeof reach>
+  quota: Quota | undefined
+  speed: Speed | undefined
+}) {
   const [hover, setHover] = useState(false)
   const primary = seats.find((agent) => agent.status !== "offline") ?? seats.find((agent) => agent.callable) ?? seats[0]
   // A seat that can be woken is only resting, so its character stays awake and
@@ -126,6 +160,8 @@ function KindGroup({
             {kind.harness}
             {seats.length > 1 ? ` · ${seats.length} 个会话` : ""}
           </span>
+          <QuotaLines quota={quota} now={props.now} />
+          <SpeedLine speed={speed} color={kind.color} now={props.now} />
         </span>
       </button>
       {seats.length > 0 || kind.spawn ? (
@@ -138,7 +174,7 @@ function KindGroup({
               type="button"
               className="flex w-full items-center gap-1.5 rounded-xl px-2 py-1 text-left text-xs text-muted-foreground transition-colors hover:bg-sidebar-accent/70 hover:text-foreground"
               title={`让房间在后台开一个新的 ${kind.label} 会话并入座`}
-              onClick={() => props.onSpawn(kind.id, primary ?? null)}
+              onClick={() => props.onSpawn(kind.id, null)}
             >
               <Plus className="size-3.5" />
               开新会话
@@ -152,6 +188,7 @@ function KindGroup({
 
 function SeatRow({ agent, ...props }: Props & { agent: PublicAgent }) {
   const focused = props.focusId === agent.id
+  const context = props.contexts?.[agent.id]
   return (
     <div
       className={`group flex items-start gap-2 rounded-xl px-2 py-1.5 transition-colors ${focused ? "bg-sidebar-accent" : "hover:bg-sidebar-accent/70"}`}
@@ -189,6 +226,7 @@ function SeatRow({ agent, ...props }: Props & { agent: PublicAgent }) {
           </span>
         )}
       </button>
+      <ContextLine context={context} now={props.now} />
       {agent.runId ? (
         <>
           {/* Woken right now: the line follows its current step; click to watch. */}
@@ -254,12 +292,24 @@ function SeatRow({ agent, ...props }: Props & { agent: PublicAgent }) {
               停下这次唤起
             </DropdownMenuItem>
           ) : null}
+          {context && agent.callable && !agent.demo && !agent.runId && !agent.standby ? (
+            <DropdownMenuItem onClick={() => props.onCompact(agent)}>
+              <Shrink />
+              压缩上下文
+            </DropdownMenuItem>
+          ) : null}
           {agent.demo ? null : (
             <DropdownMenuItem onClick={() => props.onRename(agent)}>
               <PencilLine />
               改名…
             </DropdownMenuItem>
           )}
+          {agent.callable && !agent.demo ? (
+            <DropdownMenuItem onClick={() => props.onModel(agent)}>
+              <Cpu />
+              换模型…
+            </DropdownMenuItem>
+          ) : null}
           <DropdownMenuItem onClick={() => props.onFocus(focused ? null : agent.id)}>
             {focused ? "看全部对话" : "只看和他有关的"}
           </DropdownMenuItem>

@@ -24,6 +24,9 @@ if ! command -v npm >/dev/null 2>&1; then
   pause_exit
 fi
 
+# Too old a Node dies later on an import error; say it here in a sentence.
+node scripts/check-node.mjs || pause_exit
+
 # A room already running here: open it, don't start a second one. 4399 is
 # fixed because every client's MCP bridge talks to it; a room on another port
 # would be one nobody reaches.

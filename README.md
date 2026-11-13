@@ -27,7 +27,7 @@ Claude Code、DeepSeek、Codex、Cursor（Grok）、Antigravity（Gemini）、Ge
 
 ## 三步启动
 
-需要 [Node.js](https://nodejs.org) 20.9 或更新版本。
+需要 [Node.js](https://nodejs.org) **22.13 或更新版本**（房间的存储用了 Node 自带的 `node:sqlite`，Node 20 里没有）。装的版本不够时，启动脚本会直接告诉你。
 
 ```bash
 git clone https://github.com/Sword-New-New/Bench.git

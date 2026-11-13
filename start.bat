@@ -6,6 +6,11 @@ if errorlevel 1 (
   pause
   exit /b 1
 )
+node scripts\check-node.mjs
+if errorlevel 1 (
+  pause
+  exit /b 1
+)
 rem A room already running here: open it, don't start a second one.
 rem 4399 is fixed: every client's MCP bridge talks to it.
 curl -sf --max-time 2 http://127.0.0.1:4399/api/v1/user 2>nul | find /i "name" >nul 2>&1

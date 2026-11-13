@@ -1,4 +1,5 @@
-import { spawn } from "node:child_process"
+import { spawn, type ChildProcessByStdio } from "node:child_process"
+import type { Readable } from "node:stream"
 import { createHash, randomBytes } from "node:crypto"
 import { StringDecoder } from "node:string_decoder"
 
@@ -12,7 +13,7 @@ import { detectLimit, whenText } from "@/lib/limits"
 import { commandLine, killTree } from "@/lib/platform"
 import { accepting, deliver, openTerminal } from "@/lib/terminal"
 import { onTerminalClosed, terminalOpen } from "@/lib/terminal-state"
-import { endRun, getRun, markResumed, pendingResumes, putStep, setLimited, startRun, takeUnannounced } from "@/lib/runs"
+import { activeRun, endRun, getRun, markResumed, pendingResumes, putStep, setLimited, startRun, takeUnannounced } from "@/lib/runs"
 import {
   agentState,
   bindProject,
@@ -70,6 +71,10 @@ const LIVE_GAP_MS = 800
 // seconds), so the run isn't stopped: the seat and the 「过程」 panel just say
 // how long it has been waiting, so it doesn't look frozen.
 const WAIT_NOTE_MS = 30_000
+
+// What one wake's prompt may weigh in bytes when it goes out as a command-line
+// argument (Linux: 128 KB per argument, quoting and the rest included).
+const SUMMARY_PROMPT_BYTES = 90_000
 
 // One queue per seat. A seat runs one command at a time; messages that land
 // while it runs are batched into the next run instead of being dropped.
@@ -344,13 +349,47 @@ function summaryPrompt(replyByStdout: boolean) {
   const previous = source.previous
     ? `【上一份摘要】（${source.previous.by} 写于 ${stamp(source.previous.at)}）\n${source.previous.text}`
     : "【上一份摘要】还没有，这是第一份。"
-  const scope =
-    source.shown === source.count
-      ? `下面是上一份摘要之后的全部 ${source.count} 条对话，一条没漏。`
-      : `上一份摘要之后共 ${source.count} 条对话，太长只列了最近 ${source.shown} 条，更早的略去了。`
   const how = replyByStdout
     ? "直接输出摘要全文就行，你这次的输出会存成房间摘要，不会贴进群聊。"
     : "写好后调用 bench_summary 工具交上来，不要用 bench_say 发到群里。"
+  // The prompt rides in one command-line argument, and Linux caps one argument
+  // at 128 KB (spawn E2BIG): 40,000 Chinese characters are 120 KB by
+  // themselves. So the whole prompt is held to a byte budget: the oldest
+  // conversation lines go first; the 「流程」 part goes only if it alone leaves
+  // too little room.
+  let brief = flowBrief
+  let flows = moved
+  const fixed = (flowPart: string) =>
+    Buffer.byteLength(
+      [
+        "【并坐房间请你写一份房间摘要】",
+        "这次不用回复聊天，只写摘要。在上一份摘要的基础上，写一份完整的新摘要（不是只写增量），格式：",
+        "## 结论\n## 进行中\n## 待定",
+        "每部分用短句列点，写清谁负责、做到哪；没有的部分写「无」。不超过 1500 字。",
+        previous,
+        flowPart,
+        how,
+        "上一份摘要之后共 99999 条对话，太长只列了最近一部分，更早的略去了。",
+      ].join("\n"),
+    )
+  if (SUMMARY_PROMPT_BYTES - fixed(brief) < 12_000) {
+    brief = ""
+    flows = []
+  }
+  const budget = SUMMARY_PROMPT_BYTES - fixed(brief)
+  let body = source.text || "（没有新对话）"
+  let cut = false
+  if (Buffer.byteLength(body) > budget) {
+    const lines = body.split("\n\n")
+    while (lines.length > 1 && Buffer.byteLength(lines.join("\n\n")) > budget) lines.shift()
+    body = lines.join("\n\n")
+    cut = true
+  }
+  const scope = cut
+    ? `上一份摘要之后共 ${source.count} 条对话，太长只列了最近一部分，更早的略去了。`
+    : source.shown === source.count
+      ? `下面是上一份摘要之后的全部 ${source.count} 条对话，一条没漏。`
+      : `上一份摘要之后共 ${source.count} 条对话，太长只列了最近 ${source.shown} 条，更早的略去了。`
   return {
     upToSeq: source.upToSeq,
     text: [
@@ -362,12 +401,12 @@ function summaryPrompt(replyByStdout: boolean) {
       previous,
       "",
       `【之后的对话】${scope}`,
-      source.text || "（没有新对话）",
+      body,
       "",
-      ...(flowBrief ? [flowBrief, ""] : []),
-      `（${how}${flowBrief ? "流程那一段写在同一份里，跟在「## 待定」后面。" : ""}）`,
+      ...(brief ? [brief, ""] : []),
+      `（${how}${brief ? "流程那一段写在同一份里，跟在「## 待定」后面。" : ""}）`,
     ].join("\n"),
-    flowsAt: Object.fromEntries(moved.map((flow) => [flow.id, flow.lastAt])),
+    flowsAt: Object.fromEntries(flows.map((flow) => [flow.id, flow.lastAt])),
   }
 }
 
@@ -523,30 +562,38 @@ function launch(
     finish(null, (error as Error).message)
     return
   }
-  const child = spawn(launch[0], launch[1], {
-    detached: true,
-    windowsHide: true,
-    cwd: process.cwd(),
-    stdio: ["ignore", "pipe", "pipe"],
-    env: {
-      ...process.env,
-      PATH: summonPath(),
-      BENCH_URL: roomUrl(),
-      BENCH_AGENT: agent.agentName,
-      BENCH_UUID: agent.session,
-      BENCH_SESSION: agent.session,
-      // Lets a hook in the run fetch what calls the seat meanwhile (takeQueued).
-      ...(lane(agent.id).key ? { BENCH_RUN_KEY: lane(agent.id).key } : {}),
-      // A session the room created: where its first wake starts it.
-      ...(agent.workdir ? { BENCH_NEW_DIR: agent.workdir } : {}),
-      // The model the user picked for it (lib/models.ts); unset, the default.
-      ...(agent.modelPick ? { BENCH_MODEL: agent.modelPick } : {}),
-      // And how hard it thinks, for the scripts that pass it on.
-      ...(agent.effortPick ? { BENCH_EFFORT: agent.effortPick } : {}),
-      // Where its context compacts by itself, if the user set one (lib/context.ts).
-      ...compactEnv(agent),
-    },
-  })
+  let child: ChildProcessByStdio<null, Readable, Readable>
+  try {
+    child = spawn(launch[0], launch[1], {
+      detached: true,
+      windowsHide: true,
+      cwd: process.cwd(),
+      stdio: ["ignore", "pipe", "pipe"],
+      env: {
+        ...process.env,
+        PATH: summonPath(),
+        BENCH_URL: roomUrl(),
+        BENCH_AGENT: agent.agentName,
+        BENCH_UUID: agent.session,
+        BENCH_SESSION: agent.session,
+        // Lets a hook in the run fetch what calls the seat meanwhile (takeQueued).
+        ...(lane(agent.id).key ? { BENCH_RUN_KEY: lane(agent.id).key } : {}),
+        // A session the room created: where its first wake starts it.
+        ...(agent.workdir ? { BENCH_NEW_DIR: agent.workdir } : {}),
+        // The model the user picked for it (lib/models.ts); unset, the default.
+        ...(agent.modelPick ? { BENCH_MODEL: agent.modelPick } : {}),
+        // And how hard it thinks, for the scripts that pass it on.
+        ...(agent.effortPick ? { BENCH_EFFORT: agent.effortPick } : {}),
+        // Where its context compacts by itself, if the user set one (lib/context.ts).
+        ...compactEnv(agent),
+      },
+    })
+  } catch (error) {
+    // E2BIG (a prompt too long for one argument) and the like: end it here, or
+    // the seat stays 'running' with nothing to stop.
+    finish(null, `起不来：${(error as NodeJS.ErrnoException).code ?? (error as Error).message}`)
+    return
+  }
   const kill = () => {
     try {
       if (child.pid) killTree(child.pid)
@@ -1047,7 +1094,29 @@ export function stopAgent(agentId: string) {
   const agent = agentState(agentId)
   if (!agent) throw new ApiError(404, "这个席位不在了")
   const queue = lane(agentId)
-  if (!queue.stop) throw new ApiError(409, `${agent.name} 现在没在跑`)
+  if (!queue.stop) {
+    // Marked running with no process to stop: a start that failed halfway
+    // (spawn E2BIG once left a summary job behind). Clear the marks so the
+    // seat is free again, instead of answering "not running" to a seat the
+    // page shows as working.
+    const stale = queue.running || summaryJob()?.agentId === agentId || activeRun(agentId)
+    if (!stale) throw new ApiError(409, `${agent.name} 现在没在跑`)
+    const dropped = queue.pending.length
+    queue.pending = []
+    queue.carry = undefined
+    queue.summary = false
+    queue.compact = false
+    queue.goal = undefined
+    queue.running = false
+    endSummaryJob(agentId)
+    const orphan = activeRun(agentId)
+    if (orphan) endRun(orphan, "failed", "进程已经不在了，状态被清掉")
+    try {
+      pulseAgent(agentId, "idle", "")
+    } catch {}
+    syncLane(agentId)
+    return { dropped, cleared: true }
+  }
   const dropped = queue.pending.length
   queue.pending = []
   queue.carry = undefined

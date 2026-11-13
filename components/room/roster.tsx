@@ -1,6 +1,8 @@
 import { useState, ViewTransition } from "react"
 import {
+  ArrowRightLeft,
   AtSign,
+  BookOpen,
   ChevronRight,
   ChevronsDownUp,
   ChevronsUpDown,
@@ -8,18 +10,26 @@ import {
   Ellipsis,
   Loader2,
   MessageCircle,
+  Pause,
   PencilLine,
+  Play,
+  Plug,
   Plus,
   Shrink,
   Square,
   SquareTerminal,
+  X,
 } from "lucide-react"
+import { toast } from "sonner"
 
+import { api } from "@/components/room/api"
+import { openSeatProfileFor } from "@/components/room/seat-profile-dialog"
 import { Button } from "@/components/ui/button"
 import {
   DropdownMenu,
   DropdownMenuContent,
   DropdownMenuGroup,
+  DropdownMenuCheckboxItem,
   DropdownMenuItem,
   DropdownMenuLabel,
   DropdownMenuSeparator,
@@ -69,6 +79,8 @@ type Props = {
   onSpawn: (kind: string, from: PublicAgent | null) => void
   // kind: open the join dialog with that agent already picked.
   onJoin: (kind?: string) => void
+  // The top line's left end (left-pane.tsx: 「← 项目」 and the project's name).
+  head?: React.ReactNode
 }
 
 function reach(kind: Kind, seats: PublicAgent[], adapters: AdapterInfo[] | null) {
@@ -145,8 +157,10 @@ export function Roster(props: Props) {
 
   return (
     <div className="flex h-full min-h-0 flex-col">
-      <div className="flex items-center justify-between gap-1 px-4 pt-4 pb-2">
-        <h2 className="flex-1 text-xs font-semibold tracking-wider text-muted-foreground uppercase">入口</h2>
+      <div className="tier-head flex items-center justify-between gap-1 px-4 pt-4 pb-2">
+        <div className="min-w-0 flex-1">
+          {props.head ?? <h2 className="text-xs font-semibold tracking-wider text-muted-foreground uppercase">入口</h2>}
+        </div>
         {withSeats.length > 0 ? (
           <Button
             type="button"
@@ -166,7 +180,8 @@ export function Roster(props: Props) {
           接入
         </Button>
       </div>
-      <div className="min-h-0 flex-1 space-y-1 overflow-y-auto px-2 pb-3">
+      {/* tier-rows: these fade in one after another when the room opens (globals.css). */}
+      <div className="tier-rows min-h-0 flex-1 space-y-1 overflow-y-auto px-2 pb-3">
         {empty ? (
           shown.map((kind) => group(kind, false))
         ) : (
@@ -175,7 +190,15 @@ export function Roster(props: Props) {
             {without.length > 0 ? (
               <div className="pt-1">
                 {without.map((kind) => (
-                  <KindStub key={kind.id} kind={kind} state={reach(kind, [], adapters)} onJoin={props.onJoin} />
+                  <KindStub
+                    key={kind.id}
+                    kind={kind}
+                    state={reach(kind, [], adapters)}
+                    open={open.includes(kind.id)}
+                    onToggle={() => toggle(kind.id)}
+                    onJoin={props.onJoin}
+                    onSpawn={props.onSpawn}
+                  />
                 ))}
               </div>
             ) : null}
@@ -195,22 +218,64 @@ export function Roster(props: Props) {
   )
 }
 
-// A client nobody here uses yet: one small line, a click brings it in.
-function KindStub({ kind, state, onJoin }: { kind: Kind; state: ReturnType<typeof reach>; onJoin: (kind?: string) => void }) {
+// A client nobody here uses yet: one small line. A click unfolds the two ways
+// in: the room starts a session of it, or one already open joins.
+function KindStub({
+  kind,
+  state,
+  open,
+  onToggle,
+  onJoin,
+  onSpawn,
+}: {
+  kind: Kind
+  state: ReturnType<typeof reach>
+  open: boolean
+  onToggle: () => void
+  onJoin: (kind?: string) => void
+  onSpawn: (kind: string, from: PublicAgent | null) => void
+}) {
   return (
-    <button
-      type="button"
-      className="group/stub flex w-full items-center gap-3 rounded-xl px-3 py-1 text-left transition-colors hover:bg-sidebar-accent/70"
-      title={`把 ${kind.label} 接进来`}
-      onClick={() => onJoin(kind.id)}
-    >
-      <span className="grid w-9 shrink-0 place-items-center opacity-60 grayscale-[.4] group-hover/stub:opacity-100 group-hover/stub:grayscale-0">
-        <Avatar name={kind.label} color={kind.color} kind={kind} size="sm" />
-      </span>
-      <span className="truncate text-[13px] text-muted-foreground group-hover/stub:text-foreground">{kind.label}</span>
-      <span className={`shrink-0 text-[11px] ${state.tone === "warn" ? WARN : "text-muted-foreground/70"}`}>{state.text}</span>
-      <Plus className="ml-auto size-3.5 shrink-0 text-muted-foreground" />
-    </button>
+    <div>
+      <button
+        type="button"
+        className="group/stub flex w-full items-center gap-3 rounded-xl px-3 py-1 text-left transition-colors hover:bg-sidebar-accent/70"
+        title={`把 ${kind.label} 接进来`}
+        aria-expanded={open}
+        onClick={onToggle}
+      >
+        <span className="grid w-9 shrink-0 place-items-center opacity-60 grayscale-[.4] group-hover/stub:opacity-100 group-hover/stub:grayscale-0">
+          <Avatar name={kind.label} color={kind.color} kind={kind} size="sm" />
+        </span>
+        <span className="truncate text-[13px] text-muted-foreground group-hover/stub:text-foreground">{kind.label}</span>
+        <span className={`shrink-0 text-[11px] ${state.tone === "warn" ? WARN : "text-muted-foreground/70"}`}>{state.text}</span>
+        <ChevronRight className={`ml-auto size-3.5 shrink-0 text-muted-foreground transition-transform duration-200 ${open ? "rotate-90" : ""}`} />
+      </button>
+      <Reveal open={open}>
+        <div className="flex flex-wrap gap-1 pt-0.5 pr-2 pb-1 pl-14">
+          {kind.spawn ? (
+            <button
+              type="button"
+              className="-ml-1.5 flex items-center gap-1.5 rounded-lg px-1.5 py-0.5 text-xs text-muted-foreground transition-colors hover:bg-sidebar-accent/70 hover:text-foreground"
+              title={`让房间在后台开一个新的 ${kind.label} 会话并入座`}
+              onClick={() => onSpawn(kind.id, null)}
+            >
+              <Plus className="size-3.5" />
+              开新会话
+            </button>
+          ) : null}
+          <button
+            type="button"
+            className="-ml-1.5 flex items-center gap-1.5 rounded-lg px-1.5 py-0.5 text-xs text-muted-foreground transition-colors hover:bg-sidebar-accent/70 hover:text-foreground"
+            title={`把已经开着的 ${kind.label} 会话接进来`}
+            onClick={() => onJoin(kind.id)}
+          >
+            <Plug className="size-3.5" />
+            接入已有会话…
+          </button>
+        </div>
+      </Reveal>
+    </div>
   )
 }
 
@@ -329,11 +394,51 @@ function SeatRow({ agent, ...props }: Props & { agent: PublicAgent }) {
   const tip = [
     `@${agent.name}`,
     `${agent.model} · ${agent.role}`,
+    agent.hasProfile ? "已设席位档案/长期记忆" : "",
     agent.status === "offline" ? `最后在线 ${ago(agent.lastSeenAt, props.now)}` : STATUS_LABEL[agent.status],
     busy ? "" : agent.doing,
   ]
     .filter(Boolean)
     .join("\n")
+
+  const toggleAutoFull = async (on: boolean) => {
+    try {
+      await api(`/api/v1/agents/${agent.id}`, {
+        method: "POST",
+        body: JSON.stringify({ as: "human", action: "auto_full", on }),
+      })
+      toast.success(on ? `${agent.name} 以后被叫醒都有全部权限` : `${agent.name} 以后要权限会再问你`)
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "没改成")
+    }
+  }
+
+  const togglePause = async (pause: boolean) => {
+    try {
+      await api(`/api/v1/agents/${agent.id}`, {
+        method: "POST",
+        body: JSON.stringify({ as: "human", action: pause ? "queue_pause" : "queue_resume" }),
+      })
+      toast.success(pause ? `已暂停唤起 ${agent.name}，新消息会先排着` : `已恢复唤起 ${agent.name}`)
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "操作没成功")
+    }
+  }
+
+  const dropQueued = async (messageId?: string) => {
+    try {
+      await api(`/api/v1/agents/${agent.id}`, {
+        method: "POST",
+        body: JSON.stringify({ as: "human", action: "queue_drop", messageId }),
+      })
+      toast.success(messageId ? "已从队列剔除这条消息" : `已清空 ${agent.name} 的排队消息`)
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "没能剔除")
+    }
+  }
+
+  const queuedCount = agent.queuedCount ?? 0
+  const showQueueBar = Boolean(agent.queuePaused || queuedCount > 0)
   return (
     <div className={`group rounded-xl px-2 py-1 transition-colors ${focused ? "bg-sidebar-accent" : "hover:bg-sidebar-accent/70"}`}>
       <div className="flex items-center gap-2">
@@ -410,6 +515,34 @@ function SeatRow({ agent, ...props }: Props & { agent: PublicAgent }) {
                 换模型…
               </DropdownMenuItem>
             ) : null}
+            {agent.demo ? null : (
+              <>
+                <DropdownMenuItem onClick={() => openSeatProfileFor(agent.id, { tab: "profile" })}>
+                  <BookOpen />
+                  席位档案与记忆…
+                </DropdownMenuItem>
+                <DropdownMenuItem onClick={() => openSeatProfileFor(agent.id, { tab: "rebind" })}>
+                  <ArrowRightLeft />
+                  切换客户端 / 顶替…
+                </DropdownMenuItem>
+                {agent.callable ? (
+                  <DropdownMenuItem onClick={() => void togglePause(!agent.queuePaused)}>
+                    {agent.queuePaused ? <Play /> : <Pause />}
+                    {agent.queuePaused ? "恢复自动唤起" : "暂停自动唤起"}
+                  </DropdownMenuItem>
+                ) : null}
+                {/* Only Claude Code's permission prompts come to the page (lib/permits.ts). */}
+                {agent.agentName === "claude" ? (
+                  <DropdownMenuCheckboxItem
+                    checked={Boolean(agent.autoFull)}
+                    onCheckedChange={(on) => void toggleAutoFull(on)}
+                    title="勾上后它每次被叫醒都直接有全部权限，不再一条条问你"
+                  >
+                    默认开启全部权限
+                  </DropdownMenuCheckboxItem>
+                ) : null}
+              </>
+            )}
             <DropdownMenuItem onClick={() => props.onFocus(focused ? null : agent.id)}>
               {focused ? "看全部对话" : "只看和他有关的"}
             </DropdownMenuItem>
@@ -467,6 +600,47 @@ function SeatRow({ agent, ...props }: Props & { agent: PublicAgent }) {
           终端开着
           <BetaTag />
         </button>
+      ) : null}
+
+      {/* Tier 2: controllable wake queue bar — shown only when paused or holding queued mentions. */}
+      {showQueueBar ? (
+        <div className="flex items-center gap-1 pl-4 text-[11px] leading-5 text-amber-700 dark:text-amber-300">
+          { queuedCount > 0 ? (
+            <DropdownMenu>
+              <DropdownMenuTrigger className="truncate text-left hover:underline" title="点开查看或单条剔除排队中的消息">
+                {agent.queuePaused ? `已暂停 · 排队 ${queuedCount} 条` : `排队 ${queuedCount} 条`}
+              </DropdownMenuTrigger>
+              <DropdownMenuContent align="start" className="w-64">
+                <DropdownMenuLabel>等待唤起的消息（点 × 单独剔除）</DropdownMenuLabel>
+                {(agent.queuedItems ?? []).map((item) => (
+                  <DropdownMenuItem
+                    key={item.id}
+                    className="flex items-center justify-between gap-2 text-xs"
+                    onClick={() => void dropQueued(item.id)}
+                  >
+                    <span className="min-w-0 flex-1 truncate">{item.line}</span>
+                    <X className="size-3 shrink-0 text-muted-foreground" />
+                  </DropdownMenuItem>
+                ))}
+                <DropdownMenuSeparator />
+                <DropdownMenuItem variant="destructive" onClick={() => void dropQueued("*")}>
+                  清空全部排队
+                </DropdownMenuItem>
+              </DropdownMenuContent>
+            </DropdownMenu>
+          ) : (
+            <span className="truncate">已暂停自动唤起</span>
+          )}
+          <button
+            type="button"
+            className="ml-auto grid size-5 shrink-0 place-items-center rounded-full text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
+            title={agent.queuePaused ? "恢复自动唤起" : "暂停后续唤起"}
+            aria-label={agent.queuePaused ? `恢复 ${agent.name} 唤起` : `暂停 ${agent.name} 唤起`}
+            onClick={() => void togglePause(!agent.queuePaused)}
+          >
+            {agent.queuePaused ? <Play className="size-3" /> : <Pause className="size-3" />}
+          </button>
+        </div>
       ) : null}
 
       {/* At work or stuck: what it is doing; while woken, click to watch. */}

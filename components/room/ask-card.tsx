@@ -16,18 +16,20 @@ export function PinnedAsks({ asks }: { asks: Message[] }) {
   if (asks.length === 0) return null
   const first = asks[0]
   return (
-    <div className="sticky top-1 z-10 mb-1 rounded-2xl border border-amber-500/40 bg-card/95 px-3 py-1.5 text-xs shadow-sm backdrop-blur">
+    <div className="ask-banner sticky top-1 z-10 mb-1 rounded-2xl border border-amber-500/40 bg-card/95 px-3 py-1.5 text-xs shadow-sm backdrop-blur">
       <button
         type="button"
-        className="flex w-full items-center gap-1.5 text-left font-medium text-amber-700 dark:text-amber-400"
+        className="flex w-full items-center gap-1.5 text-left font-medium text-amber-700 dark:font-normal dark:text-[#e2e8f0]"
         aria-expanded={open}
         onClick={() => setOpen((value) => !value)}
       >
-        <CircleHelp className="size-3.5 shrink-0" />
+        <CircleHelp className="size-3.5 shrink-0 dark:hidden" />
+        {/* Dark: the reminder is only this dot; the text is plain. */}
+        <span className="breathe mx-0.5 hidden size-1.5 shrink-0 rounded-full bg-amber-500 dark:inline-block" aria-hidden />
         <span className="min-w-0 flex-1 truncate">
           还有 {asks.length} 个问题在等你回答 · {first.authorName}：{first.text.replace(/\s+/g, " ")}
         </span>
-        <ChevronDown className={`size-3.5 shrink-0 transition-transform ${open ? "rotate-180" : ""}`} />
+        <ChevronDown className={`size-3.5 shrink-0 transition-transform dark:text-slate-400 ${open ? "rotate-180" : ""}`} />
       </button>
       {open ? (
         <div className="mt-2 flex max-h-[50vh] flex-col gap-3 overflow-y-auto pb-1">

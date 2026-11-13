@@ -90,16 +90,42 @@ export function Composer({
   // The composer floats over the thread; tell the thread how much room to
   // leave. Panels open with an animation, so this fires every frame while they
   // move, and the thread keeps its last message in view in the same frame.
+  // Written straight onto the few elements that leave room for it
+  // ([data-dock]), and the thread gets a plain padding-bottom: a CSS variable
+  // set on the column (or even, not inherited, on the thread itself) restyled
+  // the ~2000 nodes under it every frame, 10-17ms a frame while the reply bar
+  // opened (2026-11-12).
   useEffect(() => {
     const form = formRef.current
     const host = form?.parentElement
     if (!form || !host) return
+    let dock = ""
+    const apply = () => {
+      for (const node of host.querySelectorAll<HTMLElement>("[data-dock]")) {
+        // `data-dock="padding-bottom 1rem"`: that property, the composer's
+        // height plus the rest (a variable, `data-dock="--dock"`, restyles the
+        // whole subtree under it each time: even the ruler's 160 nodes cost
+        // 3ms a frame).
+        const [name, extra] = (node.dataset.dock || "--dock").split(" ")
+        const value = name.startsWith("--") ? dock : `calc(${dock} + ${extra || "0px"})`
+        if (node.style.getPropertyValue(name) !== value) node.style.setProperty(name, value)
+      }
+    }
     const observer = new ResizeObserver(() => {
-      host.style.setProperty("--dock", `${form.offsetHeight}px`)
+      dock = `${form.offsetHeight}px`
+      apply()
       host.dispatchEvent(new Event(DOCK_EVENT))
     })
+    // Ones that mount later (the flow view, another project's thread).
+    const mounts = new MutationObserver(() => {
+      if (dock) apply()
+    })
     observer.observe(form)
-    return () => observer.disconnect()
+    mounts.observe(host, { childList: true, subtree: true })
+    return () => {
+      observer.disconnect()
+      mounts.disconnect()
+    }
   }, [])
   const query = useMemo(() => {
     const match = value.match(/@([\p{L}\p{N}_-]*)$/u)
@@ -127,9 +153,17 @@ export function Composer({
   // Quick targets: every seat that is online or can be woken, so two sessions
   // of the same kind are two chips; a kind with none of those still gets its
   // first seat. A kind with one chip reads as the kind, several by seat name.
+  // A seat once shown keeps its chip while it sits here: seats that work come
+  // online and drop off again all the time, and the row would grow, shrink and
+  // rename its chips under you with every one of them.
+  const reachableNow = agents.filter((agent) => agent.status !== "offline" || agent.callable).map((agent) => agent.id)
+  const seated = new Set(agents.map((agent) => agent.id))
+  const [shownIds, setShownIds] = useState<string[]>([])
+  const keep = [...new Set([...shownIds.filter((id) => seated.has(id)), ...reachableNow])]
+  if (keep.join() !== shownIds.join()) setShownIds(keep)
   const targets = KINDS.flatMap((kind) => {
     const seats = agents.filter((agent) => kindOf(agent)?.id === kind.id)
-    const reachable = seats.filter((agent) => agent.status !== "offline" || agent.callable)
+    const reachable = seats.filter((agent) => keep.includes(agent.id))
     const picked = reachable.length > 0 ? reachable : seats.slice(0, 1)
     return picked.map((seat) => ({ kind, seat, label: picked.length > 1 ? seat.name : kind.label }))
   })
@@ -177,7 +211,7 @@ export function Composer({
     >
       {notice ? <div className="mx-auto max-w-3xl">{notice}</div> : null}
       <div
-        className={`raised mx-auto max-w-3xl rounded-[22px] transition-shadow focus-within:ring-3 focus-within:ring-ring/20 ${
+        className={`raised composer mx-auto max-w-3xl rounded-[22px] transition-shadow focus-within:ring-3 focus-within:ring-ring/20 dark:focus-within:ring-0 ${
           dragging ? "ring-3 ring-primary/40" : ""
         }`}
         onDragOver={(event) => {
@@ -411,7 +445,7 @@ function Pick({
           <button
             type="button"
             title={title}
-            className={`pill chip flex items-center gap-1 rounded-full px-2.5 py-1 text-xs whitespace-nowrap select-none ${
+            className={`pill chip ghost-chip flex items-center gap-1 rounded-full px-2.5 py-1 text-xs whitespace-nowrap select-none ${
               dragHandlers ? "touch-pan-y" : ""
             } ${gone ? "scale-50" : lifted ? "scale-110 cursor-grabbing shadow-lg ring-2 ring-primary/40" : "scale-100"}`}
             onClick={onPick}

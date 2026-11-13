@@ -1,5 +1,5 @@
-import { startTransition, useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode } from "react"
-import { ArrowRight, Check, ChevronDown, ListTree, Reply, Undo2, X, Zap } from "lucide-react"
+import { Fragment, startTransition, useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode } from "react"
+import { ArrowRight, Check, ChevronDown, ChevronsUpDown, ListTree, Loader2, Reply, Search, Square, Undo2, X, Zap } from "lucide-react"
 import { toast } from "sonner"
 
 import { api } from "@/components/room/api"
@@ -27,7 +27,9 @@ const PAGE = 40
 const FIRST = 12
 
 export function Thread({
-  messages,
+  messages: propMessages,
+  openAsks,
+  totalMessages,
   agents,
   names,
   focusName,
@@ -35,16 +37,27 @@ export function Thread({
   onReply,
   onOpenTask,
   onOpenRun,
+  onStop,
   onRewake,
   onMention,
   onExample,
   detail,
   onDetail,
+  view = "chat",
+  onView,
+  flow,
 }: {
+  // 「对话 / 流程」: the flow view (components/room/flow.tsx) takes the place of
+  // the messages; the thread stays mounted under it so a jump back is quick.
+  view?: "chat" | "flow"
+  onView?: (view: "chat" | "flow") => void
+  flow?: ReactNode
   // 「详细」: each wake's steps show in the thread too (only on this page).
   detail: boolean
   onDetail: (detail: boolean) => void
   messages: Message[]
+  openAsks?: Message[]
+  totalMessages?: number
   agents: PublicAgent[]
   names: string[]
   focusName: string | null
@@ -52,6 +65,8 @@ export function Thread({
   onReply: (message: Message) => void
   onOpenTask: (taskId: string) => void
   onOpenRun: (runId: string) => void
+  // The stop button on a working seat's bubble.
+  onStop?: (agent: PublicAgent) => void
   // Wake again a seat a restart cut off.
   onRewake: (runId: string) => void
   // Clicking an avatar @-mentions that seat in the composer.
@@ -63,7 +78,47 @@ export function Thread({
   // A smooth scroll we started is still moving; it passes through spots far
   // from the bottom, which must not count as you scrolling up.
   const gliding = useRef(false)
+
+  const scopeKey = focusName ?? "__all__"
+  const [olderByScope, setOlderByScope] = useState<Record<string, Message[]>>({})
+  const [exhaustedByScope, setExhaustedByScope] = useState<Record<string, boolean>>({})
+  const [loadingOlder, setLoadingOlder] = useState(false)
+  const [searchOpen, setSearchOpen] = useState(false)
+  const [searchQuery, setSearchQuery] = useState("")
+  const [searchHits, setSearchHits] = useState<Message[] | null>(null)
+  const [searching, setSearching] = useState(false)
+
+  // Which stretches of the history (by seq) are loaded in full, besides the live
+  // window. A search hit far back is a lone island (its reply chain); what lies
+  // between it and the window is a hole the thread marks (GapMarker) and a click fills.
+  const [spansByScope, setSpansByScope] = useState<Record<string, Span[]>>({})
+  const [filling, setFilling] = useState(false)
+  const addSpans = (add: Span[]) => {
+    setSpansByScope((map) => ({ ...map, [scopeKey]: [...(map[scopeKey] ?? []), ...add] }))
+  }
+
+  const older = useMemo(() => olderByScope[scopeKey] ?? [], [olderByScope, scopeKey])
+  const exhaustedDb = Boolean(exhaustedByScope[scopeKey])
+  const setOlder = (updater: (prev: Message[]) => Message[]) => {
+    setOlderByScope((map) => ({ ...map, [scopeKey]: updater(map[scopeKey] ?? []) }))
+  }
+  const setExhaustedDb = (value: boolean) => {
+    setExhaustedByScope((map) => ({ ...map, [scopeKey]: value }))
+  }
+
+  const messages = useMemo(() => {
+    if (older.length === 0) return propMessages
+    const merged = new Map<string, Message>()
+    for (const msg of older) merged.set(msg.id, msg)
+    for (const msg of propMessages) merged.set(msg.id, msg)
+    return [...merged.values()].sort((a, b) => a.seq - b.seq)
+  }, [older, propMessages])
+
   const talked = messages.some((message) => message.kind !== "system")
+  const gaps = useMemo(
+    () => holesBetween(spansByScope[scopeKey] ?? [], propMessages[0]?.seq ?? 0),
+    [spansByScope, scopeKey, propMessages],
+  )
 
   // New messages glide into view, as long as you were reading at the bottom.
   const seen = useRef(0)
@@ -127,14 +182,143 @@ export function Thread({
   const items = threadItems(messages)
   const hidden = Math.max(0, items.length - limit)
   const shown = hidden > 0 ? items.slice(hidden) : items
-  // Open questions whose card is in the part not drawn.
+  // The hole a click should fill sits above the first drawn item at or past its lower edge.
+  const gapAbove = new Map<number, Gap>()
+  for (const gap of gaps) {
+    const index = shown.findIndex((item) => (item.chain ? item.chain[item.chain.length - 1].seq : item.message.seq) >= gap.hi)
+    if (index > 0) gapAbove.set(index, gap)
+  }
+  // Open questions whose card is in the part not drawn (including SQLite openAsks older than 400 messages).
   const drawn = new Set(shown.flatMap((item) => (item.chain ? item.chain : [item.message]).map((message) => message.id)))
-  const pinned = hidden > 0 ? messages.filter((message) => message.ask?.state === "open" && !message.recalled && !drawn.has(message.id)) : []
-  const loadEarlier = () => {
+  const pinnedMap = new Map<string, Message>()
+  for (const askMsg of openAsks ?? []) {
+    if (askMsg.ask?.state === "open" && !askMsg.recalled && !drawn.has(askMsg.id)) {
+      pinnedMap.set(askMsg.id, askMsg)
+    }
+  }
+  if (hidden > 0) {
+    for (const message of messages) {
+      if (message.ask?.state === "open" && !message.recalled && !drawn.has(message.id)) {
+        pinnedMap.set(message.id, message)
+      }
+    }
+  }
+  const pinned = [...pinnedMap.values()].sort((a, b) => a.seq - b.seq)
+
+  const oldestSeq = messages[0]?.seq ?? 0
+  const canFetchOlderFromDb = !exhaustedDb && oldestSeq > 1 && (totalMessages === undefined || totalMessages > messages.length || focusName !== null)
+
+  const loadEarlier = async () => {
     const node = scroller.current
     anchor.current = node ? node.scrollHeight - node.scrollTop : null
     stick.current = false
-    setLimit((value) => value + PAGE)
+    if (hidden > 0) {
+      setLimit((value) => value + PAGE)
+      return
+    }
+    if (!canFetchOlderFromDb || loadingOlder) return
+    setLoadingOlder(true)
+    try {
+      const data = await api<{ raw?: Message[]; hasMore: boolean }>("/api/v1/messages", {
+        method: "POST",
+        body: JSON.stringify({
+          as: "human",
+          before: oldestSeq,
+          about: focusName || undefined,
+          limit: 80,
+          raw: true,
+        }),
+      })
+      const fetched = data.raw ?? []
+      if (fetched.length === 0 || !data.hasMore) setExhaustedDb(true)
+      if (fetched.length > 0) {
+        setOlder((prev) => [...fetched, ...prev])
+        addSpans([[Math.min(...fetched.map((message) => message.seq)), oldestSeq]])
+        setLimit((value) => value + fetched.length)
+      }
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "加载历史消息没成功")
+    } finally {
+      setLoadingOlder(false)
+    }
+  }
+
+  useEffect(() => {
+    if (!searchOpen) return
+    const q = searchQuery.trim()
+    if (!q) return
+    let cancelled = false
+    const timer = window.setTimeout(() => {
+      setSearching(true)
+      api<{ raw?: Message[] }>("/api/v1/messages", {
+        method: "POST",
+        body: JSON.stringify({ as: "human", q, about: focusName || undefined, limit: 40, raw: true }),
+      })
+        .then((data) => {
+          if (!cancelled) setSearchHits((data.raw ?? []).slice().reverse())
+        })
+        .catch(() => {
+          if (!cancelled) setSearchHits([])
+        })
+        .finally(() => {
+          if (!cancelled) setSearching(false)
+        })
+    }, 200)
+    return () => {
+      cancelled = true
+      window.clearTimeout(timer)
+    }
+  }, [searchOpen, searchQuery, focusName])
+
+  // Bring in the messages just above the hole's lower edge, 80 at a time,
+  // until they reach the island above it and the two join.
+  const fillGap = async (gap: Gap) => {
+    if (filling) return
+    setFilling(true)
+    try {
+      const data = await api<{ raw?: Message[] }>("/api/v1/messages", {
+        method: "POST",
+        body: JSON.stringify({ as: "human", before: gap.hi, about: focusName || undefined, limit: 80, raw: true }),
+      })
+      const fetched = data.raw ?? []
+      if (fetched.length === 0) {
+        addSpans([[gap.lo, gap.hi]])
+        return
+      }
+      setOlder((prev) => [...fetched, ...prev])
+      addSpans([[Math.min(...fetched.map((message) => message.seq)), gap.hi]])
+      setLimit((value) => value + fetched.length)
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "加载中间的消息没成功")
+    } finally {
+      setFilling(false)
+    }
+  }
+
+  const jumpToSearchHit = async (hit: Message) => {
+    setSearchOpen(false)
+    onView?.("chat")
+    if (!messages.some((m) => m.id === hit.id)) {
+      try {
+        const data = await api<{ raw?: Message[] }>("/api/v1/messages", {
+          method: "POST",
+          body: JSON.stringify({ as: "human", chain: hit.id, raw: true }),
+        })
+        const chainMsgs = data.raw && data.raw.length > 0 ? data.raw : [hit]
+        setOlder((prev) => [...chainMsgs, ...prev])
+        addSpans(chainMsgs.map((message): Span => [message.seq, message.seq]))
+        setLimit((v) => v + chainMsgs.length + PAGE)
+      } catch {
+        setOlder((prev) => [hit, ...prev])
+        addSpans([[hit.seq, hit.seq]])
+        setLimit((v) => v + PAGE)
+      }
+      setTimeout(() => {
+        window.dispatchEvent(new CustomEvent<Goto>(GOTO_EVENT, { detail: { kind: "message", id: hit.id } }))
+      }, 60)
+      return
+    }
+    window.dispatchEvent(new CustomEvent<Goto>(GOTO_EVENT, { detail: { kind: "message", id: hit.id } }))
   }
   useLayoutEffect(() => {
     const node = scroller.current
@@ -218,9 +402,11 @@ export function Thread({
     return () => window.removeEventListener(GOTO_EVENT, onGoto)
   }, [])
 
-  // Wakes still going whose reply isn't in yet. A question card (bench_ask)
-  // comes from the middle of a run, not its end, so it doesn't count.
-  const posted = new Set(messages.filter((message) => !message.ask).map((message) => message.runId).filter(Boolean))
+  // Wakes still going whose answer isn't in yet. Only the answer the room
+  // posts as the run ends counts (runEnd): a seat's own bench_say in the
+  // middle of the run (「已送到正在干活的…」, a question card) used to hide
+  // its bubble while it kept working.
+  const posted = new Set(messages.filter((message) => message.runEnd).map((message) => message.runId).filter(Boolean))
   // In the order they started, so a tool call doesn't bump a seat to the top.
   const live = agents
     .filter((agent) => agent.runId && !posted.has(agent.runId))
@@ -240,31 +426,141 @@ export function Thread({
           </button>
         </div>
       ) : null}
-      <div className="absolute top-2 right-3 z-10 flex rounded-full p-0.5 pill" role="radiogroup" aria-label="群聊显示">
-        {(
-          [
-            [false, "摘要"],
-            [true, "详细"],
-          ] as const
-        ).map(([value, label]) => (
-          <button
-            key={label}
-            type="button"
-            role="radio"
-            aria-checked={detail === value}
-            title={value ? "把每个模型做了什么也展开在群聊里，只有你看得到" : "群聊里只放回答"}
-            className={`rounded-full px-2.5 py-0.5 text-[11px] transition-colors ${
-              detail === value ? "bg-foreground text-background" : "text-muted-foreground hover:text-foreground"
-            }`}
-            onClick={() => onDetail(value)}
-          >
-            {label}
-          </button>
-        ))}
+      <div className="absolute top-2 right-3 z-10 flex items-center gap-1.5">
+        <button
+          type="button"
+          title="全文搜索历史群聊"
+          aria-label="搜索历史消息"
+          aria-expanded={searchOpen}
+          className={`pill grid size-6 place-items-center rounded-full transition-colors ${
+            searchOpen ? "bg-foreground text-background" : "text-muted-foreground hover:text-foreground"
+          }`}
+          onClick={() => {
+            setSearchOpen((v) => !v)
+            if (searchOpen) {
+              setSearchQuery("")
+              setSearchHits(null)
+            }
+          }}
+        >
+          <Search className="size-3" />
+        </button>
+        {onView ? (
+          <div className="flex rounded-full p-0.5 pill" role="radiogroup" aria-label="对话还是流程">
+            {(
+              [
+                ["chat", "对话"],
+                ["flow", "流程"],
+              ] as const
+            ).map(([value, label]) => (
+              <button
+                key={value}
+                type="button"
+                role="radio"
+                aria-checked={view === value}
+                title={value === "flow" ? "把每件事画成图：分给了谁、各自到哪了、哪里在等你" : "群聊"}
+                className={`rounded-full px-2.5 py-0.5 text-[11px] transition-colors ${
+                  view === value ? "bg-foreground text-background" : "text-muted-foreground hover:text-foreground"
+                }`}
+                onClick={() => onView(value)}
+              >
+                {label}
+              </button>
+            ))}
+          </div>
+        ) : null}
+        <div className={`${view === "flow" ? "hidden" : "flex"} rounded-full p-0.5 pill`} role="radiogroup" aria-label="群聊显示">
+          {(
+            [
+              [false, "摘要"],
+              [true, "详细"],
+            ] as const
+          ).map(([value, label]) => (
+            <button
+              key={label}
+              type="button"
+              role="radio"
+              aria-checked={detail === value}
+              title={value ? "把每个模型做了什么也展开在群聊里，只有你看得到" : "群聊里只放回答"}
+              className={`rounded-full px-2.5 py-0.5 text-[11px] transition-colors ${
+                detail === value ? "bg-foreground text-background" : "text-muted-foreground hover:text-foreground"
+              }`}
+              onClick={() => onDetail(value)}
+            >
+              {label}
+            </button>
+          ))}
+        </div>
       </div>
+      {searchOpen ? (
+        // .raised sets position: relative, which beats `absolute` on the same element
+        // (it left the box in the flow, squeezing the thread, and top-10 then pushed it off its slot):
+        // the box is the inner element, the outer one is what floats.
+        <div className="pointer-events-none absolute top-10 right-3 left-3 z-20 mx-auto max-w-md">
+        <div className="raised pointer-events-auto overflow-hidden rounded-2xl border bg-popover shadow-lg">
+          <div className="flex items-center gap-2 border-b px-3 py-2">
+            <Search className="size-3.5 shrink-0 text-muted-foreground" />
+            <input
+              // Not type="search": Chrome draws its own clear × inside it, next to our close button.
+              type="text"
+              enterKeyHint="search"
+              autoComplete="off"
+              value={searchQuery}
+              onChange={(event) => {
+                const next = event.target.value
+                setSearchQuery(next)
+                if (!next.trim()) {
+                  setSearchHits(null)
+                  setSearching(false)
+                }
+              }}
+              placeholder="搜索房间全部历史消息…"
+              autoFocus
+              className="min-w-0 flex-1 bg-transparent text-xs outline-none"
+            />
+            {searching ? <Loader2 className="size-3.5 animate-spin text-muted-foreground" /> : null}
+            <button
+              type="button"
+              className="rounded p-0.5 text-muted-foreground hover:text-foreground"
+              aria-label="关闭搜索"
+              onClick={() => {
+                setSearchOpen(false)
+                setSearchQuery("")
+                setSearchHits(null)
+              }}
+            >
+              <X className="size-3.5" />
+            </button>
+          </div>
+          {searchHits !== null ? (
+            <div className="max-h-64 overflow-y-auto p-1">
+              {searchHits.length === 0 ? (
+                <p className="px-3 py-4 text-center text-xs text-muted-foreground">没有找到匹配的历史消息</p>
+              ) : (
+                searchHits.map((hit) => (
+                  <button
+                    key={hit.id}
+                    type="button"
+                    className="flex w-full flex-col gap-0.5 rounded-xl px-2.5 py-1.5 text-left text-xs hover:bg-muted"
+                    onClick={() => void jumpToSearchHit(hit)}
+                  >
+                    <div className="flex items-center justify-between gap-2">
+                      <span className="font-medium">{hit.authorName}</span>
+                      <span className="text-[10px] text-muted-foreground">{clock(hit.createdAt)}</span>
+                    </div>
+                    <p className="line-clamp-2 text-muted-foreground">{previewText(hit)}</p>
+                  </button>
+                ))
+              )}
+            </div>
+          ) : null}
+        </div>
+        </div>
+      ) : null}
+      {view === "flow" ? flow : null}
       <div
         ref={scroller}
-        className="min-h-0 flex-1 overflow-y-auto"
+        className={`min-h-0 flex-1 overflow-y-auto ${view === "flow" ? "hidden" : ""}`}
         onScroll={(event) => {
           if (gliding.current) return
           const node = event.currentTarget
@@ -278,30 +574,69 @@ export function Thread({
         {/* --live-gap: this column's gap, for a 「正在做」 row to give back as it closes (live-close). */}
         <div
           ref={content}
+          data-dock="padding-bottom 1rem"
           className="mx-auto flex max-w-3xl flex-col gap-1 px-4 pt-6 pb-[calc(var(--dock,8rem)+1rem)] md:px-6 [&>.live-slot]:[--live-gap:0.25rem]"
         >
           <PinnedAsks asks={pinned} />
           {!talked ? <Welcome onExample={onExample} /> : null}
-          {hidden > 0 ? (
+          {hidden > 0 || canFetchOlderFromDb ? (
             <button
               type="button"
-              className="chip mx-auto my-2 rounded-full px-3 py-1 text-xs text-muted-foreground hover:text-foreground"
-              onClick={loadEarlier}
+              disabled={loadingOlder}
+              className="chip mx-auto my-2 flex items-center gap-1.5 rounded-full px-3 py-1 text-xs text-muted-foreground hover:text-foreground disabled:opacity-50"
+              onClick={() => void loadEarlier()}
             >
-              加载更早的 {Math.min(PAGE, hidden)} 条（还有 {hidden} 条没显示）
+              {loadingOlder ? <Loader2 className="size-3 animate-spin" /> : null}
+              {hidden > 0
+                ? `加载更早的 ${Math.min(PAGE, hidden)} 条（还有 ${hidden} 条没显示）`
+                : "从历史记录加载更早的消息"}
             </button>
           ) : null}
-          {shown.map((item) =>
-            item.chain ? (
-              <ReplyChain key={item.chain[0].id} chain={item.chain} line={line} />
-            ) : (
-              row(item.message, item.previous)
-            ),
-          )}
-          <LiveDrawer agents={live} detail={detail} onOpenRun={onOpenRun} onMention={onMention} />
+          {shown.map((item, index) => {
+            const gap = gapAbove.get(index)
+            return (
+              <Fragment key={item.chain ? item.chain[0].id : item.message.id}>
+                {gap ? <GapMarker busy={filling} onFill={() => void fillGap(gap)} /> : null}
+                {item.chain ? <ReplyChain chain={item.chain} line={line} /> : row(item.message, item.previous)}
+              </Fragment>
+            )
+          })}
+          <LiveDrawer agents={live} detail={detail} onOpenRun={onOpenRun} onStop={onStop} onMention={onMention} />
         </div>
       </div>
     </div>
+  )
+}
+
+// seqs from..to, all of them loaded.
+type Span = [number, number]
+// Nothing between lo and hi is loaded.
+type Gap = { lo: number; hi: number }
+
+// The holes between the loaded stretches: those fetched on top of the live
+// window (which runs from `liveFrom` to the latest).
+function holesBetween(spans: Span[], liveFrom: number): Gap[] {
+  const all = [...spans, [liveFrom, Infinity] as Span].sort((a, b) => a[0] - b[0])
+  const solid: Span[] = []
+  for (const span of all) {
+    const last = solid[solid.length - 1]
+    if (last && span[0] <= last[1]) last[1] = Math.max(last[1], span[1])
+    else solid.push([span[0], span[1]])
+  }
+  return solid.slice(1).map((span, index) => ({ lo: solid[index][1], hi: span[0] }))
+}
+
+function GapMarker({ busy, onFill }: { busy: boolean; onFill: () => void }) {
+  return (
+    <button
+      type="button"
+      disabled={busy}
+      className="chip mx-auto my-3 flex items-center gap-1.5 rounded-full px-3 py-1 text-xs text-muted-foreground hover:text-foreground disabled:opacity-50"
+      onClick={onFill}
+    >
+      {busy ? <Loader2 className="size-3 animate-spin" /> : <ChevronsUpDown className="size-3" />}
+      这里和下面之间还有没显示的消息 · 点这里补上
+    </button>
   )
 }
 
@@ -998,11 +1333,13 @@ function LiveDrawer({
   agents: real,
   detail,
   onOpenRun,
+  onStop,
   onMention,
 }: {
   agents: PublicAgent[]
   detail: boolean
   onOpenRun: (runId: string) => void
+  onStop?: (agent: PublicAgent) => void
   onMention: (name: string) => void
 }) {
   const [open, setOpen] = useState(false)
@@ -1017,7 +1354,7 @@ function LiveDrawer({
     .sort((a, b) => (a.runStartedAt ?? 0) - (b.runStartedAt ?? 0))
     .map((agent) => (
       <Leaving key={agent.id} leaving={leavingIds.has(agent.id)} color={seatLook(agent).color}>
-        <LiveRun agent={agent} detail={detail} onOpenRun={onOpenRun} onMention={onMention} />
+        <LiveRun agent={agent} detail={detail} onOpenRun={onOpenRun} onStop={onStop} onMention={onMention} />
       </Leaving>
     ))
   if (agents.length === 0 && gone.length === 0) return null
@@ -1074,11 +1411,13 @@ function LiveRun({
   agent,
   detail,
   onOpenRun,
+  onStop,
   onMention,
 }: {
   agent: PublicAgent
   detail: boolean
   onOpenRun: (runId: string) => void
+  onStop?: (agent: PublicAgent) => void
   onMention: (name: string) => void
 }) {
   const look = seatLook(agent)
@@ -1102,7 +1441,9 @@ function LiveRun({
       <span className="shrink-0 text-sm">
         <Quiet agent={agent} now={now} />
       </span>
-      <ListTree className="size-3.5 shrink-0 text-muted-foreground" aria-label={shown ? "查看过程" : undefined} />
+      {/* Room for the stop button, which sits outside this (a button can't
+          hold a button); only in the unseen copy that measures. */}
+      {shown ? null : <span className="size-7 shrink-0" />}
     </>
   )
   return (
@@ -1121,24 +1462,43 @@ function LiveRun({
         {detail ? (
           agent.runId ? <RunTrail runId={agent.runId} /> : null
         ) : (
-          <button
-            type="button"
-            className={`bubble working flex max-w-full items-center gap-2.5 rounded-2xl rounded-tl-md bg-card/85 px-3.5 py-2.5 text-left transition-[width] duration-300 ease-out motion-reduce:transition-none ${
+          // The bubble opens the process; the square at its end stops the run
+          // (it used to be an icon that opened the process too).
+          <div
+            className={`bubble working relative flex max-w-full items-center rounded-2xl rounded-tl-md bg-card/85 transition-[width] duration-300 ease-out motion-reduce:transition-none ${
               width ? "" : "w-fit"
             }`}
             style={{ "--halo": look.color, width } as CSSProperties}
-            title="查看过程"
-            onClick={() => agent.runId && onOpenRun(agent.runId)}
           >
-            {inside(true)}
+            <button
+              type="button"
+              className="flex min-w-0 flex-1 items-center gap-2.5 self-stretch rounded-l-2xl rounded-tl-md py-2.5 pr-2.5 pl-3.5 text-left"
+              title="查看过程"
+              onClick={() => agent.runId && onOpenRun(agent.runId)}
+            >
+              {inside(true)}
+            </button>
+            {onStop && !agent.demo ? (
+              <button
+                type="button"
+                className="mr-2 grid size-7 shrink-0 place-items-center rounded-full text-muted-foreground transition-colors hover:bg-red-500/15 hover:text-red-600 dark:hover:text-red-400"
+                title="停止：停掉这次唤起，排在后面的也一起取消"
+                aria-label={`停下 ${agent.name}`}
+                onClick={() => onStop(agent)}
+              >
+                <Square className="size-3 fill-current" />
+              </button>
+            ) : (
+              <span className="mr-2 size-7 shrink-0" />
+            )}
             <span
               ref={measure}
-              className="pointer-events-none invisible absolute top-0 left-0 flex w-max items-center gap-2.5 px-3.5 py-2.5"
+              className="pointer-events-none invisible absolute top-0 left-0 flex w-max items-center gap-2.5 py-2.5 pr-2 pl-3.5"
               aria-hidden
             >
               {inside(false)}
             </span>
-          </button>
+          </div>
         )}
       </div>
     </article>

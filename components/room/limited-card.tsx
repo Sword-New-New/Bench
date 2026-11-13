@@ -1,18 +1,18 @@
 "use client"
 
 import { useState } from "react"
-import { Check, Clock, Hourglass } from "lucide-react"
+import { ArrowRightLeft, Check, Clock, Hourglass } from "lucide-react"
 import { toast } from "sonner"
 
 import { api } from "@/components/room/api"
+import { openSeatProfileFor } from "@/components/room/seat-profile-dialog"
 import { Button } from "@/components/ui/button"
 import { whenText } from "@/lib/limits"
 import type { Message } from "@/lib/types"
 
 // Under 「X 撞到额度」: what ran out, and what to do about the turn it cut
-// short. Like Claude Code's own prompt after a limit: carry on by itself once
-// the allowance resets, carry on now, or leave it. The room does the waiting
-// (lib/summon.ts limitChoice); this only picks.
+// short. Carry on by itself once the allowance resets, retry now, switch the
+// seat to another AI vendor to take over immediately, or dismiss.
 
 export function LimitedCard({ message }: { message: Message }) {
   const limited = message.limited
@@ -31,9 +31,21 @@ export function LimitedCard({ message }: { message: Message }) {
     }
   }
 
+  const openRebind = () => {
+    openSeatProfileFor(limited.agentId, { tab: "rebind", fromRunId: limited.runId })
+  }
+
   const resets = limited.resetsAt
   let body
-  if (limited.state === "resumed") {
+  if (limited.state === "rebound") {
+    body = (
+      <span className="inline-flex items-center gap-1">
+        <Check className="size-3" />
+        已换 {limited.reboundTo ?? "其他客户端"} 顶替 {limited.agentName} 接着做了
+        {limited.at ? ` · ${whenText(limited.at)}` : ""}
+      </span>
+    )
+  } else if (limited.state === "resumed") {
     body = (
       <span className="inline-flex items-center gap-1">
         <Check className="size-3" />
@@ -47,6 +59,10 @@ export function LimitedCard({ message }: { message: Message }) {
       <span className="inline-flex flex-wrap items-center justify-center gap-1.5">
         <Hourglass className="size-3" />
         {limited.at ? `${whenText(limited.at)} 自动叫醒 ${limited.agentName} 接着做` : "等重置后自动接着做"}
+        <Button type="button" size="xs" variant="outline" disabled={sending} onClick={openRebind}>
+          <ArrowRightLeft className="size-3" />
+          不等了，换别的 AI 顶替…
+        </Button>
         <Button type="button" size="xs" variant="ghost" disabled={sending} onClick={() => void choose("cancel")}>
           取消
         </Button>
@@ -62,8 +78,12 @@ export function LimitedCard({ message }: { message: Message }) {
             重置后自动继续 · {whenText(resets)}
           </Button>
         ) : null}
-        <Button type="button" size="xs" variant="outline" disabled={sending} onClick={() => void choose("now", "叫醒了，会带着原来那些消息接着做")}>
+        <Button type="button" size="xs" variant={resets ? "outline" : "default"} disabled={sending} onClick={() => void choose("now", "叫醒了，会带着原来那些消息接着做")}>
           现在重试
+        </Button>
+        <Button type="button" size="xs" variant="outline" disabled={sending} onClick={openRebind}>
+          <ArrowRightLeft className="size-3" />
+          换别的 AI 顶替…
         </Button>
         <Button type="button" size="xs" variant="ghost" disabled={sending} onClick={() => void choose("dismiss")}>
           不用了

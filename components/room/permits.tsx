@@ -106,7 +106,8 @@ function PermitCard({ item }: { item: PermitRequest }) {
 export function PermitBar({ room }: { room: RoomSnapshot }) {
   const items = room.permits ?? []
   return (
-    <Reveal open={items.length > 0} className="flex flex-col gap-2 pb-2">
+    // px/pt: room for the cards' ring, which Reveal would clip (see SummaryNudge).
+    <Reveal open={items.length > 0} className="flex flex-col gap-2 px-px pt-px pb-2">
       {items.map((item) => (
         <PermitCard key={item.id} item={item} />
       ))}
@@ -120,6 +121,24 @@ export function FullAccessToggle({ agent }: { agent: PublicAgent }) {
   const [busy, setBusy] = useState(false)
   if (agent.agentName !== "claude" || !agent.runId) return null
   const on = Boolean(agent.fullAccess)
+  // 「默认开启全部权限」: it can be taken back for this wake; the next one
+  // has it again.
+  const auto = Boolean(agent.autoFull)
+  const label = auto ? (on ? "默认全部权限 · 这次收回" : "这次已收回 · 恢复") : on ? "完整权限中 · 收回" : "给完整权限"
+  const hint = auto
+    ? on
+      ? "这次唤起先收回：之后的工具调用又要你逐条确认；下次叫醒它自动恢复。要一直关，在左栏它的「…」菜单里取消「默认开启全部权限」"
+      : "恢复这个席位默认的全部权限"
+    : on
+      ? "收回：之后的工具调用又要你逐条确认"
+      : "这次唤起剩下的工具调用都不用再确认，唤起结束自动收回"
+  const done = auto
+    ? on
+      ? `这次唤起先收回了 ${agent.name} 的全部权限，下次叫醒自动恢复`
+      : `${agent.name} 的默认全部权限恢复了`
+    : on
+      ? `收回了 ${agent.name} 的完整权限`
+      : `${agent.name} 这次唤起有完整权限了`
   return (
     <button
       type="button"
@@ -127,15 +146,15 @@ export function FullAccessToggle({ agent }: { agent: PublicAgent }) {
       className={`inline-flex items-center gap-1 rounded-full px-1.5 py-0.5 text-[11px] disabled:opacity-50 ${
         on ? "bg-amber-500/15 text-amber-700 hover:bg-amber-500/25 dark:text-amber-300" : "text-muted-foreground hover:bg-muted"
       }`}
-      title={on ? "收回：之后的工具调用又要你逐条确认" : "这次唤起剩下的工具调用都不用再确认，唤起结束自动收回"}
+      title={hint}
       onClick={async () => {
         setBusy(true)
-        if (await post({ agentId: agent.id, full: !on })) toast.success(on ? `收回了 ${agent.name} 的完整权限` : `${agent.name} 这次唤起有完整权限了`)
+        if (await post({ agentId: agent.id, full: !on })) toast.success(done)
         setBusy(false)
       }}
     >
       {on ? <ShieldCheck className="size-3" /> : <ShieldOff className="size-3" />}
-      {on ? "完整权限中 · 收回" : "给完整权限"}
+      {label}
     </button>
   )
 }

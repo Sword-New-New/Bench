@@ -1,25 +1,22 @@
 "use client"
 
-import { useEffect, useRef, useState, useSyncExternalStore, ViewTransition } from "react"
+import { useEffect, useRef, useSyncExternalStore, ViewTransition } from "react"
 import { Plus, Settings2 } from "lucide-react"
 
 import { Avatar, seatLook } from "@/components/room/bits"
-import { ProjectWreck } from "@/components/room/project-wreck"
 import type { BotMood } from "@/components/room/bot"
 import type { BenchSeat, Project } from "@/lib/types"
 
-// The projects down the left edge, like a chat app's group list, so what
-// happens in the others shows without opening them:
+// The projects, as the 「项目」 tier of the left column (left-pane.tsx), so
+// what happens in the others shows without opening them:
 // - a red count: things there waiting on the user (permits, questions,
 //   sign-offs; `waiting` from listProjects),
 // - a dot: something said there since the user last had it open,
-// - who is there: on very wide screens each project is a card with a bench
-//   ("并坐") and up to three of its seats sitting on it, the working first;
-//   the open project's bench is empty, its seats are out in the room. On
-//   narrower ones a column of avatars with a green ring when a seat works.
+// - who is there: a bench ("并坐") with up to three of its seats sitting on
+//   it, the working first, and how many seats and how many at work,
 // - its settings (name, folder, delete): a gear that shows on hover, or a
 //   right click on the project.
-// Below lg the header's menu does the job.
+// Below lg the header's menu switches too.
 
 // When the user last had each project open, kept in this browser.
 const SEEN_KEY = "bench-project-seen"
@@ -62,14 +59,20 @@ export function seatFlight(id: string) {
 // Seats hop once when they said something after the page loaded.
 const PAGE_AT = typeof window === "undefined" ? 0 : Date.now()
 
-// `picked`: clicked, its room still on the way; shown at once so the click
-// is felt, without touching `on` (that would empty the bench before the
-// seats can fly).
-type Item = { project: Project; on: boolean; picked: boolean; unread: boolean; notes: string[] }
+// `anchor`: the card the room grows out of and shrinks back into (left-pane.tsx):
+// the one clicked, or else the open project. Only it carries the shared
+// names, so nothing else is lifted out while the tiers swap.
+type Item = { project: Project; on: boolean; anchor: boolean; unread: boolean; notes: string[] }
 
-export function ProjectRail({
+// The 「项目」 tier of the left column (left-pane.tsx): a card per project,
+// then 「新建项目」. `picking`: clicked, on its way in; the other cards fade
+// off away from it at once (CSS: .tier-leaving), before its room is there.
+export function ProjectList({
   projects,
   current,
+  picking,
+  motion,
+  cardRef,
   onPick,
   onPrefetch,
   onCreate,
@@ -77,6 +80,11 @@ export function ProjectRail({
 }: {
   projects: Project[]
   current: string | null
+  picking: string | null
+  // "out": the tier just opened; the cards come in outwards from the anchor.
+  motion: "in" | "out" | null
+  // The anchor card's button, for focus when the tier opens.
+  cardRef: React.Ref<HTMLButtonElement>
   onPick: (id: string) => void
   // Fetch a project's room ahead, while the pointer is on it.
   onPrefetch?: (id: string) => void
@@ -84,19 +92,15 @@ export function ProjectRail({
   onEdit: (project: Project) => void
 }) {
   const seenAt = useSyncExternalStore(subscribe, seenMap, () => EMPTY)
-  const [picked, setPicked] = useState<string | null>(null)
   const hoverTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
   useEffect(() => () => {
     if (hoverTimer.current) clearTimeout(hoverTimer.current)
   }, [])
   const handlers: Handlers = {
-    onPick: (id) => {
-      setPicked(id)
-      onPick(id)
-    },
+    onPick,
     onEdit,
     // A short rest on a project before fetching, so sweeping the pointer
-    // across the rail doesn't fetch every room; a press fetches at once.
+    // across the list doesn't fetch every room; a press fetches at once.
     ahead: (id, now) => {
       if (hoverTimer.current) clearTimeout(hoverTimer.current)
       hoverTimer.current = null
@@ -105,9 +109,46 @@ export function ProjectRail({
       else hoverTimer.current = setTimeout(() => onPrefetch(id), AHEAD_AFTER)
     },
   }
+  useSeen(projects, current)
 
-  // The open project counts as read up to now; a project the browser has
-  // never recorded starts as read, so a first visit isn't all dots.
+  const anchorId = picking ?? current
+  const items: Item[] = projects.map((project) => {
+    const on = project.id === current
+    const unread = !on && project.lastOtherAt > (seenAt[project.id] ?? project.lastOtherAt)
+    const notes = [
+      project.waiting ? `${project.waiting} 件等你处理` : "",
+      project.working ? `${project.working} 个在干活` : "",
+      unread ? "有新消息" : "",
+    ].filter(Boolean)
+    return { project, on, anchor: project.id === anchorId, unread, notes }
+  })
+  const at = Math.max(0, items.findIndex((item) => item.anchor))
+
+  return (
+    <div className={`flex flex-col gap-2 ${picking ? "tier-leaving" : ""}`}>
+      {items.map((item, index) => (
+        <div
+          key={item.project.id}
+          className="tier-card"
+          // Which side of the anchor and how far: the cards leave away from
+          // it and come back outwards from it, one after another (globals.css).
+          style={{ "--dir": Math.sign(index - at), "--far": Math.min(Math.abs(index - at), 6) } as React.CSSProperties}
+          data-anchor={item.anchor || undefined}
+          data-motion={motion === "out" && !item.anchor ? "in" : undefined}
+        >
+          <Card item={item} buttonRef={item.anchor ? cardRef : undefined} {...handlers} />
+        </div>
+      ))}
+      <div className="tier-card" style={{ "--dir": 1, "--far": Math.min(items.length - at, 6) } as React.CSSProperties} data-motion={motion === "out" ? "in" : undefined}>
+        <NewButton onCreate={onCreate} className="h-11 w-full" label="新建项目" />
+      </div>
+    </div>
+  )
+}
+
+// The open project counts as read up to now; a project the browser has
+// never recorded starts as read, so a first visit isn't all dots.
+export function useSeen(projects: Project[], current: string | null) {
   useEffect(() => {
     const next = { ...seenMap() }
     let changed = false
@@ -125,36 +166,6 @@ export function ProjectRail({
     }
     if (changed) saveSeen(next)
   }, [projects, current])
-
-  const items: Item[] = projects.map((project) => {
-    const on = project.id === current
-    const isPicked = !on && project.id === picked
-    const unread = !on && project.lastOtherAt > (seenAt[project.id] ?? project.lastOtherAt)
-    const notes = [
-      project.waiting ? `${project.waiting} 件等你处理` : "",
-      project.working ? `${project.working} 个在干活` : "",
-      unread ? "有新消息" : "",
-    ].filter(Boolean)
-    return { project, on, picked: isPicked, unread, notes }
-  })
-
-  return (
-    <>
-      <nav aria-label="项目" className="hidden w-16 shrink-0 flex-col items-center gap-2 overflow-y-auto py-3 lg:flex xl:hidden">
-        {items.map((item) => (
-          <Tile key={item.project.id} item={item} {...handlers} />
-        ))}
-        <NewButton onCreate={onCreate} className="size-11" />
-      </nav>
-      <nav aria-label="项目" data-tour="project-rail" className="hidden w-[176px] shrink-0 flex-col gap-2 overflow-y-auto py-3 pr-1 pl-3 xl:flex">
-        {items.map((item) => (
-          <Card key={item.project.id} item={item} {...handlers} />
-        ))}
-        <NewButton onCreate={onCreate} className="h-11 w-full" label="新建项目" />
-      </nav>
-      <ProjectWreck />
-    </>
-  )
 }
 
 type Handlers = {
@@ -183,43 +194,27 @@ function settingsOnRightClick(project: Project, onEdit: (project: Project) => vo
   }
 }
 
-function Tile({ item, onPick, onEdit, ahead }: { item: Item } & Handlers) {
-  const { project, on, picked, unread, notes } = item
+// The project's dot and name: on the anchor card they share a name with the
+// room's title (left-pane.tsx), and slide there when the room opens.
+export function ProjectTitle({ project, shared, strong }: { project: Pick<Project, "id" | "name">; shared: boolean; strong: boolean }) {
+  const title = (
+    <span className="inline-flex max-w-full min-w-0 items-center gap-1.5 align-middle">
+      <span className="size-2 shrink-0 rounded-full" style={{ background: tint(project.id) }} aria-hidden="true" />
+      <span className={`min-w-0 truncate text-[13px] leading-5 ${strong ? "font-semibold" : "font-medium text-foreground/80"}`}>{project.name}</span>
+    </span>
+  )
+  if (!shared) return title
   return (
-    <div className="group relative flex w-full justify-center" onContextMenu={settingsOnRightClick(project, onEdit)}>
-      <span
-        aria-hidden="true"
-        className={`absolute top-1/2 left-0 w-1 -translate-y-1/2 rounded-r-full bg-foreground transition-all duration-200 ${
-          on || picked ? "h-8" : unread ? "h-2" : "h-0"
-        }`}
-      />
-      <button
-        type="button"
-        data-wreck={project.id}
-        data-wreck-kind="tile"
-        onClick={() => onPick(project.id)}
-        {...aheadProps(project.id, ahead)}
-        aria-busy={picked || undefined}
-        aria-current={on ? "page" : undefined}
-        aria-label={[project.name, ...notes].join("，")}
-        title={[project.name, ...notes].join(" · ")}
-        className={`relative grid size-11 place-items-center text-base font-semibold text-white transition-all duration-200 ${
-          on || picked ? "rounded-xl" : "rounded-2xl hover:rounded-xl"
-        } ${project.working ? "ring-2 ring-emerald-500 ring-offset-2 ring-offset-background" : ""}`}
-        style={{ background: tint(project.id) }}
-      >
-        {firstChar(project.name)}
-        <Badge waiting={project.waiting} unread={unread} />
-      </button>
-      <Gear project={project} onEdit={onEdit} className="-bottom-1 left-[calc(50%+12px)] size-5" />
-    </div>
+    <ViewTransition name="tier-title" share="tier-title" default="none">
+      {title}
+    </ViewTransition>
   )
 }
 
-function Card({ item, onPick, onEdit, ahead }: { item: Item } & Handlers) {
-  const { project, on, picked, unread, notes } = item
+function Card({ item, buttonRef, onPick, onEdit, ahead }: { item: Item; buttonRef?: React.Ref<HTMLButtonElement> } & Handlers) {
+  const { project, on, anchor, unread, notes } = item
   const rest = Math.max(0, project.seats - project.bench.length)
-  return (
+  const card = (
     <div
       data-wreck={project.id}
       data-wreck-kind="card"
@@ -227,21 +222,20 @@ function Card({ item, onPick, onEdit, ahead }: { item: Item } & Handlers) {
       onContextMenu={settingsOnRightClick(project, onEdit)}
     >
       <button
+        ref={buttonRef}
         type="button"
         onClick={() => onPick(project.id)}
         {...aheadProps(project.id, ahead)}
-        aria-busy={picked || undefined}
         aria-current={on ? "page" : undefined}
-        aria-label={[project.name, ...notes].join("，")}
+        aria-label={[project.name, on ? "当前项目，点了回到房间" : "", ...notes].filter(Boolean).join("，")}
         title={[project.name, ...notes, project.names.length ? `席位：${project.names.join("、")}` : ""].filter(Boolean).join(" · ")}
         className={`relative w-full rounded-2xl px-3 pt-2 pb-2.5 text-left transition-colors duration-200 ${
-          on ? "frost ring-1 ring-foreground/15" : picked ? "bg-foreground/[0.07] ring-1 ring-foreground/10" : "hover:bg-foreground/[0.04]"
+          on || anchor ? "frost ring-1 ring-foreground/15" : "bg-foreground/[0.03] ring-1 ring-foreground/[0.06] hover:bg-foreground/[0.06]"
         }`}
       >
         <span className="flex items-center gap-1.5">
-          <span className="size-2 shrink-0 rounded-full" style={{ background: tint(project.id) }} aria-hidden="true" />
-          <span className={`min-w-0 flex-1 truncate text-[13px] leading-5 ${on || picked || unread ? "font-semibold" : "font-medium text-foreground/80"}`}>
-            {project.name}
+          <span className="min-w-0 flex-1">
+            <ProjectTitle project={project} shared={anchor} strong={on || anchor || unread} />
           </span>
           {project.waiting ? (
             <span className="grid h-[18px] min-w-[18px] shrink-0 place-items-center rounded-full bg-destructive px-1 text-[11px] leading-none font-semibold text-white transition-opacity group-hover:opacity-0">
@@ -251,11 +245,25 @@ function Card({ item, onPick, onEdit, ahead }: { item: Item } & Handlers) {
             <span className="size-2 shrink-0 rounded-full bg-primary transition-opacity group-hover:opacity-0" aria-hidden="true" />
           ) : null}
         </span>
-        <Bench seats={on ? [] : project.bench} rest={on ? 0 : rest} note={on ? "都在房间里" : project.seats ? "" : "空房间"} />
+        <span className="flex items-end gap-3">
+          <Bench seats={project.bench} rest={rest} note={project.seats ? "" : "空房间"} />
+          <span className="mb-[-4px] ml-auto shrink-0 text-right text-[11px] leading-4 text-muted-foreground">
+            {project.working ? <span className="block text-cyan-700 dark:text-cyan-300">{project.working} 个在做</span> : null}
+            <span className="block">{project.seats ? `${project.seats} 个席位` : ""}</span>
+            {on ? <span className="block font-medium text-foreground/70">当前</span> : null}
+          </span>
+        </span>
       </button>
       {/* Over the red count while the pointer is on the card; the count is in its title too. */}
       <Gear project={project} onEdit={onEdit} className="top-1.5 right-1.5 size-6" />
     </div>
+  )
+  if (!anchor) return card
+  // Grows into the room's panel, and the panel shrinks back into it.
+  return (
+    <ViewTransition name="tier-pane" share="tier-pane" default="none">
+      {card}
+    </ViewTransition>
   )
 }
 
@@ -283,7 +291,7 @@ function Bench({ seats, rest, note }: { seats: BenchSeat[]; rest: number; note: 
   // Working seats jump in a quick wave, in seat order.
   let turns = 0
   return (
-    <span className="relative mt-1.5 block h-[50px]" aria-hidden="true">
+    <span className="relative mt-1.5 block h-[50px] w-[150px] shrink-0" aria-hidden="true">
       {note ? (
         <span className="absolute inset-x-0 bottom-1 text-center text-[11px] leading-none text-muted-foreground">{note}</span>
       ) : (
@@ -357,18 +365,6 @@ function Sitter({ seat, turn }: { seat: BenchSeat; turn: number }) {
   )
 }
 
-function Badge({ waiting, unread }: { waiting: number; unread: boolean }) {
-  if (waiting) {
-    return (
-      <span className="absolute -top-1.5 -right-1.5 grid h-5 min-w-5 place-items-center rounded-full bg-destructive px-1 text-[11px] leading-none font-semibold text-white ring-2 ring-background">
-        {waiting > 99 ? "99+" : waiting}
-      </span>
-    )
-  }
-  if (unread) return <span className="absolute -top-0.5 -right-0.5 size-3 rounded-full bg-primary ring-2 ring-background" />
-  return null
-}
-
 function NewButton({ onCreate, className, label }: { onCreate: () => void; className: string; label?: string }) {
   return (
     <button
@@ -384,12 +380,8 @@ function NewButton({ onCreate, className, label }: { onCreate: () => void; class
   )
 }
 
-function firstChar(name: string) {
-  return Array.from(name.trim())[0]?.toUpperCase() ?? "?"
-}
-
 // A steady colour per project, from its id.
-function tint(id: string) {
+export function tint(id: string) {
   let hash = 0
   for (const char of id) hash = (hash * 31 + char.charCodeAt(0)) | 0
   return `oklch(0.62 0.13 ${Math.abs(hash) % 360})`

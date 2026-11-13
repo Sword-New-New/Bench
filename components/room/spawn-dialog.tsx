@@ -37,6 +37,8 @@ function short(dir: string) {
   return home.length > 48 ? `${home.slice(0, 20)}…${home.slice(-26)}` : home
 }
 
+const AUTO_FULL_KEY = "bench-spawn-auto-full"
+
 // 「开新会话」: pick a name, a folder and maybe a first task; the room creates
 // the session and seats it. The folder goes with the project (its folder in
 // the project settings); opened from a seat's menu (`from`), with that seat's.
@@ -65,6 +67,16 @@ export function SpawnDialog({
   const [typed, setTyped] = useState("")
   const [browsing, setBrowsing] = useState(false)
   const [sending, setSending] = useState(false)
+  // 「默认开启全部权限」: the last choice, kept in this browser; off at first.
+  const [autoFull, setAutoFull] = useState(() => {
+    try {
+      return localStorage.getItem(AUTO_FULL_KEY) === "on"
+    } catch {
+      return false
+    }
+  })
+  // Only Claude Code's permission prompts come to the page (lib/permits.ts).
+  const asksOnPage = kind === "claude"
 
   // Fresh fields each time it opens.
   const [shown, setShown] = useState<string | null>(null)
@@ -146,6 +158,7 @@ export function SpawnDialog({
           window: limits.window ? Number(limits.window) : null,
           compactPct: limits.pct,
           workspace: { mode, path: folder },
+          autoFull: asksOnPage && autoFull,
         }),
       })
       toast.success(`${result.agent.name} 入座了`, {
@@ -275,6 +288,28 @@ export function SpawnDialog({
               className="min-h-20 text-sm"
             />
           </div>
+
+          {asksOnPage ? (
+            <label className="flex cursor-pointer items-start gap-2.5 rounded-xl bg-foreground/[0.04] px-3 py-2.5 ring-1 ring-foreground/[0.06]">
+              <input
+                type="checkbox"
+                checked={autoFull}
+                onChange={(event) => {
+                  setAutoFull(event.target.checked)
+                  try {
+                    localStorage.setItem(AUTO_FULL_KEY, event.target.checked ? "on" : "off")
+                  } catch {}
+                }}
+                className="mt-0.5 size-4 shrink-0 accent-primary"
+              />
+              <span className="space-y-0.5">
+                <span className="block text-sm font-medium">默认开启全部权限</span>
+                <span className="block text-xs leading-5 text-muted-foreground">
+                  每次被叫醒都直接能跑命令、改文件，不再一条条弹出来等你点允许。之后在它的「…」菜单里随时能关。sudo 密码还是只有你能输。
+                </span>
+              </span>
+            </label>
+          ) : null}
 
           <DialogFooter>
             <Button type="button" variant="ghost" onClick={onClose}>

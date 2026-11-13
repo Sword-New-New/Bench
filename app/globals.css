@@ -171,7 +171,8 @@
   --panel-rim: oklch(1 0 0 / 0.28);
   --panel-rim-low: oklch(1 0 0 / 0.12);
   --panel-edge: oklch(1 0 0 / 0.03);
-  --panel-glow: oklch(0.72 0.1 55 / 0.16);
+  /* Cool, not warm: the dark room has no warm light anywhere (2026-11-12). */
+  --panel-glow: oklch(0.55 0.12 262 / 0.14);
   --ambient-dot: oklch(1 0 0 / 0.08);
   --ambient-alpha: 0.32;
 }
@@ -305,77 +306,6 @@
     0 0 0 1px var(--panel-edge),
     0 24px 64px -20px var(--glass-shadow),
     0 0 48px -8px var(--panel-glow);
-}
-
-/*
- * Sticky notes: the right column is a few notes stuck on the backdrop
- * instead of one more panel. Each tone is a paper color; data-tilt leans it
- * a little, and it straightens up while you work on it.
- */
-.note {
-  --paper: oklch(0.96 0.07 95);
-  --paper-ink: oklch(0.3 0.04 80);
-  --paper-shade: oklch(0.45 0.06 80 / 0.22);
-  position: relative;
-  border-radius: 3px 3px 14px 3px;
-  background: linear-gradient(170deg, var(--paper), color-mix(in oklch, var(--paper) 88%, var(--paper-ink)));
-  color: var(--paper-ink);
-  box-shadow:
-    0 1px 1px var(--paper-shade),
-    0 10px 18px -12px var(--paper-shade);
-  rotate: var(--tilt, 0deg);
-  transition: rotate 0.35s cubic-bezier(0.34, 1.56, 0.64, 1), box-shadow 0.2s ease;
-}
-
-.note:hover,
-.note:focus-within,
-.note[open] {
-  rotate: 0deg;
-  box-shadow:
-    0 1px 1px var(--paper-shade),
-    0 16px 28px -14px var(--paper-shade);
-}
-
-/* A strip of tape across the top. */
-.note::before {
-  content: "";
-  position: absolute;
-  top: -6px;
-  left: 50%;
-  width: 44px;
-  height: 12px;
-  translate: -50% 0;
-  rotate: -2deg;
-  background: oklch(1 0 0 / 0.5);
-  box-shadow: 0 0 0 1px oklch(0.5 0.02 80 / 0.08);
-  border-radius: 1px;
-  pointer-events: none;
-}
-
-.note[data-tilt="a"] { --tilt: -1.4deg; }
-.note[data-tilt="b"] { --tilt: 1deg; }
-.note[data-tilt="c"] { --tilt: -0.6deg; }
-.note[data-tilt="d"] { --tilt: 1.6deg; }
-
-.note[data-tone="blue"] { --paper: oklch(0.94 0.045 235); --paper-ink: oklch(0.3 0.05 250); --paper-shade: oklch(0.4 0.06 250 / 0.22); }
-.note[data-tone="peach"] { --paper: oklch(0.94 0.06 55); --paper-ink: oklch(0.32 0.05 45); --paper-shade: oklch(0.45 0.07 45 / 0.22); }
-.note[data-tone="pink"] { --paper: oklch(0.94 0.05 10); --paper-ink: oklch(0.32 0.06 10); --paper-shade: oklch(0.45 0.07 10 / 0.22); }
-.note[data-tone="green"] { --paper: oklch(0.94 0.06 150); --paper-ink: oklch(0.3 0.05 155); --paper-shade: oklch(0.4 0.06 155 / 0.22); }
-
-/* At night the paper dims to a soft colored card so it doesn't glare. */
-.dark .note { --paper: oklch(0.36 0.05 90); --paper-ink: oklch(0.93 0.03 95); --paper-shade: oklch(0 0 0 / 0.5); }
-.dark .note[data-tone="blue"] { --paper: oklch(0.34 0.045 245); --paper-ink: oklch(0.93 0.02 240); }
-.dark .note[data-tone="peach"] { --paper: oklch(0.36 0.05 50); --paper-ink: oklch(0.94 0.03 55); }
-.dark .note[data-tone="pink"] { --paper: oklch(0.35 0.05 10); --paper-ink: oklch(0.94 0.03 10); }
-.dark .note[data-tone="green"] { --paper: oklch(0.34 0.045 155); --paper-ink: oklch(0.93 0.03 150); }
-.dark .note::before { background: oklch(1 0 0 / 0.08); }
-
-.note .text-muted-foreground {
-  color: color-mix(in oklch, var(--paper-ink) 62%, transparent);
-}
-
-@media (prefers-reduced-motion: reduce) {
-  .note { transition: none; }
 }
 
 .pill {
@@ -749,6 +679,145 @@
   }
 }
 
+/* Left column tiers (left-pane.tsx): the 项目 list and the room swap in one
+   view transition. The clicked card grows into the room's panel (tier-pane:
+   both images stay at their own size, pinned top left, and the growing box
+   uncovers the panel), its name slides up to the title (tier-title), its
+   seats fly to their rows (bench-out, staggered per seat by left-pane.tsx),
+   and the rows fade in one by one in the live page (.tier-in). Walking back
+   out plays it quicker. Only transforms and opacity move; the box's size is
+   the transition's own snapshot work. */
+::view-transition-group(.tier-pane),
+::view-transition-group(.tier-title) {
+  animation-duration: 300ms;
+  animation-timing-function: cubic-bezier(0.2, 0, 0, 1);
+}
+html:active-view-transition-type(tier-leave)::view-transition-group(.tier-pane),
+html:active-view-transition-type(tier-leave)::view-transition-group(.tier-title) {
+  animation-duration: 260ms;
+}
+::view-transition-image-pair(.tier-pane) {
+  overflow: hidden;
+  border-radius: 16px;
+}
+::view-transition-old(.tier-pane),
+::view-transition-new(.tier-pane) {
+  width: 100%;
+  height: 100%;
+  object-fit: none;
+  object-position: 0 0;
+}
+html:active-view-transition-type(tier-enter)::view-transition-old(.tier-pane) {
+  animation: tier-fade-out 120ms ease-out both;
+}
+html:active-view-transition-type(tier-enter)::view-transition-new(.tier-pane) {
+  animation: tier-fade-in 160ms ease-out both;
+}
+html:active-view-transition-type(tier-leave)::view-transition-old(.tier-pane) {
+  animation: tier-fade-out 90ms ease-out both;
+}
+html:active-view-transition-type(tier-leave)::view-transition-new(.tier-pane) {
+  animation: tier-fade-in 160ms 40ms ease-out both;
+}
+::view-transition-old(.tier-title),
+::view-transition-new(.tier-title) {
+  height: 100%;
+  width: auto;
+  object-fit: none;
+  object-position: left center;
+  animation-duration: 200ms;
+}
+/* Seats: out to the rows a little after the panel starts, home at once. */
+html:active-view-transition-type(tier-enter)::view-transition-group(.bench-out) {
+  animation-duration: 320ms;
+  animation-delay: 40ms;
+}
+html:active-view-transition-type(tier-leave)::view-transition-group(.bench-in) {
+  animation-duration: 240ms;
+  animation-delay: 0ms;
+}
+.tier-in .tier-rows > *,
+.tier-in .tier-head > :not(:first-child) {
+  animation: tier-row-in 220ms cubic-bezier(0.2, 0, 0, 1) 120ms both;
+}
+.tier-in .tier-rows > :nth-child(2) { animation-delay: 140ms; }
+.tier-in .tier-rows > :nth-child(3) { animation-delay: 160ms; }
+.tier-in .tier-rows > :nth-child(4) { animation-delay: 180ms; }
+.tier-in .tier-rows > :nth-child(5) { animation-delay: 200ms; }
+.tier-in .tier-rows > :nth-child(6) { animation-delay: 220ms; }
+.tier-in .tier-rows > :nth-child(7) { animation-delay: 240ms; }
+.tier-in .tier-rows > :nth-child(n + 8) { animation-delay: 260ms; }
+.tier-in .tier-back {
+  animation: tier-back-in 220ms cubic-bezier(0.2, 0, 0, 1) 120ms both;
+}
+/* The other cards: off at once when one is clicked, away from it; back in
+   outwards from it when the list opens again. */
+.tier-card {
+  transition:
+    opacity 120ms ease-out,
+    transform 120ms ease-out;
+}
+.tier-leaving .tier-card:not([data-anchor]) {
+  opacity: 0;
+  transform: translateY(calc(var(--dir) * 8px));
+  pointer-events: none;
+}
+.tier-card[data-motion="in"] {
+  animation: tier-card-in 220ms cubic-bezier(0.2, 0, 0, 1) both;
+  animation-delay: calc(60ms + var(--far) * 30ms);
+}
+@keyframes tier-fade-in {
+  from {
+    opacity: 0;
+  }
+}
+@keyframes tier-fade-out {
+  to {
+    opacity: 0;
+  }
+}
+@keyframes tier-row-in {
+  from {
+    opacity: 0;
+    transform: translateY(4px);
+  }
+}
+@keyframes tier-back-in {
+  from {
+    opacity: 0;
+    transform: translateX(-8px);
+  }
+}
+@keyframes tier-card-in {
+  from {
+    opacity: 0;
+    transform: translateY(calc(var(--dir) * -6px));
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  /* Nothing travels or changes shape: a 120ms fade between the tiers. */
+  ::view-transition-group(.tier-pane),
+  ::view-transition-group(.tier-title) {
+    animation-duration: 0s !important;
+  }
+  ::view-transition-old(.tier-pane),
+  ::view-transition-new(.tier-pane),
+  ::view-transition-old(.tier-title),
+  ::view-transition-new(.tier-title) {
+    animation-duration: 120ms !important;
+    animation-delay: 0s !important;
+  }
+  .tier-in .tier-rows > *,
+  .tier-in .tier-head > :not(:first-child),
+  .tier-in .tier-back,
+  .tier-card[data-motion="in"] {
+    animation: tier-fade-in 120ms both !important;
+  }
+  .tier-leaving .tier-card:not([data-anchor]) {
+    transform: none;
+  }
+}
+
 /* The drop of sweat on a worried bot (components/room/bot.tsx): it runs down
    the cheek a little, fades, and wells up again. */
 .bot-sweat {
@@ -777,3 +846,311 @@
     animation: none;
   }
 }
+
+/*
+ * Dark ambience (2026-11-12, AverageJoe's m_56419c3a points 1, 3, 4). Dark
+ * theme only; light stays as it was.
+ *
+ * Background: the five agents' drifting colors mixed into a murky
+ * yellow-green on black. In the dark they give way to a deep, cool still
+ * wallpaper (after #090c12 with two glows, then pure black, both tried and
+ * dropped). A blur filter on a big layer (let alone a moving one) is what
+ * costs frames here, so the soft look is baked into the image.
+ */
+.dark .ambient {
+  /* The wallpaper is drawn by the GPU at the screen's resolution
+     (components/room/aurora.ts, on the canvas below): one blue-cyan aurora
+     ribbon, deep blue sunk behind the composer, a dither of one colour step
+     against banding. Drawn once (again on resize), unless 「背景缓慢流动」
+     is on. No filter on a big layer. Without WebGL (data-gl="off") the same
+     picture as an image, lossless (lossy webp blocks up dark gradients). */
+  background: #04060c;
+}
+.dark .ambient[data-gl="off"] {
+  background: #04060c url("/wallpapers/deep-aurora.webp?v=3") center / cover no-repeat;
+}
+.ambient-gl {
+  display: none;
+}
+.dark .ambient[data-gl="on"] > .ambient-gl {
+  display: block;
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+}
+
+.dark .ambient::after {
+  display: none;
+}
+
+.dark .ambient > span {
+  display: none;
+}
+
+/* The composer: a faint lit edge at rest; a soft cool glow while you type. */
+.dark .composer::before {
+  background: none;
+}
+
+.dark .composer {
+  box-shadow:
+    inset 0 0 0 1px rgba(255, 255, 255, 0.08),
+    0 12px 32px -12px var(--glass-shadow),
+    0 2px 6px -2px var(--glass-shadow);
+  transition: box-shadow 0.25s ease;
+}
+
+.dark .composer:focus-within {
+  box-shadow:
+    inset 0 0 0 1px rgba(147, 197, 253, 0.3),
+    0 0 0 1px rgba(59, 130, 246, 0.16),
+    0 0 22px -6px rgba(59, 130, 246, 0.45),
+    0 12px 32px -12px var(--glass-shadow);
+}
+
+/* Its @ chips: ghost capsules, no rim. */
+.dark .ghost-chip.pill {
+  background: rgba(255, 255, 255, 0.04);
+  box-shadow: none;
+}
+
+.dark .ghost-chip.pill.chip:hover:not(:disabled) {
+  background: rgba(255, 255, 255, 0.1);
+  filter: none;
+}
+
+/* The banner over the thread for questions waiting on you: the same dark
+   glass, a single amber dot breathing at its left. */
+.dark .ask-banner {
+  background: rgba(20, 24, 34, 0.72);
+  -webkit-backdrop-filter: blur(12px);
+  backdrop-filter: blur(12px);
+  border-color: transparent;
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.07);
+}
+
+.breathe {
+  animation: breathe 2.4s ease-in-out infinite;
+}
+
+@keyframes breathe {
+  0%, 100% { opacity: 1; box-shadow: 0 0 0 0 rgba(245, 158, 11, 0.45); }
+  50% { opacity: 0.55; box-shadow: 0 0 0 4px rgba(245, 158, 11, 0); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .breathe { animation: none; }
+}
+
+
+
+
+
+/* The ruler left of the thread (components/room/trajectory.tsx).
+   Light theme: each tick in its speaker's color, as before. Dark theme, three
+   states, drawn only by colour so nothing about the lengths or the jump logic
+   changes:
+   - at rest: cool grey-blue, faint, so it sinks into the background; the
+     ticks of what you are reading (data-lit) carry a little of the speaker's
+     colour so you can still tell who said it (the hover card names them too);
+   - hovered: the whole ruler lifts (--lift, eased on the rail), and the ticks
+     near the pointer (--near) go white;
+   - while music plays (data-playing): deep blue for short ticks to cyan to
+     violet for the ones pushed far out (--beat over --reach). The glow is one
+     drop-shadow on the whole rail, not one filter per tick. */
+@property --lift {
+  syntax: "<number>";
+  inherits: true;
+  initial-value: 0;
+}
+[data-ruler-tick] {
+  background: var(--tc);
+}
+.dark [data-ruler] {
+  transition: --lift 0.22s ease-out;
+}
+.dark [data-ruler][data-docking] {
+  --lift: 1;
+}
+.dark [data-ruler-tick] {
+  opacity: 1 !important;
+  --c: rgba(148, 163, 184, calc(0.42 + var(--lift, 0) * 0.23));
+  background: color-mix(in srgb, rgba(241, 245, 249, 0.9) calc(var(--near, 0) * 100%), var(--c));
+}
+.dark [data-ruler-tick][data-lit] {
+  --c: color-mix(in srgb, var(--tc) 55%, rgba(148, 163, 184, calc(0.6 + var(--lift, 0) * 0.2)));
+}
+/* Not while the pointer is on the ruler: glow + hover + beat together is the
+   costly mix, and you are looking at the white ticks then. */
+.dark [data-ruler][data-playing]:not([data-docking]) {
+  filter: drop-shadow(0 0 6px rgba(56, 189, 248, 0.45));
+}
+.dark [data-ruler][data-playing] [data-ruler-tick] {
+  --t: clamp(0, calc(var(--beat, 0) / var(--reach, 100)), 1);
+  --c: color-mix(
+    in srgb,
+    #818cf8 calc(clamp(0, (var(--t) - 0.45) * 1.8, 1) * 100%),
+    color-mix(in srgb, #38bdf8 calc(clamp(0, var(--t) * 2.2, 1) * 100%), #2563eb)
+  );
+  opacity: calc(0.7 + var(--t) * 0.3) !important;
+}
+
+/*
+ * Project notices (project-notices.tsx): glass capsules at the top center
+ * about the projects the user isn't in. Each row opens and closes its height
+ * (grid rows 0fr ↔ 1fr), so the others slide instead of jumping; the
+ * capsule falls in out of a blur with a small overshoot, its dot pops and
+ * rings once, the words follow; after a few seconds it lifts and blurs away.
+ */
+.pn-row {
+  display: grid;
+  grid-template-rows: 1fr;
+  margin-bottom: 8px;
+  animation: pn-row-in 420ms cubic-bezier(0.2, 0.9, 0.25, 1) backwards;
+  transition:
+    grid-template-rows 280ms cubic-bezier(0.4, 0, 0.2, 1) 80ms,
+    margin-bottom 280ms cubic-bezier(0.4, 0, 0.2, 1) 80ms;
+}
+
+.pn-row[data-leaving] {
+  grid-template-rows: 0fr;
+  margin-bottom: 0;
+}
+
+.pn-clip {
+  min-height: 0;
+}
+
+@keyframes pn-row-in {
+  from {
+    grid-template-rows: 0fr;
+    margin-bottom: 0;
+  }
+}
+
+.pn {
+  overflow: hidden;
+  box-shadow:
+    inset 0 1px 1px 0 var(--glass-rim-soft),
+    inset 0 -8px 16px -12px var(--glass-rim-soft),
+    0 0 0 1px color-mix(in oklab, var(--pn-c) 18%, transparent),
+    0 14px 34px -14px var(--glass-shadow),
+    0 10px 30px -18px color-mix(in oklab, var(--pn-c) 70%, transparent);
+  animation: pn-in 620ms cubic-bezier(0.18, 1.3, 0.32, 1) backwards;
+  transition: transform 200ms cubic-bezier(0.2, 0, 0, 1);
+}
+
+.pn:hover {
+  transform: translateY(1px) scale(1.006);
+}
+
+@keyframes pn-in {
+  0% {
+    opacity: 0;
+    transform: translateY(-22px) scale(0.86);
+    filter: blur(10px);
+  }
+  45% {
+    opacity: 1;
+    filter: blur(0);
+  }
+  100% {
+    transform: none;
+  }
+}
+
+.pn-row[data-leaving] .pn {
+  pointer-events: none;
+  animation: pn-out 260ms cubic-bezier(0.4, 0, 1, 1) forwards;
+}
+
+@keyframes pn-out {
+  to {
+    opacity: 0;
+    transform: translateY(-14px) scale(0.92);
+    filter: blur(6px);
+  }
+}
+
+.pn-core {
+  background: var(--pn-c);
+  box-shadow: 0 0 10px 1px color-mix(in oklab, var(--pn-c) 60%, transparent);
+  animation: pn-pop 520ms cubic-bezier(0.3, 1.6, 0.4, 1) 160ms backwards;
+}
+
+.dark .pn-core {
+  /* Seat colors are picked for the light theme; some are too dark here. */
+  background: color-mix(in oklab, var(--pn-c) 65%, white);
+}
+
+.dark .pn-ring {
+  border-color: color-mix(in oklab, var(--pn-c) 65%, white);
+}
+
+@keyframes pn-pop {
+  from {
+    transform: scale(0);
+  }
+}
+
+.pn-ring {
+  border: 1.5px solid var(--pn-c);
+  opacity: 0;
+  animation: pn-ring 1000ms cubic-bezier(0.2, 0.6, 0.3, 1) 260ms;
+}
+
+@keyframes pn-ring {
+  from {
+    opacity: 0.8;
+    transform: scale(0.5);
+  }
+  to {
+    opacity: 0;
+    transform: scale(2.2);
+  }
+}
+
+.pn-words {
+  animation: pn-words 420ms cubic-bezier(0.2, 0.8, 0.2, 1) 120ms backwards;
+}
+
+@keyframes pn-words {
+  from {
+    opacity: 0;
+    transform: translateX(-10px);
+    filter: blur(3px);
+  }
+}
+
+
+@media (prefers-reduced-motion: reduce) {
+  .pn-row,
+  .pn,
+  .pn-core,
+  .pn-words {
+    animation-name: pn-fade;
+    animation-duration: 160ms;
+    animation-delay: 0ms;
+  }
+
+  .pn-ring {
+    display: none;
+  }
+
+  .pn-row {
+    transition-duration: 1ms;
+    transition-delay: 0ms;
+  }
+
+  .pn-row[data-leaving] .pn {
+    animation: pn-fade 140ms reverse forwards;
+  }
+}
+
+@keyframes pn-fade {
+  from {
+    opacity: 0;
+  }
+}
+

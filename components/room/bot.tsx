@@ -1,6 +1,6 @@
 "use client"
 
-import { useEffect, useRef } from "react"
+import { useEffect, useLayoutEffect, useRef } from "react"
 
 import GrokBot, { type GrokBotState } from "@/lib/vendor/grokbot"
 import type { AgentStatus } from "@/lib/types"
@@ -116,7 +116,10 @@ export function Bot({
     moodNow.current = mood
   }, [mood])
 
-  useEffect(() => {
+  // Built in a layout effect: a view transition holds passive effects back
+  // until it is over, and a bot built then would pop in after the room's
+  // left column had already opened (left-pane.tsx).
+  useLayoutEffect(() => {
     const node = host.current
     if (!node) return
     const still = window.matchMedia("(prefers-reduced-motion: reduce)").matches

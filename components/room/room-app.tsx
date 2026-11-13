@@ -8,7 +8,9 @@ import { toast } from "sonner"
 import { AdaptersDialog } from "@/components/room/adapters-dialog"
 import { Composer } from "@/components/room/composer"
 import { draft, useDraft } from "@/components/room/draft"
-import { Ambient } from "@/components/room/ambient"
+import { Ambient, FLOW_EVENT, flowOn, setFlow } from "@/components/room/ambient"
+import { ProjectNotices } from "@/components/room/project-notices"
+import { notifyOn, notifySupported, onNotifyChange, setNotify, useProjectNotices } from "@/components/room/notify"
 import { JoinDialog } from "@/components/room/join-dialog"
 import { Mark } from "@/components/room/bits"
 import { Roster } from "@/components/room/roster"
@@ -24,13 +26,16 @@ import { TerminalDialog } from "@/components/room/terminal-dialog"
 import { Trajectory } from "@/components/room/trajectory"
 import { WhisperDialog } from "@/components/room/whisper-dialog"
 import { CommitDialog } from "@/components/room/commit-dialog"
-import { GOTO_EVENT, type Goto } from "@/components/room/refs"
+import { GOTO_EVENT, goto, type Goto } from "@/components/room/refs"
+import { FlowView } from "@/components/room/flow"
+import { flowsOf } from "@/lib/flow"
 import { SpawnDialog } from "@/components/room/spawn-dialog"
+import { SeatProfileDialog } from "@/components/room/seat-profile-dialog"
 import { type Pending } from "@/components/room/attachments"
 import { api, human, inOpenProject, setOpenProject, storedHumanKey, type AdapterInfo } from "@/components/room/api"
 import { ModelDialog } from "@/components/room/model-field"
 import { ProjectDialog, ProjectMenu, ProjectPlace } from "@/components/room/project-menu"
-import { ProjectRail } from "@/components/room/project-rail"
+import { LEFT_TIER, LeftPane } from "@/components/room/left-pane"
 import { smashProject } from "@/components/room/project-wreck"
 import { Button } from "@/components/ui/button"
 import {
@@ -50,6 +55,7 @@ import {
   DropdownMenuLabel,
   DropdownMenuRadioItem,
   DropdownMenuSeparator,
+  DropdownMenuCheckboxItem,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu"
 import { Input } from "@/components/ui/input"
@@ -91,6 +97,28 @@ function showDetail(value: boolean) {
   window.dispatchEvent(new Event(DETAIL_EVENT))
 }
 
+// 「对话 / 流程」 for the thread, remembered the same way.
+type ThreadView = "chat" | "flow"
+const VIEW_KEY = "bench-thread-view"
+let viewNow: ThreadView = "chat"
+
+function viewSaved(): ThreadView {
+  try {
+    const saved = localStorage.getItem(VIEW_KEY)
+    return saved === "flow" || saved === "chat" ? saved : viewNow
+  } catch {
+    return viewNow
+  }
+}
+
+function showView(value: ThreadView) {
+  viewNow = value
+  try {
+    localStorage.setItem(VIEW_KEY, value)
+  } catch {}
+  window.dispatchEvent(new Event(DETAIL_EVENT))
+}
+
 // Kinds the room can open a session of itself (lib/spawn.ts SPAWNABLE).
 const SPAWNABLE_KINDS = KINDS.filter((kind) => kind.spawn).map((kind) => kind.id)
 
@@ -118,6 +146,11 @@ function rememberProject(id: string) {
 
 // How long a snapshot fetched ahead of a switch stays good to use.
 const AHEAD_FOR = 4000
+
+function onFlowChange(listener: () => void) {
+  window.addEventListener(FLOW_EVENT, listener)
+  return () => window.removeEventListener(FLOW_EVENT, listener)
+}
 
 export function RoomApp() {
   const [projects, setProjects] = useState<Project[] | null>(null)
@@ -160,8 +193,14 @@ export function RoomApp() {
   // The seat whose model is being picked (「换模型…」).
   const [modelId, setModelId] = useState<string | null>(null)
   const detail = useSyncExternalStore(onDetailChange, detailSaved, () => false)
+  const view = useSyncExternalStore(onDetailChange, viewSaved, (): ThreadView => "chat")
   // No key in this browser: whatever the user does here is refused.
   const keyless = useSyncExternalStore(noSubscribe, () => !storedHumanKey(), () => false)
+  // 「背景缓慢流动」 (ambient.tsx): the dark wallpaper drifts.
+  const flow = useSyncExternalStore(onFlowChange, flowOn, () => false)
+  // 「其他项目做完时通知我」 (notify.ts).
+  const notify = useSyncExternalStore(onNotifyChange, notifyOn, () => false)
+  const canNotify = useSyncExternalStore(noSubscribe, notifySupported, () => false)
   const [spawn, setSpawn] = useState<{ kind: string; from: PublicAgent | null } | null>(null)
   const [adaptersOpen, setAdaptersOpen] = useState(false)
   const [adapterName, setAdapterName] = useState<string | null>(null)
@@ -226,8 +265,10 @@ export function RoomApp() {
     openedId.current = projectId
   }, [projectId])
   const wanted = useRef<string | null>(null)
+  // `then`: more to change in the same transition (left-pane.tsx: the left
+  // column walks into the room as it arrives).
   const openProject = useCallback(
-    (id: string) => {
+    (id: string, then?: () => void) => {
       wanted.current = id
       if (id === openedId.current) return
       const go = (snapshot: RoomSnapshot | null) => {
@@ -238,6 +279,7 @@ export function RoomApp() {
         setReply(null)
         draft.set("")
         startTransition(() => {
+          then?.()
           setProjectId(id)
           // Without it (the fetch failed) the room's own pull takes over.
           if (snapshot?.project.id === id) setRoom(snapshot)
@@ -247,6 +289,12 @@ export function RoomApp() {
     },
     [prefetch],
   )
+
+  // A click on a notification walks into that project's room.
+  useProjectNotices(projects, projectId, (id) => {
+    window.dispatchEvent(new CustomEvent(LEFT_TIER, { detail: "room" }))
+    openProject(id)
+  })
 
   // The project whose room is on screen (committed). Until the new project's
   // room is, every snapshot of it goes in as a transition: the first one often
@@ -358,6 +406,11 @@ export function RoomApp() {
       return false
     })
   }, [room?.messages, focusAgent])
+  // The 「流程」 view's pictures, worked out only while it is showing.
+  const flows = useMemo(
+    () => (view === "flow" && room ? flowsOf(room.messages, room.tasks, room.agents, room.userName) : []),
+    [view, room],
+  )
 
   // Who spoke in the room, latest first, for the composer's chips.
   const speakers = useMemo(() => {
@@ -492,9 +545,21 @@ export function RoomApp() {
   const openTasks = room?.tasks.filter((task) => task.status !== "done").length ?? 0
   const currentProject = room?.project ?? projects?.find((item) => item.id === projectId) ?? null
 
+  // Stop a seat's run (and what is queued for it): the seat menu and the
+  // working bubble in the thread.
+  const stopSeat = (agent: PublicAgent) =>
+    void run(async () => {
+      const result = await api<{ dropped: number }>(`/api/v1/agents/${agent.id}`, {
+        method: "POST",
+        body: JSON.stringify({ as: "human", action: "stop" }),
+      })
+      toast.success(`${agent.name} 停下了${result.dropped > 0 ? `，排队的 ${result.dropped} 条也取消了` : ""}`)
+    })
+
   return (
     <main className="relative isolate flex h-dvh flex-col">
       <Ambient />
+      <ProjectNotices />
       <Tour />
       <SpeedPanel />
       <TerminalDialog />
@@ -504,16 +569,8 @@ export function RoomApp() {
         </p>
       ) : null}
       <div className="flex min-h-0 flex-1">
-      <ProjectRail
-        projects={projects ?? []}
-        current={room?.project.id ?? projectId}
-        onPick={openProject}
-        onPrefetch={prefetch}
-        onCreate={() => setProjectDialog({ editing: null })}
-        onEdit={(project) => setProjectDialog({ editing: project })}
-      />
       <div className="flex min-w-0 flex-1 flex-col">
-      <div className="shrink-0 px-3 pt-2 lg:px-4 lg:pl-1">
+      <div className="shrink-0 px-3 pt-2 lg:px-4">
       <header className="flex h-12 items-center gap-3 pr-1 pl-1">
         <Mark />
         <h1 className="sr-only">并坐</h1>
@@ -580,7 +637,29 @@ export function RoomApp() {
                     跟随系统
                   </DropdownMenuRadioItem>
                 </DropdownMenuRadioGroup>
+                {theme !== "light" ? (
+                  <DropdownMenuCheckboxItem checked={flow} onCheckedChange={(on) => setFlow(on)} closeOnClick>
+                    深色背景缓慢流动
+                  </DropdownMenuCheckboxItem>
+                ) : null}
               </DropdownMenuGroup>
+              {canNotify ? (
+                <>
+                  <DropdownMenuSeparator />
+                  <DropdownMenuCheckboxItem
+                    checked={notify}
+                    closeOnClick
+                    onCheckedChange={(on) => {
+                      void setNotify(on).then((result) => {
+                        if (result === "blocked") toast.error("浏览器拦下了通知：点地址栏左边的图标，把「通知」改成允许，再打开一次")
+                        else if (result === "on") toast.success("好了：页面不在前台时，别的项目做完或有事等你也会弹到桌面")
+                      })
+                    }}
+                  >
+                    别的项目做完时也弹桌面通知
+                  </DropdownMenuCheckboxItem>
+                </>
+              ) : null}
               <DropdownMenuSeparator />
               <DropdownMenuItem
                 onClick={() => {
@@ -619,7 +698,7 @@ export function RoomApp() {
       </div>
 
       {!room ? (
-        <div className="grid min-h-0 flex-1 gap-4 p-3 lg:grid-cols-[264px_1fr_300px] lg:px-4 lg:pl-1 lg:pt-1 lg:pb-4">
+        <div className="grid min-h-0 flex-1 gap-4 p-3 lg:grid-cols-[300px_1fr_300px] lg:px-4 lg:pt-1 lg:pb-4">
           {["入口", "对话", "待办"].map((label) => (
             <div key={label} className="frost animate-pulse rounded-2xl p-4 text-sm text-muted-foreground">
               正在打开{label}
@@ -627,9 +706,19 @@ export function RoomApp() {
           ))}
         </div>
       ) : (
-        <div className="grid min-h-0 flex-1 grid-rows-[minmax(0,1fr)] pt-2 lg:grid-cols-[264px_minmax(0,1fr)_300px] lg:gap-4 lg:px-4 lg:pl-1 lg:pt-1 lg:pb-4">
-          <aside data-tour="roster" className={`${tab === "people" ? "block" : "hidden"} frost h-full min-h-0 overflow-hidden lg:block lg:rounded-2xl`}>
+        <div className="grid min-h-0 flex-1 grid-rows-[minmax(0,1fr)] pt-2 lg:grid-cols-[300px_minmax(0,1fr)_300px] lg:gap-4 lg:px-4 lg:pt-1 lg:pb-4">
+          <aside className={`${tab === "people" ? "block" : "hidden"} h-full min-h-0 lg:block`}>
+            <LeftPane
+              projects={projects ?? []}
+              current={room.project}
+              className="h-full min-h-0"
+              onOpen={openProject}
+              onPrefetch={prefetch}
+              onCreate={() => setProjectDialog({ editing: null })}
+              onEdit={(project) => setProjectDialog({ editing: project })}
+              roster={(head) => (
             <Roster
+              head={head}
               agents={agents}
               adapters={adapters}
               now={now}
@@ -649,15 +738,7 @@ export function RoomApp() {
               onWhisper={(agent) => setWhisperId(agent.id)}
               onModel={(agent) => setModelId(agent.id)}
               onSpawn={(kind, from) => setSpawn({ kind, from })}
-              onStop={(agent) =>
-                void run(async () => {
-                  const result = await api<{ dropped: number }>(`/api/v1/agents/${agent.id}`, {
-                    method: "POST",
-                    body: JSON.stringify({ as: "human", action: "stop" }),
-                  })
-                  toast.success(`${agent.name} 停下了${result.dropped > 0 ? `，排队的 ${result.dropped} 条也取消了` : ""}`)
-                })
-              }
+              onStop={stopSeat}
               onCompact={(agent) =>
                 void run(async () => {
                   await api(`/api/v1/agents/${agent.id}`, {
@@ -672,6 +753,8 @@ export function RoomApp() {
                 setJoinOpen(true)
               }}
             />
+              )}
+            />
           </aside>
           <section data-tour="chat" className={`${tab === "chat" ? "flex" : "hidden"} relative h-full min-h-0 flex-col lg:flex`}>
             {error ? (
@@ -683,7 +766,25 @@ export function RoomApp() {
               key={room.project.id}
               detail={detail}
               onDetail={showDetail}
+              view={view}
+              onView={showView}
+              flow={
+                view === "flow" ? (
+                  <FlowView
+                    flows={flows}
+                    agents={agents}
+                    notes={room.summary?.flows}
+                    onOpen={(id) => {
+                      showView("chat")
+                      // Once the thread is showing again.
+                      requestAnimationFrame(() => goto("message", id))
+                    }}
+                  />
+                ) : null
+              }
               messages={visibleMessages}
+              openAsks={focusAgent ? undefined : room.openAsks}
+              totalMessages={room.totalMessages}
               agents={agents}
               names={names}
               focusName={focusAgent?.name ?? null}
@@ -694,6 +795,7 @@ export function RoomApp() {
               }}
               onOpenTask={openTask}
               onOpenRun={setRunId}
+              onStop={stopSeat}
               onRewake={(runId) =>
                 void run(
                   () =>
@@ -711,7 +813,7 @@ export function RoomApp() {
               }}
             />
             {/* Over the thread, in the blank to its left; lets the scroll through. */}
-            <Trajectory agents={agents} messages={visibleMessages} onOpenRun={setRunId} />
+            {view === "chat" ? <Trajectory agents={agents} messages={visibleMessages} onOpenRun={setRunId} /> : null}
             <DraftComposer
               agents={agents}
               speakers={speakers}
@@ -885,6 +987,7 @@ export function RoomApp() {
       />
 
       <SpawnDialog kind={spawn?.kind ?? null} from={spawn?.from ?? null} agents={agents} onClose={() => setSpawn(null)} />
+      <SeatProfileDialog agents={agents} adapters={adapters} />
       <ModelDialog agent={agents.find((agent) => agent.id === modelId) ?? null} onClose={() => setModelId(null)} />
       <CommitDialog />
       <WhisperDialog

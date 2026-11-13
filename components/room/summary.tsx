@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react"
-import { NotebookPen, X } from "lucide-react"
+import { ChevronDown, NotebookPen, X } from "lucide-react"
 
 import { Avatar, seatLook } from "@/components/room/bits"
 import { Reveal } from "@/components/room/reveal"
@@ -199,7 +199,9 @@ export function SummaryNudge({
   }
 
   return (
-    <Reveal open={Boolean(done) || Boolean(writer) || due} className="pb-2">
+    // px/pt: the card's ring is drawn just outside its box, and Reveal clips
+    // at the box; without this room its top and sides were cut off.
+    <Reveal open={Boolean(done) || Boolean(writer) || due} className="px-px pt-px pb-2">
       {done ? (
         <SummaryDone key={done.round} name={done.name} onEnd={() => setDone(null)} />
       ) : writer ? (
@@ -275,11 +277,11 @@ export function SummaryCard({
 
   if (draft !== null) {
     return (
-      <section className="note mx-3 mb-5 space-y-2 p-2.5" data-tone="blue" data-summary-card>
+      <section className="frost mx-3 mb-3 space-y-2 rounded-2xl p-2.5 ring-1 ring-foreground/10" data-summary-card>
         <Textarea
           value={draft}
           onChange={(event) => setDraft(event.target.value)}
-          className="min-h-48 border-0 bg-white/40 text-xs leading-5 dark:bg-black/15"
+          className="min-h-48 bg-background/50 text-xs leading-5"
           aria-label="房间摘要"
           autoFocus
         />
@@ -303,14 +305,15 @@ export function SummaryCard({
   }
 
   return (
-    <details className="note group mx-3 mb-5 px-3 py-2.5" data-tone="blue" data-tilt="b" data-summary-card>
-      <summary className="flex cursor-pointer items-center gap-2 text-xs">
-        <NotebookPen className="size-3.5 opacity-70" />
+    <details className="frost group mx-3 mb-3 rounded-2xl px-3.5 py-2.5 ring-1 ring-foreground/10" data-summary-card>
+      <summary className="flex cursor-pointer list-none items-center gap-2 text-xs [&::-webkit-details-marker]:hidden">
+        <NotebookPen className="size-3.5 text-sky-600 dark:text-sky-400" />
         <span className="font-medium">房间摘要</span>
         <span className="min-w-0 flex-1 truncate text-muted-foreground">
           {summary ? `${summary.by} · ${clock(summary.at)}` : "还没有"}
           {room.sinceSummary.count > 0 ? ` · 之后又聊了 ${room.sinceSummary.count} 条` : ""}
         </span>
+        <ChevronDown className="size-3.5 shrink-0 text-muted-foreground transition-transform group-open:rotate-180" />
       </summary>
       <div className="mt-2 space-y-1 text-xs leading-5">
         {summary ? (

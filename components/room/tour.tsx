@@ -13,6 +13,7 @@ import { X } from "lucide-react";
 import { Bot } from "@/components/room/bot";
 import { NameField } from "@/components/room/name-field";
 import { Button } from "@/components/ui/button";
+import { LEFT_TIER, type Tier } from "@/components/room/left-pane";
 import { kindById } from "@/lib/kinds";
 
 // Opened from the debug menu. Everything here lives in this component's state:
@@ -31,6 +32,8 @@ type Step = {
   body: string;
   bodies?: string[];
   sketch?: "project" | "pick" | "register" | "say" | "seat" | "mention";
+  // Which tier of the left column (left-pane.tsx) the step points into.
+  tier?: Tier;
   dialog?: boolean;
   finale?: boolean;
 };
@@ -43,21 +46,20 @@ const STEPS: Step[] = [
     body: "我是你的小向导。接下来我会带着你一直配置到可以用，大约三分钟。引导里都只是演示，不会真的建项目，也不会写进房间，只有你的名字会存下来。",
   },
   {
-    // Wide screens: the project rail. Middle: its narrow icon strip. Narrow: the
-    // project name in the header.
+    // From lg: the left column's 项目 tier. Narrow: the project name in the
+    // header.
     target: [
       '[data-tour="project-rail"]',
-      'nav[aria-label="项目"]',
       '[data-tour="project"]',
     ],
     title: "先创建一个项目",
-    body: "一个项目就是一间房，每个项目一张长凳。点栏底部的「新建项目」，起个名字，项目目录可以不填。建好后会自动弹出接入页。",
+    body: "一个项目就是一间房，每个项目一张长凳。点左栏底部的「新建项目」，起个名字，项目目录可以不填。建好后会自动弹出接入页。",
     bodies: [
-      "一个项目就是一间房，每个项目一张长凳。点栏底部的「新建项目」，起个名字，项目目录可以不填。建好后会自动弹出接入页。",
-      "一个项目就是一间房，每个项目一个头像。点栏底部的「+」新建项目，起个名字，项目目录可以不填。建好后会自动弹出接入页。",
+      "一个项目就是一间房，每个项目一张长凳。点左栏底部的「新建项目」，起个名字，项目目录可以不填。建好后会自动弹出接入页。",
       "一个项目就是一间房。点这里的项目名，选「新建项目…」，起个名字，项目目录可以不填。建好后会自动弹出接入页。",
     ],
     sketch: "project",
+    tier: "projects",
   },
   {
     target: '[data-tour="j-pick"]',
@@ -85,6 +87,7 @@ const STEPS: Step[] = [
     title: "看它有没有入座",
     body: "回到主页面，左栏的头像亮起来就成功了。写着「离线 · 点名会唤起」说明房间能把它叫醒；还写着「还没接入」，就回到上一页再看一遍注册命令。",
     sketch: "seat",
+    tier: "room",
   },
   {
     target: null,
@@ -264,6 +267,19 @@ export function Tour() {
     if (want === dialogOpen.current) return;
     dialogOpen.current = want;
     window.dispatchEvent(new CustomEvent(TOUR_JOIN, { detail: want }));
+  }, [step]);
+
+  // Show the left column's tier the step points into; back to the room
+  // when the tour is over.
+  const tierAsked = useRef(false);
+  useEffect(() => {
+    if (step?.tier) {
+      tierAsked.current = true;
+      window.dispatchEvent(new CustomEvent(LEFT_TIER, { detail: step.tier }));
+    } else if (!step && tierAsked.current) {
+      tierAsked.current = false;
+      window.dispatchEvent(new CustomEvent(LEFT_TIER, { detail: "room" }));
+    }
   }, [step]);
 
   // The dialog animates in, so keep measuring while a step is up.

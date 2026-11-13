@@ -1,4 +1,4 @@
-import { userName } from "@/lib/store"
+import { autoFullOf, userName } from "@/lib/store"
 import { randomBytes } from "node:crypto"
 
 import { activeRun } from "@/lib/runs"
@@ -19,12 +19,15 @@ type Permits = {
   pending: Map<string, Pending>
   // Seat id → the wake the grant is for; it lapses when that wake ends.
   grants: Map<string, string>
+  // Seat id → the wake its default full permission (autoFull) is taken back
+  // for; the next wake has it again.
+  held: Map<string, string>
 }
 
 const store = globalThis as typeof globalThis & { __benchPermits?: Permits }
 
 function permits() {
-  return (store.__benchPermits ??= { pending: new Map(), grants: new Map() })
+  return (store.__benchPermits ??= { pending: new Map(), grants: new Map(), held: new Map() })
 }
 
 // The wake a grant is tied to; a seat outside a wake (its own window) has none.
@@ -32,13 +35,34 @@ function wakeOf(agentId: string) {
   return activeRun(agentId)?.id ?? "seat"
 }
 
+// Full permission: granted for this wake, or always (the seat's autoFull)
+// unless taken back for this wake.
 export function hasFull(agentId: string) {
-  return permits().grants.get(agentId) === wakeOf(agentId)
+  const wake = wakeOf(agentId)
+  return permits().grants.get(agentId) === wake || (autoFullOf(agentId) && heldOf(agentId) !== wake)
+}
+
+// Taken back for this wake although the seat has it by default.
+export function heldFull(agentId: string) {
+  return autoFullOf(agentId) && heldOf(agentId) === wakeOf(agentId)
+}
+
+function heldOf(agentId: string) {
+  // The servers that started before `held` existed have a store without it.
+  return (permits().held ??= new Map()).get(agentId)
 }
 
 export function setFull(agentId: string, on: boolean) {
-  if (on) permits().grants.set(agentId, wakeOf(agentId))
-  else permits().grants.delete(agentId)
+  const { grants } = permits()
+  const held = (permits().held ??= new Map())
+  if (on) {
+    grants.set(agentId, wakeOf(agentId))
+    held.delete(agentId)
+  } else {
+    grants.delete(agentId)
+    // A seat full by default: taken back for the rest of this wake only.
+    if (autoFullOf(agentId)) held.set(agentId, wakeOf(agentId))
+  }
   // Granting full settles what that seat is waiting on.
   if (on) for (const item of permits().pending.values()) if (item.agentId === agentId) settle(item.id, { allow: true })
 }
@@ -89,7 +113,8 @@ export function ask(
   input: Omit<PermitRequest, "id" | "at" | "runId"> & { project: string },
   { timeoutMs, signal, changed }: { timeoutMs: number; signal?: AbortSignal; changed: () => void },
 ) {
-  if (input.kind === "tool" && hasFull(input.agentId)) return Promise.resolve<Decision>({ allow: true, full: true })
+  // Already full: a tool goes through, and asking for full is answered at once.
+  if (hasFull(input.agentId)) return Promise.resolve<Decision>({ allow: true, full: true })
   return new Promise<Decision>((resolve) => {
     const id = `p_${randomBytes(4).toString("hex")}`
     const finish = (decision: Decision) => {

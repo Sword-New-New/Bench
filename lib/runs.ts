@@ -1,62 +1,53 @@
-import { mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs"
-import path from "node:path"
 import { randomBytes } from "node:crypto"
 
+import {
+  dbGetRun,
+  dbLastRunOf,
+  dbListRuns,
+  dbMarkColdRunningInterrupted,
+  dbPendingResumes,
+  dbSaveRunMeta,
+  dbSaveRunStep,
+  dbTakeUnannouncedInterrupted,
+} from "@/lib/db"
 import type { Run, RunStep } from "@/lib/types"
 
 // What each wake did on the way to its answer: the tool calls, their results
-// and the text in between. The chat only ever shows the answer; this is what
-// the 「过程」 panel reads. Kept in memory, saved to data/runs.json when a run
-// ends, and only the most recent runs are kept.
+// and the text in between. Live runs stay in memory for zero-cost snapshots,
+// while every run and step is persisted incrementally to SQLite (`runs` +
+// `run_steps`) with no 80-run eviction cap.
 
-const MAX_RUNS = 80
 const MAX_STEPS = 300
 const MAX_FIELD = 4000
+const MAX_BODY = 12_000
 
-type RunsGlobal = typeof globalThis & { __benchRuns?: Run[] }
-
-function file() {
-  return path.join(process.cwd(), "data", "runs.json")
+type RunsGlobal = typeof globalThis & {
+  __benchActiveRuns?: Map<string, Run>
+  __benchRunsBooted?: boolean
+  // Legacy field from before SQLite migration, inspected if hot-reloading mid-run.
+  __benchRuns?: Run[]
 }
 
-function runs(): Run[] {
-  const store = globalThis as RunsGlobal
-  if (!store.__benchRuns) {
-    try {
-      const parsed = JSON.parse(readFileSync(file(), "utf8")) as { runs?: Run[] }
-      // A run that was going when the room stopped will never finish: it is
-      // marked cut off, and the room lists it so the user can wake it again.
-      store.__benchRuns = (parsed.runs ?? []).map((run) => {
-        if (run.state !== "running") return run
-        const at = Date.now()
-        const steps = run.steps.map((step) => (step.state === "running" ? { ...step, state: "failed" as const } : step))
-        steps.push({ id: "end", at, kind: "note", title: "服务器重启，这次唤起被打断了", state: "failed" })
-        return { ...run, state: "failed" as const, endedAt: at, interrupted: true, steps }
-      })
-    } catch {
-      store.__benchRuns = []
+function liveMap(): Map<string, Run> {
+  const g = globalThis as RunsGlobal
+  if (!g.__benchActiveRuns) {
+    g.__benchActiveRuns = new Map()
+    // Preserve any in-flight runs across HMR, otherwise mark cold-disk running rows interrupted.
+    const hotRunning = (g.__benchRuns ?? []).filter((r) => r.state === "running")
+    if (hotRunning.length > 0) {
+      for (const r of hotRunning) g.__benchActiveRuns.set(r.id, r)
+    } else if (!g.__benchRunsBooted) {
+      dbMarkColdRunningInterrupted()
     }
+    g.__benchRunsBooted = true
   }
-  return store.__benchRuns
-}
-
-function save() {
-  try {
-    mkdirSync(path.dirname(file()), { recursive: true })
-    const tmp = `${file()}.tmp`
-    writeFileSync(tmp, JSON.stringify({ runs: runs() }))
-    renameSync(tmp, file())
-  } catch (error) {
-    console.error(error)
-  }
+  return g.__benchActiveRuns
 }
 
 function clip(text: string | undefined) {
   if (!text) return undefined
   return text.length > MAX_FIELD ? `${text.slice(0, MAX_FIELD)}…（还有 ${text.length - MAX_FIELD} 字）` : text
 }
-
-const MAX_BODY = 12_000
 
 // Saved as soon as it starts, so a restart mid-run still knows about it.
 export function startRun(
@@ -76,35 +67,36 @@ export function startRun(
     body: extra.body && extra.body.length > MAX_BODY ? extra.body.slice(-MAX_BODY) : extra.body,
     steps: [],
   }
-  const list = runs()
-  list.push(run)
-  if (list.length > MAX_RUNS) list.splice(0, list.length - MAX_RUNS)
-  save()
+  liveMap().set(run.id, run)
+  dbSaveRunMeta(run)
   return run
 }
 
 // Cut off by a restart and not yet told to the room; told once.
 export function takeUnannounced() {
-  const list = runs().filter((run) => run.interrupted && !run.announced)
-  if (list.length === 0) return list
-  for (const run of list) run.announced = true
-  save()
-  return list
+  liveMap()
+  return dbTakeUnannouncedInterrupted()
 }
 
 // Runs the user asked to be woken again after a usage limit, not yet done.
 export function pendingResumes() {
-  return runs().filter((run) => run.limited?.resumeAt && !run.resumedAt)
+  liveMap()
+  return dbPendingResumes()
 }
 
 export function setLimited(run: Run, limited: Run["limited"]) {
   run.limited = limited
-  save()
+  const live = liveMap().get(run.id)
+  if (live) live.limited = limited
+  dbSaveRunMeta(run)
 }
 
 export function markResumed(run: Run) {
-  run.resumedAt = Date.now()
-  save()
+  const at = Date.now()
+  run.resumedAt = at
+  const live = liveMap().get(run.id)
+  if (live) live.resumedAt = at
+  dbSaveRunMeta(run)
 }
 
 // Adds a step, or updates the one with the same id (a tool call that has
@@ -113,46 +105,74 @@ export function putStep(run: Run, step: RunStep) {
   const clean = { ...step, input: clip(step.input), output: clip(step.output) }
   const index = run.steps.findIndex((item) => item.id === step.id)
   if (index < 0) {
-    if (run.steps.length < MAX_STEPS) run.steps.push({ ...clean, title: clean.title || "工具" })
+    if (run.steps.length < MAX_STEPS) {
+      const added: RunStep = { ...clean, title: clean.title || "工具" }
+      const nextIdx = run.steps.length
+      run.steps.push(added)
+      dbSaveRunStep(run.id, nextIdx, added)
+    }
     return
   }
   const old = run.steps[index]
-  run.steps[index] = {
+  const updated: RunStep = {
     ...old,
     state: clean.state,
     title: clean.title || old.title,
     input: clean.input ?? old.input,
     output: clean.output ?? old.output,
   }
+  run.steps[index] = updated
+  dbSaveRunStep(run.id, index, updated)
 }
 
 export function endRun(run: Run, state: "done" | "failed", note?: string) {
   run.state = state
   run.endedAt = Date.now()
   // Anything still marked running never got its result.
-  for (const step of run.steps) if (step.state === "running") step.state = state
+  for (let i = 0; i < run.steps.length; i++) {
+    const step = run.steps[i]
+    if (step.state === "running") {
+      step.state = state
+      dbSaveRunStep(run.id, i, step)
+    }
+  }
   if (note) putStep(run, { id: "end", at: Date.now(), kind: "note", title: note, state })
-  save()
+  liveMap().delete(run.id)
+  dbSaveRunMeta(run)
 }
 
 export function linkMessage(run: Run, messageId: string) {
   run.messageId = messageId
+  dbSaveRunMeta(run)
 }
 
 export function getRun(id: string) {
-  return runs().find((run) => run.id === id) ?? null
+  return liveMap().get(id) ?? dbGetRun(id)
 }
 
 // The run a seat is in the middle of, if any.
 export function activeRun(agentId: string) {
-  return runs().findLast((run) => run.agentId === agentId && run.state === "running") ?? null
+  let latest: Run | null = null
+  for (const run of liveMap().values()) {
+    if (run.agentId === agentId && run.state === "running") latest = run
+  }
+  return latest
 }
 
 // A seat's latest wake of any kind: what the self-check shows (lib/selfcheck.ts).
 export function lastRunOf(agentId: string) {
-  return runs().findLast((run) => run.agentId === agentId)
+  const active = activeRun(agentId)
+  if (active) return active
+  return dbLastRunOf(agentId)
 }
 
 export function listRuns(agentId: string, purpose: Run["purpose"]) {
-  return runs().filter((run) => run.agentId === agentId && run.purpose === purpose)
+  const persisted = dbListRuns(agentId, purpose)
+  const seen = new Set(persisted.map((r) => r.id))
+  for (const run of liveMap().values()) {
+    if (run.agentId === agentId && run.purpose === purpose && !seen.has(run.id)) {
+      persisted.push(run)
+    }
+  }
+  return persisted
 }

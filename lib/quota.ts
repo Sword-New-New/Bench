@@ -3,7 +3,7 @@ import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "
 import os from "node:os"
 import path from "node:path"
 
-import { installed, summonPath } from "@/lib/adapters"
+import { installed, summonPath, whereIs } from "@/lib/adapters"
 import { cliCommand } from "@/lib/platform"
 import { withReports } from "@/lib/quota-reports"
 
@@ -267,7 +267,9 @@ async function claudeQuota(guard: ClaudeGuard): Promise<Quota> {
 // ---- Codex: ask its own app-server (account/rateLimits/read), which uses the
 // ChatGPT login in ~/.codex/auth.json.
 function codexBin() {
-  if (installed("codex")) return "codex"
+  // The full path: the room's own PATH may not have the folder it is in.
+  const found = whereIs("codex")
+  if (found) return found
   const bundled = "/usr/lib/chatgpt/resources/codex"
   return existsSync(bundled) ? bundled : null
 }
@@ -322,7 +324,7 @@ async function codexQuota(): Promise<Quota> {
 function codexAsk(bin: string, method: string): Promise<unknown> {
   return new Promise((resolve, reject) => {
     const [program, programArgs] = cliCommand(bin, ["app-server"])
-    const child = spawn(program, programArgs, { stdio: ["pipe", "pipe", "ignore"], windowsHide: true })
+    const child = spawn(program, programArgs, { stdio: ["pipe", "pipe", "ignore"], env: { ...process.env, PATH: summonPath() }, windowsHide: true })
     let buffer = ""
     const finish = (error: Error | null, value?: unknown) => {
       clearTimeout(timer)

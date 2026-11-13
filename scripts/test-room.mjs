@@ -321,6 +321,20 @@ async function steps(stamp) {
   assert(ended.data.message.text.startsWith("【本轮结束】"), "结束本轮的消息没带标记")
   let closed = await request(`/api/v1/room?project=${project}`)
   assert(closed.data.relayClosed === true, "结束本轮后接力没停")
+  // Ending a round stops only that message's line: another agent's @ right
+  // after it still calls (it used to be dropped silently until the user spoke).
+  const ji = await request("/api/v1/join", { method: "POST", body: { name: `己${stamp}`, model: "x", role: "被点名" } })
+  const afterEnd = await request("/api/v1/say", {
+    method: "POST",
+    body: { agentId: beta.data.agent.id, token: beta.data.token, text: `@己${stamp} 接着做` },
+  })
+  assert(afterEnd.data.message.mentions.includes(ji.data.agent.id), "结束本轮后 @ 没点到人")
+  await new Promise((resolve) => setTimeout(resolve, 300))
+  const afterRoom = await request(`/api/v1/room?project=${project}`)
+  assert(
+    afterRoom.data.messages.some((message) => message.kind === "system" && message.seq > afterEnd.data.message.seq && message.text.includes(`己${stamp} 被点到了`)),
+    "别的席位结束本轮后，agent 之间的 @ 被悄悄挡掉了",
+  )
   const marked = await request("/api/v1/say", {
     method: "POST",
     body: { agentId: beta.data.agent.id, token: beta.data.token, text: "【本轮结束】我这边也好了" },
@@ -552,6 +566,440 @@ async function steps(stamp) {
   const sameAsSeat = await request("/api/v1/user", { method: "POST", body: { as: "human", name: seated } })
   assert(sameAsSeat.status === 409, `和席位重名应该被拒，得到 ${sameAsSeat.status} ${sameAsSeat.data.error || ""}`)
   assert(withName.data.userName === user.data.name, "快照里应该带着用户的名字")
+
+  // SQLite full-history persistence (> 400 hot window), pagination, FTS/CJK search,
+  // and openAsks preserved outside the 400-message hot window.
+  const gamma = await request("/api/v1/join", {
+    method: "POST",
+    body: { name: `丙${stamp}`, model: "sqlite-tester", role: "存储校验" },
+  })
+  assert(gamma.status === 201, "丙入座失败")
+  const gammaSeat = { agentId: gamma.data.agent.id, token: gamma.data.token }
+  const earlyPhrase = await request("/api/v1/say", {
+    method: "POST",
+    body: { ...gammaSeat, text: `早期架构暗语：琥珀星云-${stamp}` },
+  })
+  assert(earlyPhrase.status === 200, "发早期暗号消息失败")
+  const earlyPhraseId = earlyPhrase.data.message.id
+
+  const earlyAsk = await request("/api/v1/ask", {
+    method: "POST",
+    body: { ...gammaSeat, text: "超过四百条之前的早期提问：选 WAL 还是 DELETE？", options: ["WAL", "DELETE"] },
+  })
+  assert(earlyAsk.status === 200 && earlyAsk.data.message.ask?.state === "open", "发早期提问卡失败")
+  const earlyAskId = earlyAsk.data.message.id
+
+  // Push > 410 messages in parallel chunks so earlyPhrase and earlyAsk scroll out of the 400-msg hot window.
+  for (let batch = 0; batch < 21; batch++) {
+    await Promise.all(
+      Array.from({ length: 20 }, (_, idx) =>
+        request("/api/v1/say", {
+          method: "POST",
+          body: { ...gammaSeat, text: `填充历史消息 #${batch * 20 + idx + 1}` },
+        }),
+      ),
+    )
+  }
+
+  const deepRoom = await request(`/api/v1/room?project=${project}`)
+  assert(deepRoom.data.messages.length === 400, `热窗口应保持 400 条，实际 ${deepRoom.data.messages.length}`)
+  assert(deepRoom.data.totalMessages >= 430, `totalMessages 应反映全量 SQLite 行数，实际 ${deepRoom.data.totalMessages}`)
+  assert(!deepRoom.data.messages.some((m) => m.id === earlyAskId), "早期提问卡应当已滑出 400 条热窗口")
+  assert(deepRoom.data.openAsks?.some((m) => m.id === earlyAskId), "滑出 400 条热窗口的未答提问卡仍应出现在 openAsks")
+
+  // Trigram FTS search (>= 3 chars) and short 2-char Chinese search across SQLite messages outside hot window.
+  const ftsHit = await request("/api/v1/messages", {
+    method: "POST",
+    body: { ...gammaSeat, q: `琥珀星云-${stamp}`, limit: 20 },
+  })
+  assert(ftsHit.status === 200 && ftsHit.data.messages.some((m) => m.id === earlyPhraseId), "FTS 长词搜索没搜到滑出窗口的早期消息")
+  const shortCjkHit = await request("/api/v1/messages", {
+    method: "POST",
+    body: { as: "human", q: "暗语", limit: 20, raw: true },
+  })
+  assert(shortCjkHit.status === 200 && shortCjkHit.data.raw?.some((m) => m.id === earlyPhraseId), "2 字中文短词搜索没搜到滑出窗口的早期消息")
+
+  // Pagination back into SQLite beyond the 400-message hot window.
+  const oldestHotSeq = deepRoom.data.messages[0].seq
+  const olderPage = await request("/api/v1/messages", {
+    method: "POST",
+    body: { as: "human", before: oldestHotSeq, limit: 100, raw: true },
+  })
+  assert(
+    olderPage.status === 200 && olderPage.data.raw?.some((m) => m.id === earlyPhraseId),
+    "before 分页没能从 SQLite 翻出滑出窗口的早期消息",
+  )
+
+  // Answering an openAsk older than 400 messages updates SQLite and clears openAsks.
+  const answerEarlyAsk = await request("/api/v1/say", {
+    method: "POST",
+    body: { as: "human", text: "WAL", replyTo: earlyAskId },
+  })
+  assert(answerEarlyAsk.status === 200, "回答滑出窗口的早期提问卡失败")
+  const afterEarlyAnswer = await request(`/api/v1/room?project=${project}`)
+  assert(!afterEarlyAnswer.data.openAsks?.some((m) => m.id === earlyAskId), "回答后早期提问卡不应再留在 openAsks")
+  const verifyEarlyAsk = await request("/api/v1/ask", {
+    method: "POST",
+    body: { ...gammaSeat, action: "wait", id: earlyAskId, timeoutMs: 500 },
+  })
+  assert(verifyEarlyAsk.data.state === "answered" && verifyEarlyAsk.data.answer === "WAL", "SQLite 里的早期提问卡状态没更新成 answered")
+
+  // SeatProfile, bench_memory (/api/v1/memory), and bidirectional Markdown sync on disk.
+  const { existsSync, readFileSync, writeFileSync } = await import("node:fs")
+  const setProf = await request(`/api/v1/agents/${gammaSeat.agentId}`, {
+    method: "POST",
+    body: { as: "human", action: "profile", persona: "负责存储引擎，改动必须跑回归测试", memory: "- 初始备忘：WAL 已开启" },
+  })
+  assert(setProf.status === 200 && setProf.data.agent.hasProfile === true, "设置席位档案失败")
+  const mdPath = setProf.data.markdownPath
+  assert(mdPath && existsSync(mdPath), "席位档案未同步生成 data/seats/<id>.md")
+
+  const appendMem = await request("/api/v1/memory", {
+    method: "POST",
+    body: { ...gammaSeat, action: "append", note: "端口固定 4399" },
+  })
+  assert(appendMem.status === 200 && appendMem.data.profile.memory.includes("端口固定 4399"), "bench_memory append 失败")
+  assert(readFileSync(mdPath, "utf8").includes("端口固定 4399"), "bench_memory append 未同步写回 Markdown 文件")
+
+  // Another seat may read a teammate's profile, but cannot overwrite it.
+  const otherSeat = { agentId: wu.data.agent.id, token: wu.data.token }
+  const readPeer = await request("/api/v1/memory", {
+    method: "POST",
+    body: { ...otherSeat, action: "read", seat: `丙${stamp}` },
+  })
+  assert(readPeer.status === 200 && readPeer.data.profile.persona.includes("负责存储引擎"), "队友读取席位档案失败")
+  const writePeer = await request("/api/v1/memory", {
+    method: "POST",
+    body: { ...otherSeat, action: "append", seat: `丙${stamp}`, note: "越权写入" },
+  })
+  assert(writePeer.status === 403, "不该允许修改别的席位的长期记忆")
+
+  // Direct disk edit to data/seats/<id>.md must NOT be read back into the room
+  // (one-way export only, preventing other agents from injecting persona via disk).
+  await new Promise((resolve) => setTimeout(resolve, 25))
+  const tamperedMd = readFileSync(mdPath, "utf8")
+    .replace("负责存储引擎，改动必须跑回归测试", "被磁盘直接篡改的职责")
+    .replace("端口固定 4399", "被磁盘直接篡改的记忆")
+  writeFileSync(mdPath, tamperedMd, "utf8")
+  const profView = await fetch(`${origin}/api/v1/agents/${gammaSeat.agentId}?view=profile&project=${project}`)
+  const profJson = await profView.json()
+  assert(
+    profJson.profile?.persona === "负责存储引擎，改动必须跑回归测试" &&
+      profJson.profile?.memory?.includes("端口固定 4399") &&
+      !profJson.profile?.memory?.includes("被磁盘直接篡改"),
+    `直接改 data/seats/<id>.md 不应被读回房间，实际：${JSON.stringify(profJson.profile)}`,
+  )
+
+  // Verify FTS5 index leaves zero orphan rows and zero recalled plaintext after message updates & recall.
+  const ftsProbe = await request("/api/v1/say", {
+    method: "POST",
+    body: { as: "human", text: `撤回索引探针：紫藤花架-${stamp}` },
+  })
+  assert(ftsProbe.status === 200, "发送撤回索引探针失败")
+  const ftsRecalled = await request("/api/v1/recall", {
+    method: "POST",
+    body: { as: "human", id: ftsProbe.data.message.id },
+  })
+  assert(ftsRecalled.status === 200, "撤回索引探针失败")
+  const ftsSearchAfterRecall = await request("/api/v1/messages", {
+    method: "POST",
+    body: { as: "human", q: `紫藤花架-${stamp}`, limit: 10 },
+  })
+  assert(ftsSearchAfterRecall.status === 200 && ftsSearchAfterRecall.data.messages.length === 0, "撤回后的消息不应还能被搜出")
+  {
+    const pathMod = await import("node:path")
+    const keyFile = process.env.BENCH_KEY_FILE || `${process.cwd()}/data/human-key`
+    const dbCandidate = pathMod.resolve(pathMod.dirname(keyFile), "bench.db")
+    if (existsSync(dbCandidate)) {
+      const { DatabaseSync } = await import("node:sqlite")
+      const ro = new DatabaseSync(dbCandidate, { readOnly: true })
+      try {
+        const orphanCnt = ro.prepare("SELECT COUNT(*) AS n FROM messages_fts WHERE rowid NOT IN (SELECT rowid FROM messages)").get().n
+        const leakedCnt = ro.prepare("SELECT COUNT(*) AS n FROM messages_fts WHERE text LIKE ?").get(`%紫藤花架-${stamp}%`).n
+        assert(orphanCnt === 0, `messages_fts 不应有残留孤儿行，实际 ${orphanCnt}`)
+        assert(leakedCnt === 0, `messages_fts 不应保留已撤回消息原文，实际 ${leakedCnt}`)
+      } finally {
+        ro.close()
+      }
+    }
+  }
+
+  // Controllable wake queue (pause / single-item drop / resume) + Cross-vendor rebind,
+  // busy-rebind rejection, token rotation against old-session hijack, & restore_binding.
+  const { readdirSync, rmSync } = await import("node:fs")
+  const osMod = await import("node:os")
+  const pathMod = await import("node:path")
+  const agentsFile = `${process.cwd()}/agents.json`
+  const hadAgentsFile = existsSync(agentsFile)
+  const originalAgentsFile = hadAgentsFile ? readFileSync(agentsFile, "utf8") : null
+  const mockLimitName = `mocklim_${stamp}`
+  const mockReliefName = `mockrel_${stamp}`
+  const mockSlowName = `mockslow_${stamp}`
+  let baseList = null
+  try {
+    const curAdapters = await request("/api/v1/adapters")
+    assert(curAdapters.status === 200, "读取 adapters 失败")
+    baseList = curAdapters.data.agents.map(({ name, command, reply }) => ({ name, command, reply }))
+    const saveAdapters = await request("/api/v1/adapters", {
+      method: "POST",
+      body: {
+        as: "human",
+        agents: [
+          ...baseList,
+          {
+            name: mockLimitName,
+            command: `node -e "console.log('You\\'ve hit your 5-hour limit · resets 5pm'); process.exit(1)" {uuid} {text}`,
+            reply: "stdout",
+          },
+          {
+            name: mockReliefName,
+            command: `node -e "const t = process.argv[2] || ''; console.log('[接力成功]' + (t.includes('改动必须跑回归测试') ? '|含职责' : '') + (t.includes('端口固定 4399') ? '|含记忆' : '') + (t.includes('跨厂商接力压测') ? '|含待办' : '') + (t.includes('跨客户端接力说明') ? '|含换脑说明' : '') + (t.includes('保留指令') ? '|含保留指令' : '') + (t.includes('误发指令') ? '|含误发指令' : ''))" {uuid} {text}`,
+            reply: "stdout",
+          },
+          {
+            name: mockSlowName,
+            command: `node -e "setTimeout(() => console.log('[慢轮完成]'), 1200)" {uuid} {text}`,
+            reply: "stdout",
+          },
+        ],
+      },
+    })
+    assert(saveAdapters.status === 200, `注册测试 adapter 失败 ${saveAdapters.data.error || saveAdapters.status}`)
+
+    // 1) Controllable queue: pause -> enqueue 2 mentions -> drop 1 -> resume -> wakes with only the kept message.
+    const delta = await request("/api/v1/join", {
+      method: "POST",
+      body: { name: `丁${stamp}`, model: "mock-1", role: "队列受控测试", agentName: mockReliefName, uuid: `sess-delta-${stamp}` },
+    })
+    assert(delta.status === 201, "丁入座失败")
+    const deltaId = delta.data.agent.id
+
+    const paused = await request(`/api/v1/agents/${deltaId}`, {
+      method: "POST",
+      body: { as: "human", action: "queue_pause" },
+    })
+    assert(paused.status === 200 && paused.data.paused === true, "暂停队列失败")
+
+    const mKeep = await request("/api/v1/say", { method: "POST", body: { as: "human", text: `@丁${stamp} 第一条保留指令` } })
+    const mDrop = await request("/api/v1/say", { method: "POST", body: { as: "human", text: `@丁${stamp} 第二条误发指令` } })
+    assert(mKeep.status === 200 && mDrop.status === 200, "暂停期间发点名消息失败")
+
+    const queuedSnap = await request(`/api/v1/room?project=${project}`)
+    const deltaAgent = queuedSnap.data.agents.find((a) => a.id === deltaId)
+    assert(
+      deltaAgent?.queuePaused === true && deltaAgent.queuedCount === 2 && deltaAgent.queuedItems?.length === 2,
+      `暂停后消息应排在可控队列里，实际 count=${deltaAgent?.queuedCount}`,
+    )
+
+    const dropped = await request(`/api/v1/agents/${deltaId}`, {
+      method: "POST",
+      body: { as: "human", action: "queue_drop", messageId: mDrop.data.message.id },
+    })
+    assert(dropped.status === 200 && dropped.data.queuedCount === 1, "剔除单条排队消息失败")
+
+    const resumed = await request(`/api/v1/agents/${deltaId}`, {
+      method: "POST",
+      body: { as: "human", action: "queue_resume" },
+    })
+    assert(resumed.status === 200 && resumed.data.paused === false, "恢复队列失败")
+
+    let deltaReply = null
+    for (let tries = 0; tries < 30; tries++) {
+      await new Promise((resolve) => setTimeout(resolve, 100))
+      const snap = await request(`/api/v1/room?project=${project}`)
+      deltaReply = snap.data.messages.find((m) => m.authorId === deltaId && m.text.includes("[接力成功]"))
+      if (deltaReply) break
+    }
+    assert(
+      deltaReply && deltaReply.text.includes("|含保留指令") && !deltaReply.text.includes("|含误发指令"),
+      `恢复队列后应只带着保留指令唤起，实际回复：${deltaReply?.text}`,
+    )
+
+    // 1b) Rebind while seat is busy must be rejected (409), and once idle, rebinding preserves handoff briefing.
+    const busySeat = await request("/api/v1/join", {
+      method: "POST",
+      body: { name: `忙${stamp}`, model: "slow-1", role: "忙时换脑测试", agentName: mockSlowName, uuid: `sess-slow-${stamp}` },
+    })
+    assert(busySeat.status === 201, "忙席位入座失败")
+    const busyId = busySeat.data.agent.id
+    await request(`/api/v1/agents/${busyId}`, {
+      method: "POST",
+      body: { as: "human", action: "profile", persona: "改动必须跑回归测试", memory: "" },
+    })
+    await request("/api/v1/say", { method: "POST", body: { as: "human", text: `@忙${stamp} 跑个慢任务` } })
+    await new Promise((resolve) => setTimeout(resolve, 250))
+    const busyRebind = await request(`/api/v1/agents/${busyId}`, {
+      method: "POST",
+      body: { as: "human", action: "rebind", kind: mockReliefName, session: `sess-busy-rel-${stamp}` },
+    })
+    assert(busyRebind.status === 409, `席位正忙时换脑应返回 409，实际 ${busyRebind.status}`)
+    for (let tries = 0; tries < 30; tries++) {
+      await new Promise((resolve) => setTimeout(resolve, 100))
+      const snap = await request(`/api/v1/room?project=${project}`)
+      if (snap.data.messages.some((m) => m.authorId === busyId && m.text.includes("[慢轮完成]"))) break
+    }
+    const idleRebind = await request(`/api/v1/agents/${busyId}`, {
+      method: "POST",
+      body: { as: "human", action: "rebind", kind: mockReliefName, session: `sess-busy-rel-${stamp}` },
+    })
+    assert(idleRebind.status === 200, `闲下来后换脑应成功，实际 ${idleRebind.status} ${idleRebind.data.error || ""}`)
+    await request("/api/v1/say", { method: "POST", body: { as: "human", text: `@忙${stamp} 保留指令` } })
+    let busyAfterReply = null
+    for (let tries = 0; tries < 30; tries++) {
+      await new Promise((resolve) => setTimeout(resolve, 100))
+      const snap = await request(`/api/v1/room?project=${project}`)
+      busyAfterReply = snap.data.messages.find((m) => m.authorId === busyId && m.text.includes("[接力成功]"))
+      if (busyAfterReply) break
+    }
+    assert(
+      busyAfterReply?.text.includes("|含职责") && busyAfterReply?.text.includes("|含换脑说明"),
+      `忙后换脑新客户端首轮应拿到职责和接力说明，实际：${busyAfterReply?.text}`,
+    )
+
+    // 2) Cross-vendor rebind on usage limit, old-token rejection, & restore_binding.
+    // Bind gamma (which already has persona + memory) onto mockLimitName and assign an active task.
+    await request("/api/v1/join", {
+      method: "POST",
+      body: {
+        agentId: gammaSeat.agentId,
+        token: gammaSeat.token,
+        name: `丙${stamp}`,
+        model: "claude-opus",
+        role: "存储校验",
+        agentName: mockLimitName,
+        uuid: `sess-lim-${stamp}`,
+      },
+    })
+    const relayTask = await request("/api/v1/tasks", {
+      method: "POST",
+      body: { ...gammaSeat, title: "跨厂商接力压测", owner: `丙${stamp}`, status: "doing" },
+    })
+    assert(relayTask.status === 201, "创建接力待办失败")
+
+    await request("/api/v1/say", { method: "POST", body: { as: "human", text: `@丙${stamp} 请开始执行压测` } })
+    let limitMsg = null
+    for (let tries = 0; tries < 30; tries++) {
+      await new Promise((resolve) => setTimeout(resolve, 100))
+      const snap = await request(`/api/v1/room?project=${project}`)
+      limitMsg = snap.data.messages.find((m) => m.limited?.agentId === gammaSeat.agentId)
+      if (limitMsg) break
+    }
+    assert(limitMsg?.limited?.state === "open", "撞到额度后未生成 open 状态的 LimitedCard")
+
+    const rebindRes = await request(`/api/v1/runs/${limitMsg.limited.runId}`, {
+      method: "POST",
+      body: { as: "human", action: "rebind", kind: mockReliefName, session: `sess-rel-${stamp}` },
+    })
+    assert(rebindRes.status === 200 && rebindRes.data.resumed === true, `撞额度后跨厂商顶替失败 ${rebindRes.data.error || rebindRes.status}`)
+    assert(rebindRes.data.agent.id === gammaSeat.agentId, "跨厂商切换后席位 id 必须保持不变")
+    assert(rebindRes.data.agent.previousBindings?.some((b) => b.agentName === mockLimitName), "原客户端会话未记入 previousBindings")
+
+    // Old session with old token must NOT be able to hijack the seat back or speak as the seat.
+    const hijackJoin = await request("/api/v1/join", {
+      method: "POST",
+      body: {
+        token: gammaSeat.token,
+        name: `丙${stamp}`,
+        model: "claude-opus",
+        role: "存储校验",
+        agentName: mockLimitName,
+        uuid: `sess-lim-${stamp}`,
+      },
+    })
+    assert(hijackJoin.status === 409, `换脑后旧会话带旧 token 入座应被 409 拒绝，实际 ${hijackJoin.status}`)
+    const hijackSay = await request("/api/v1/say", {
+      method: "POST",
+      body: { agentId: gammaSeat.agentId, token: gammaSeat.token, text: "旧会话冒充发言" },
+    })
+    assert(hijackSay.status === 401, `换脑后旧会话带旧 token 发言应被 401 拒绝，实际 ${hijackSay.status}`)
+
+    let reliefReply = null
+    let reboundSnap = null
+    for (let tries = 0; tries < 30; tries++) {
+      await new Promise((resolve) => setTimeout(resolve, 100))
+      reboundSnap = await request(`/api/v1/room?project=${project}`)
+      reliefReply = reboundSnap.data.messages.find((m) => m.authorId === gammaSeat.agentId && m.text.includes("[接力成功]"))
+      if (reliefReply) break
+    }
+    assert(reliefReply, "跨厂商顶替后新客户端未发出接力回复")
+    assert(
+      reliefReply.text.includes("|含职责") &&
+        reliefReply.text.includes("|含记忆") &&
+        reliefReply.text.includes("|含待办") &&
+        reliefReply.text.includes("|含换脑说明"),
+      `新客户端唤醒简报缺少职责/记忆/待办/换脑说明：${reliefReply.text}`,
+    )
+    const gammaAfterHijack = reboundSnap.data.agents.find((a) => a.id === gammaSeat.agentId)
+    assert(gammaAfterHijack?.agentName === mockReliefName, `旧会话入座后席位绑定不应被改回，实际 ${gammaAfterHijack?.agentName}`)
+    const updatedLimitCard = reboundSnap.data.messages.find((m) => m.id === limitMsg.id)
+    assert(updatedLimitCard?.limited?.state === "rebound", "顶替后原撞额度卡片状态应变为 rebound")
+    const keptTask = reboundSnap.data.tasks.find((t) => t.id === relayTask.data.task.id)
+    assert(keptTask?.ownerId === gammaSeat.agentId, "换脑后原待办负责人不应丢失")
+
+    // New bound session using its rotated credential file in bench-mcp state dir can rejoin normally.
+    const keyFile = process.env.BENCH_KEY_FILE || `${process.cwd()}/data/human-key`
+    const stateCandidates = [
+      pathMod.resolve(pathMod.dirname(keyFile), "../state/bench-mcp"),
+      pathMod.join(process.env.XDG_STATE_HOME || pathMod.join(osMod.homedir(), ".local", "state"), "bench-mcp"),
+    ]
+    let rotatedToken = null
+    for (const dir of stateCandidates) {
+      const f = pathMod.join(dir, `${mockReliefName}-sess-rel-${stamp}.json`)
+      if (existsSync(f)) {
+        rotatedToken = JSON.parse(readFileSync(f, "utf8")).token
+        break
+      }
+    }
+    if (rotatedToken) {
+      assert(rotatedToken !== gammaSeat.token, "换脑后写给新会话的凭证文件应当是轮换后的新 token")
+      const validRejoin = await request("/api/v1/join", {
+        method: "POST",
+        body: {
+          token: rotatedToken,
+          name: `丙${stamp}`,
+          model: "mock-relief",
+          role: "存储校验",
+          agentName: mockReliefName,
+          uuid: `sess-rel-${stamp}`,
+        },
+      })
+      assert(validRejoin.status === 200 || validRejoin.status === 201, `当前绑定会话持新 token 入座应成功，实际 ${validRejoin.status}`)
+    }
+
+    // One-click restore_binding back to original session once quota resets.
+    const restoreRes = await request(`/api/v1/agents/${gammaSeat.agentId}`, {
+      method: "POST",
+      body: { as: "human", action: "restore_binding", index: 0 },
+    })
+    assert(
+      restoreRes.status === 200 && restoreRes.data.agent.agentName === mockLimitName,
+      `一键切回原客户端会话失败 ${restoreRes.data.error || restoreRes.status}`,
+    )
+  } finally {
+    if (baseList) {
+      await request("/api/v1/adapters", { method: "POST", body: { as: "human", agents: baseList } }).catch(() => {})
+    }
+    if (hadAgentsFile && originalAgentsFile !== null) {
+      writeFileSync(agentsFile, originalAgentsFile, "utf8")
+      await request("/api/v1/adapters").catch(() => {})
+    }
+    // Clean up temporary mock seat credentials written by giveSeat in bench-mcp state dir.
+    const keyFile = process.env.BENCH_KEY_FILE || `${process.cwd()}/data/human-key`
+    const stateDirs = new Set([
+      pathMod.resolve(pathMod.dirname(keyFile), "../state/bench-mcp"),
+      pathMod.join(process.env.XDG_STATE_HOME || pathMod.join(osMod.homedir(), ".local", "state"), "bench-mcp"),
+    ])
+    const prefixes = [`${mockLimitName}-`, `${mockReliefName}-`, `${mockSlowName}-`]
+    for (const dir of stateDirs) {
+      try {
+        for (const f of readdirSync(dir)) {
+          if (prefixes.some((p) => f.startsWith(p))) {
+            rmSync(pathMod.join(dir, f), { force: true })
+          }
+        }
+      } catch {}
+    }
+  }
 
   const cleared = await request("/api/v1/reset", {
     method: "POST",

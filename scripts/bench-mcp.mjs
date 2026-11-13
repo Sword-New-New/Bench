@@ -7,6 +7,8 @@
 // 不进对话；入座后每 20 秒报一次在线。它叫不醒 agent，唤起仍走 agents.json。
 
 import { mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs"
+import http from "node:http"
+import https from "node:https"
 import os from "node:os"
 import path from "node:path"
 import readline from "node:readline"
@@ -154,22 +156,79 @@ class RoomError extends Error {
   }
 }
 
+// node:http rather than fetch: fetch (undici) gives up on any response whose
+// headers take longer than 300 s, and the room's long waits (bench_ask, permit,
+// elevate, bench_wait) only answer when the user clicks, often later than that.
+// Only a refused or unresolvable connection means the room is down.
+const DOWN = new Set(["ECONNREFUSED", "ENOTFOUND", "EAI_AGAIN", "EHOSTUNREACH", "ENETUNREACH", "EADDRNOTAVAIL"])
+
+function request(pathname, body, timeoutMs, signal) {
+  const url = new URL(`${ROOM}${pathname}`)
+  const payload = body ? JSON.stringify(body) : undefined
+  const client = url.protocol === "https:" ? https : http
+  return new Promise((resolve, reject) => {
+    let failure = null
+    const req = client.request(url, {
+      method: body ? "POST" : "GET",
+      headers: payload ? { "content-type": "application/json", "content-length": Buffer.byteLength(payload) } : {},
+    })
+    const stop = (error) => {
+      failure ??= error
+      req.destroy()
+    }
+    const timer = setTimeout(() => stop({ kind: "timeout" }), timeoutMs)
+    const onAbort = () => stop({ kind: "abort" })
+    signal?.addEventListener("abort", onAbort, { once: true })
+    const done = () => {
+      clearTimeout(timer)
+      signal?.removeEventListener("abort", onAbort)
+    }
+    req.on("response", (res) => {
+      const chunks = []
+      res.on("data", (chunk) => chunks.push(chunk))
+      res.on("end", () => {
+        done()
+        resolve({ status: res.statusCode ?? 0, text: Buffer.concat(chunks).toString("utf8") })
+      })
+      res.on("error", () => {})
+      res.on("close", () => {
+        if (!res.complete) {
+          done()
+          reject(failure ?? { kind: "reset" })
+        }
+      })
+    })
+    req.on("error", (error) => {
+      done()
+      reject(failure ?? { kind: DOWN.has(error.code) ? "down" : "reset", detail: error.code || error.message })
+    })
+    // A destroyed request does not always emit "error"; never leave the tool hanging.
+    req.on("close", () => {
+      done()
+      reject(failure ?? { kind: "reset" })
+    })
+    if (signal?.aborted) onAbort()
+    req.end(payload)
+  })
+}
+
 async function call(pathname, body, { timeoutMs = 10_000, signal } = {}) {
   let res
   try {
-    const limit = AbortSignal.timeout(timeoutMs)
-    res = await fetch(`${ROOM}${pathname}`, {
-      method: body ? "POST" : "GET",
-      headers: body ? { "content-type": "application/json" } : undefined,
-      body: body ? JSON.stringify(body) : undefined,
-      signal: signal ? AbortSignal.any([limit, signal]) : limit,
-    })
-  } catch {
-    if (signal?.aborted) throw new RoomError(0, "已取消等待。")
-    throw new RoomError(0, `并坐房间没开（${ROOM}）。请用户运行 ~/Downloads/bench/start.sh 再试。`)
+    res = await request(pathname, body, timeoutMs, signal)
+  } catch (error) {
+    if (error.kind === "abort" || signal?.aborted) throw new RoomError(0, "已取消等待。")
+    if (error.kind === "down") throw new RoomError(0, `并坐房间没开（${ROOM}）。请用户运行 ~/Downloads/bench/start.sh 再试。`)
+    if (error.kind === "timeout") throw new RoomError(0, `房间 ${Math.round(timeoutMs / 1000)} 秒没有回应（${ROOM}），这次请求放弃了。`)
+    throw new RoomError(0, `和房间的连接中途断了${error.detail ? `（${error.detail}）` : ""}，房间可能刚重启。稍后再试。`)
   }
-  const data = await res.json().catch(() => ({}))
-  if (!res.ok) throw new RoomError(res.status, typeof data.error === "string" ? data.error : `房间返回 ${res.status}`)
+  let data = {}
+  try {
+    data = JSON.parse(res.text)
+  } catch {}
+  if (res.status < 200 || res.status >= 300) {
+    throw new RoomError(res.status, typeof data.error === "string" ? data.error : `房间返回 ${res.status}`)
+  }
   return data
 }
 
@@ -324,10 +383,11 @@ const tools = [
   {
     name: "bench_messages",
     description:
-      "按结构化数据读房间的群聊，和人在页面上看到的一样全：每条有 id、作者（human / agent / room）、正文、点了谁、回复的是哪条（replyTo 和摘要）、附件、交接、是否结束本轮。默认最近 50 条；chain 取某条消息所在的整条回复链；about 只看和某个席位有关的；before 往前翻。",
+      "按结构化数据读房间的全部历史群聊（SQLite 全量保存，无 400 条限制）：每条有 id、作者（human / agent / room）、正文、点了谁、回复的是哪条（replyTo 和摘要）、附件、交接、是否结束本轮。默认最近 50 条；q 全文检索关键词；chain 取某条消息所在的整条回复链；about 只看和某个席位有关的；before 往前翻。",
     inputSchema: {
       type: "object",
       properties: {
+        q: { type: "string", description: "全文搜索关键词（按空格分词匹配正文或发言人）" },
         chain: { type: "string", description: "消息 id（m_…）：取它所在的整条回复链" },
         about: { type: "string", description: "席位名：只看他说的、点到他的、和他有关的交接" },
         before: { type: "number", description: "只看 seq 小于这个数的，往前翻页时填上一页最早那条的 seq" },
@@ -362,7 +422,7 @@ const tools = [
         end: {
           type: "boolean",
           description:
-            "true 表示这一轮交接已经完成：这句不会 @ 任何人，之后 agent 之间不再互相唤起，等用户发话再继续。只在确实没人需要再接手时用。",
+            "true 表示这一轮交接已经完成：这句不会 @ 任何人，也就不叫醒谁。只在确实没人需要再接手时用。",
         },
       },
       required: ["text"],
@@ -506,6 +566,20 @@ const tools = [
       type: "object",
       properties: { text: { type: "string", description: "摘要全文，按房间给的格式，最长 8000 字" } },
       required: ["text"],
+    },
+  },
+  {
+    name: "bench_memory",
+    description:
+      "读写席位的长期记忆与职责档案（与底层客户端会话解耦，换客户端接力或新轮次唤起时保留，并由房间单向导出到 data/seats/<id>.md，直接改该文件不会读回；职责只能在网页上由用户修改）。发现项目重要约定、架构决策或踩坑结论时用 append 记一笔；整理精简记忆时用 replace；查看自己或队友席位档案用 read。",
+    inputSchema: {
+      type: "object",
+      properties: {
+        action: { type: "string", enum: ["read", "append", "replace"], description: "默认 read" },
+        note: { type: "string", description: "append 时要追加的一条简洁备忘" },
+        memory: { type: "string", description: "replace 时替换后的完整长期记忆（最长 4000 字）" },
+        seat: { type: "string", description: "read 时可填队友席位名查看其职责与记忆；不填看自己" },
+      },
     },
   },
   {
@@ -668,6 +742,7 @@ async function runTool(name, args = {}, signal) {
       return join(args)
     case "bench_messages": {
       const data = await seatCall("/api/v1/messages", {
+        q: args.q || undefined,
         chain: args.chain || undefined,
         about: args.about || undefined,
         before: args.before || undefined,
@@ -687,7 +762,7 @@ async function runTool(name, args = {}, signal) {
         end: args.end === true || undefined,
       })
       return data.message.end
-        ? `已发出 [${data.message.id}]，本轮结束：agent 之间不再互相唤起，等用户发话。`
+        ? `已发出 [${data.message.id}]，本轮结束：这句没有叫醒任何人。`
         : `已发出 [${data.message.id}]。`
     }
     case "bench_attach": {
@@ -704,11 +779,19 @@ async function runTool(name, args = {}, signal) {
       })
       const id = asked.message.id
       const sec = Math.min(780, Math.max(10, Number(args.waitSec) || 600))
-      const data = await seatCall(
-        "/api/v1/ask",
-        { action: "wait", id, timeoutMs: sec * 1000 },
-        { timeoutMs: sec * 1000 + 15_000, signal },
-      )
+      let data
+      try {
+        data = await seatCall(
+          "/api/v1/ask",
+          { action: "wait", id, timeoutMs: sec * 1000 },
+          { timeoutMs: sec * 1000 + 15_000, signal },
+        )
+      } catch (error) {
+        // The question is already posted; a broken wait must not read as "never asked".
+        if (!(error instanceof RoomError) || error.status !== 0) throw error
+        if (signal?.aborted) return `已取消等待。问题 [${id}] 还在群里。`
+        return `问题 [${id}] 已经发到群里，但等回答时${error.message.replace(/。$/, "")}。用户回答时会作为回复叫醒你，不要再问一遍。先做不依赖这个回答的事；做不下去就说明你在等什么，然后结束这一轮。`
+      }
       if (data.state === "answered") return `用户回答了（[${data.answerId}]）：${data.answer}`
       if (data.state === "gone") return `问题 [${id}] 已经不在房间里了。`
       if (signal?.aborted) return `已取消等待。问题 [${id}] 还在群里。`
@@ -783,6 +866,21 @@ async function runTool(name, args = {}, signal) {
     case "bench_summary": {
       await seatCall("/api/v1/summary", { action: "write", text: args.text })
       return "摘要交上去了。"
+    }
+    case "bench_memory": {
+      const action = args.action || "read"
+      const data = await seatCall("/api/v1/memory", {
+        action,
+        note: args.note || undefined,
+        memory: args.memory !== undefined ? String(args.memory) : undefined,
+        seat: args.seat || undefined,
+      })
+      const p = data.profile ?? {}
+      return [
+        `席位「${data.agent?.name ?? ""}」档案（镜像：${data.markdownPath ?? ""}）`,
+        `【职责与规范】\n${p.persona || "（未设置）"}`,
+        `【长期记忆与备忘】\n${p.memory || "（暂无）"}`,
+      ].join("\n\n")
     }
     case "bench_selfcheck": {
       const data = await seatCall("/api/v1/selfcheck", {})

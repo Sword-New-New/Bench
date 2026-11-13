@@ -1,11 +1,41 @@
 import { AsyncLocalStorage } from "node:async_hooks"
 import { randomBytes } from "node:crypto"
 import { EventEmitter } from "node:events"
-import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs"
+import { existsSync, statSync } from "node:fs"
 import { homedir } from "node:os"
 import path from "node:path"
 
 import { hasAdapter } from "@/lib/adapters"
+import {
+  dbCountMessages,
+  dbCountOpenAsks,
+  dbDeleteProject,
+  dbDeleteSeat,
+  dbFindMessageByRunField,
+  dbGetMessage,
+  dbGetMeta,
+  dbLoadMessagesAfter,
+  dbLoadOpenAsks,
+  dbLoadProjects,
+  dbLoadRecentMessages,
+  dbLoadSeats,
+  dbLoadTalkAfter,
+  dbLoadTasks,
+  dbOpenAskAuthorIds,
+  dbPutMessage,
+  dbPutTask,
+  dbQueryMessages,
+  dbResetProjectRoom,
+  dbRewriteMessages,
+  dbSaveProject,
+  dbSaveRoomHeader,
+  dbSetMeta,
+  dbSyncSeats,
+  inTransaction,
+  seatMarkdownPath,
+  writeSeatMarkdown,
+} from "@/lib/db"
+import { readLaneSnapshot } from "@/lib/lane-state"
 import { mediaKind } from "@/lib/media"
 import { ApiError, asRecord, asString } from "@/lib/http"
 import { hasFull, permitsFor } from "@/lib/permits"
@@ -24,15 +54,20 @@ import type {
   AgentStatus,
   Message,
   Project,
+  ProjectEnd,
   ProjectInfo,
   PublicAgent,
+  PublicSeatBinding,
   RoomSnapshot,
   RoomSummary,
+  SeatBinding,
+  SeatProfile,
   Task,
   TaskStatus,
   TaskStep,
   TaskStepState,
 } from "@/lib/types"
+import { mergeFlowSummaries, splitFlowSummaries } from "@/lib/flow-summary"
 
 const STALE_MS = 40_000
 const COLORS = [
@@ -53,13 +88,29 @@ const TASK_STATUSES = new Set<TaskStatus>(["open", "doing", "blocked", "done"])
 const STEP_STATES = new Set<TaskStepState>(["todo", "doing", "done"])
 const STEP_ACTION: Record<TaskStepState, string> = { todo: "退回", doing: "开始", done: "做完" }
 const MAX_STEPS = 30
+const HOT_MESSAGES = 400
+const SNAPSHOT_DONE_TASKS = 200
+const MAX_PERSONA_CHARS = 2_000
+const MAX_MEMORY_CHARS = 4_000
 // How much talk a woken seat is handed at most (about 100 messages). Once this
 // much has piled up since the last summary, the room suggests writing one.
 export const CATCH_UP_CHARS = 10_000
 // What a summary writer is handed: the last summary plus up to this much talk.
 const SUMMARY_SOURCE_CHARS = 40_000
 
-type Agent = Omit<PublicAgent, "hasSession" | "callable" | "standby" | "status" | "agentName"> & {
+type Agent = Omit<
+  PublicAgent,
+  | "hasSession"
+  | "callable"
+  | "standby"
+  | "status"
+  | "agentName"
+  | "queuedCount"
+  | "queuePaused"
+  | "queuedItems"
+  | "hasProfile"
+  | "previousBindings"
+> & {
   token: string
   status: AgentStatus
   agentName?: string
@@ -70,15 +121,29 @@ type Agent = Omit<PublicAgent, "hasSession" | "callable" | "standby" | "status" 
   // has not been woken yet (its session only exists after the first wake).
   workdir?: string
   fresh?: boolean
+  // The user chose to let it do anything whenever it is woken (「默认开启
+  // 全部权限」 when it was made, or its seat menu): permission prompts and
+  // bench_elevate pass without asking (lib/permits.ts).
+  autoFull?: boolean
   // Names it had before, newest first: an @ to one still reaches it, unless
   // another seat has taken that name since.
   formerNames?: string[]
+  // Portable persona & long-term memory decoupled from the underlying client session.
+  profile?: SeatProfile
+  profileDirty?: boolean
+  reboundFrom?: { agentName: string; model: string; runId?: string }
+  previousBindings?: SeatBinding[]
+  // The house rules a wake ends with were last given whole to this session:
+  // which version (sig), when, and how many short reminders since
+  // (lib/summon.ts rulesFor).
+  rulesGiven?: { sig: string; at: number; session?: string; shorts: number }
 }
 
 type State = {
   rev: number
   seq: number
   agents: Agent[]
+  // Hot window of the latest HOT_MESSAGES; full history lives in SQLite.
   messages: Message[]
   tasks: Task[]
   summary?: RoomSummary
@@ -102,12 +167,14 @@ type Room = {
   // back through that call, so it must not also wake the asker.
   asking?: Set<string>
   // The seat writing a summary, and the seq its material ends at.
-  summaryJob?: { agentId: string; upToSeq: number }
+  summaryJob?: { agentId: string; upToSeq: number; flowsAt?: Record<string, number> }
 }
 
 type ProjectRecord = { id: string; name: string; dir?: string; createdAt: number }
 
 type Runtime = {
+  dbBacked?: boolean
+  dataPath?: string
   projects: ProjectRecord[]
   rooms: Map<string, Room>
   bus: EventEmitter
@@ -123,71 +190,58 @@ function emptyState(): State {
   return { rev: 0, seq: 0, agents: [], messages: [], tasks: [] }
 }
 
-function dataDir() {
-  return path.join(process.cwd(), "data")
-}
-
-function projectsFile() {
-  return path.join(dataDir(), "projects.json")
-}
-
-function roomFile(id: string) {
-  return path.join(dataDir(), "projects", `${id}.json`)
-}
-
-function load(file: string): State {
-  try {
-    const parsed = JSON.parse(readFileSync(file, "utf8")) as Partial<State>
-    if (!parsed || !Array.isArray(parsed.agents) || !Array.isArray(parsed.messages)) {
-      return emptyState()
-    }
-    return {
-      rev: typeof parsed.rev === "number" ? parsed.rev : 0,
-      seq: typeof parsed.seq === "number" ? parsed.seq : 0,
-      agents: parsed.agents as Agent[],
-      messages: parsed.messages,
-      tasks: Array.isArray(parsed.tasks) ? (parsed.tasks as Task[]) : [],
-      summary: parsed.summary,
-      summarySkipSeq: parsed.summarySkipSeq,
-    }
-  } catch {
-    return emptyState()
+function loadRoomFromDb(row: ReturnType<typeof dbLoadProjects>[number], prev?: Room): Room {
+  let summary: RoomSummary | undefined
+  if (row.summaryJson) {
+    try {
+      summary = JSON.parse(row.summaryJson) as RoomSummary
+    } catch {}
   }
-}
-
-function writeJson(file: string, data: unknown) {
-  mkdirSync(path.dirname(file), { recursive: true })
-  const tmp = `${file}.tmp`
-  writeFileSync(tmp, JSON.stringify(data, null, 2))
-  renameSync(tmp, file)
-}
-
-// The projects, and each one's room. A room saved before there were projects
-// (data/room.json) becomes the first project, 「默认项目」.
-function loadProjects(): ProjectRecord[] {
-  try {
-    const parsed = JSON.parse(readFileSync(projectsFile(), "utf8")) as { projects?: ProjectRecord[] }
-    if (Array.isArray(parsed.projects)) return parsed.projects
-  } catch {}
-  const first: ProjectRecord = { id: uid("p"), name: "默认项目", createdAt: Date.now() }
-  const old = path.join(dataDir(), "room.json")
-  if (existsSync(old)) {
-    writeJson(roomFile(first.id), load(old))
-    renameSync(old, `${old}.before-projects`)
+  const agents = dbLoadSeats<Agent>(row.id)
+  return {
+    id: row.id,
+    state: {
+      rev: row.rev,
+      seq: row.seq,
+      agents,
+      messages: dbLoadRecentMessages(row.id, HOT_MESSAGES),
+      tasks: dbLoadTasks(row.id),
+      summary,
+      summarySkipSeq: row.summarySkipSeq ?? undefined,
+      relayClosed: row.relayClosed || undefined,
+    },
+    waiting: prev?.waiting,
+    standby: prev?.standby,
+    asking: prev?.asking,
+    summaryJob: prev?.summaryJob,
   }
-  writeJson(projectsFile(), { projects: [first] })
-  return [first]
 }
 
 function runtime(): Runtime {
-  if (!globalStore.__benchRooms) {
-    const bus = new EventEmitter()
+  const currentDataPath = process.env.BENCH_DATA_DIR || ""
+  const prev = globalStore.__benchRooms
+  if (!prev || !prev.dbBacked || prev.dataPath !== currentDataPath) {
+    const bus = prev?.bus ?? new EventEmitter()
     bus.setMaxListeners(200)
-    const projects = loadProjects()
-    const rooms = new Map(projects.map((project) => [project.id, { id: project.id, state: load(roomFile(project.id)) }]))
-    globalStore.__benchRooms = { projects, rooms, bus, scope: new AsyncLocalStorage() }
+    const scope = prev?.scope ?? new AsyncLocalStorage<string>()
+    let rows = dbLoadProjects()
+    if (rows.length === 0) {
+      const first: ProjectRecord = { id: uid("p"), name: "默认项目", createdAt: Date.now() }
+      dbSaveProject(first, 0, emptyState())
+      rows = dbLoadProjects()
+    }
+    const projects: ProjectRecord[] = rows.map((r) => ({
+      id: r.id,
+      name: r.name,
+      dir: r.dir,
+      createdAt: r.createdAt,
+    }))
+    const rooms = new Map(rows.map((r) => [r.id, loadRoomFromDb(r, prev?.rooms.get(r.id))]))
+    const next: Runtime = { dbBacked: true, dataPath: currentDataPath, projects, rooms, bus, scope }
+    globalStore.__benchRooms = next
+    return next
   }
-  return globalStore.__benchRooms
+  return prev
 }
 
 // The room the running code acts on.
@@ -222,6 +276,23 @@ export function inProject<T>(id: string, fn: () => T): T {
 }
 
 // The project a seat sits in. Seat ids are unique across projects.
+// Whether a seat always has full permission (any project; lib/permits.ts).
+export function autoFullOf(agentId: string) {
+  const id = projectOfSeat(agentId)
+  if (!id) return false
+  return runtime().scope.run(id, () => Boolean(findAgent(agentId)?.autoFull))
+}
+
+// From the seat menu: always full permission when woken, or ask again.
+export function setAutoFull(agentId: string, on: boolean) {
+  const agent = findAgent(agentId)
+  if (!agent) throw new ApiError(404, "这个席位不在了")
+  if (on) agent.autoFull = true
+  else delete agent.autoFull
+  commit()
+  return present(agent, Date.now())
+}
+
 export function projectOfSeat(agentId: string) {
   for (const [id, item] of runtime().rooms) if (item.state.agents.some((agent) => agent.id === agentId)) return id
   return undefined
@@ -259,37 +330,40 @@ function projectInfo(id: string): ProjectInfo {
 }
 
 function saveProjects() {
-  writeJson(projectsFile(), { projects: runtime().projects })
-  runtime().bus.emit("projects")
+  const rt = runtime()
+  inTransaction(() => {
+    for (let i = 0; i < rt.projects.length; i++) {
+      const p = rt.projects[i]
+      const r = rt.rooms.get(p.id)
+      dbSaveProject(p, i, r?.state ?? emptyState())
+    }
+  })
+  rt.bus.emit("projects")
 }
 
-// The user's name in the room, one for every project, kept in data/user.json.
+// The user's name in the room, one for every project, kept in SQLite meta.
 // Before there was a setting it was always jinbao: a room that already has
 // the user's messages goes on with the name they were said under.
-function userFile() {
-  return path.join(dataDir(), "user.json")
-}
-
-const userStore = globalThis as typeof globalThis & { __benchUserName?: string }
+const userStore = globalThis as typeof globalThis & { __benchUserName?: string; __benchUserDataPath?: string }
 
 export function userName(): string {
-  if (userStore.__benchUserName) return userStore.__benchUserName
-  let name: string | undefined
-  try {
-    const parsed = JSON.parse(readFileSync(userFile(), "utf8")) as { name?: unknown }
-    if (typeof parsed.name === "string" && parsed.name) name = parsed.name
-  } catch {}
+  const currentDataPath = process.env.BENCH_DATA_DIR || ""
+  if (userStore.__benchUserName && userStore.__benchUserDataPath === currentDataPath) {
+    return userStore.__benchUserName
+  }
+  let name = dbGetMeta("user_name")
   if (!name) {
     for (const current of runtime().rooms.values()) {
       name ??= current.state.messages.findLast((message) => message.authorId === "human")?.authorName
     }
   }
-  userStore.__benchUserName = name ?? "用户"
+  userStore.__benchUserName = name || "用户"
+  userStore.__benchUserDataPath = currentDataPath
   return userStore.__benchUserName
 }
 
 // A new name for the user. What they said, the tasks they own and what they
-// did on tasks now read with it, in every project.
+// did on tasks now read with it, in every project (including full SQLite history).
 export function setUserName(input: unknown) {
   const name = asString(input)?.trim()
   checkName(name)
@@ -301,39 +375,55 @@ export function setUserName(input: unknown) {
       throw new ApiError(409, `「${name}」已经是一个 AI 席位的名字，换一个，免得 @ 分不清`)
     }
   }
-  for (const current of rt.rooms.values()) {
-    const state = current.state
-    let touched = false
-    for (const message of state.messages) {
-      if (message.authorId === "human" && message.authorName !== name) {
-        message.authorName = name
-        touched = true
+  inTransaction(() => {
+    for (const current of rt.rooms.values()) {
+      const state = current.state
+      let touched = false
+      for (const message of state.messages) {
+        if (message.authorId === "human" && message.authorName !== name) {
+          message.authorName = name
+          touched = true
+        }
+      }
+      dbRewriteMessages(current.id, (message) => {
+        if (message.authorId === "human" && message.authorName !== name) {
+          message.authorName = name
+          touched = true
+          return true
+        }
+        return false
+      })
+      for (const task of state.tasks) {
+        let taskTouched = false
+        if (task.ownerId === "human") {
+          task.ownerName = name
+          taskTouched = true
+        }
+        if (task.review?.by === old) {
+          task.review.by = name
+          taskTouched = true
+        }
+        for (const item of [...task.history, ...(task.steps ?? [])]) {
+          if ("actor" in item && item.actor === old) item.actor = name
+          else if ("by" in item && item.by === old) item.by = name
+          else continue
+          taskTouched = true
+        }
+        if (taskTouched) {
+          touched = true
+          dbPutTask(current.id, task)
+        }
+      }
+      if (touched) {
+        state.rev += 1
+        dbSaveRoomHeader(current.id, state)
+        rt.bus.emit("room", current.id)
       }
     }
-    for (const task of state.tasks) {
-      if (task.ownerId === "human") {
-        task.ownerName = name
-        touched = true
-      }
-      if (task.review?.by === old) {
-        task.review.by = name
-        touched = true
-      }
-      for (const item of [...task.history, ...(task.steps ?? [])]) {
-        if ("actor" in item && item.actor === old) item.actor = name
-        else if ("by" in item && item.by === old) item.by = name
-        else continue
-        touched = true
-      }
-    }
-    if (touched) {
-      state.rev += 1
-      writeJson(roomFile(current.id), state)
-      rt.bus.emit("room", current.id)
-    }
-  }
-  writeJson(userFile(), { name })
+    dbSetMeta("user_name", name)
+  })
   userStore.__benchUserName = name
+  userStore.__benchUserDataPath = process.env.BENCH_DATA_DIR || ""
   return { name }
 }
 
@@ -345,7 +435,7 @@ export function listProjects(): Project[] {
       const seats = state.agents.map((agent) => present(agent, now))
       const asking = new Set([
         ...permitsFor(item.id).map((permit) => permit.agentId),
-        ...state.messages.filter((message) => message.ask?.state === "open" && !message.recalled).map((message) => message.authorId),
+        ...dbOpenAskAuthorIds(item.id),
       ])
       const review = new Set(state.tasks.filter(awaitingReview).flatMap((task) => (task.ownerId ? [task.ownerId] : [])))
       const spoke = new Map<string, number>()
@@ -376,15 +466,22 @@ export function listProjects(): Project[] {
         working: seats.filter((agent) => agent.status === "working").length,
         lastAt: Math.max(item.createdAt, state.messages.at(-1)?.createdAt ?? 0),
         lastOtherAt: state.messages.findLast((message) => message.kind !== "system" && message.authorId !== "human")?.createdAt ?? 0,
-        waiting:
-          permitsFor(item.id).length +
-          state.messages.filter((message) => message.ask?.state === "open" && !message.recalled).length +
-          state.tasks.filter(awaitingReview).length,
+        waiting: permitsFor(item.id).length + dbCountOpenAsks(item.id) + state.tasks.filter(awaitingReview).length,
         bench,
         names: seats.map((agent) => agent.name),
+        lastEnd: lastEndOf(state.messages),
       }
     }),
   )
+}
+
+// The newest 「【本轮结束】」 a seat posted: the page turns a new one in a
+// project the user isn't looking at into a desktop notification.
+function lastEndOf(messages: Message[]): ProjectEnd | undefined {
+  const found = messages.findLast((message) => message.end && !message.recalled && message.authorId !== "human")
+  if (!found) return undefined
+  const text = found.text.replace(END_MARK, "").replace(/\s+/g, " ").trim()
+  return { id: found.id, at: found.createdAt, name: found.authorName, color: found.authorColor, text: text.length > 140 ? `${text.slice(0, 139)}…` : text }
 }
 
 function projectFields(body: Record<string, unknown>, current?: ProjectRecord) {
@@ -414,7 +511,6 @@ export function createProject(input: unknown) {
   rt.projects.push(record)
   rt.rooms.set(record.id, { id: record.id, state: emptyState() })
   saveProjects()
-  inProject(record.id, persist)
   return { project: projectInfo(record.id) }
 }
 
@@ -438,8 +534,8 @@ export function deleteProject(id: string) {
   if (rt.projects.length === 1) throw new ApiError(400, "至少要留一个项目")
   rt.projects = rt.projects.filter((item) => item.id !== id)
   rt.rooms.delete(id)
+  dbDeleteProject(id)
   saveProjects()
-  rmSync(roomFile(id), { force: true })
   rt.bus.emit("room", id)
   return { deleted: id }
 }
@@ -477,7 +573,10 @@ export function pickProject(input: unknown): ProjectInfo {
 
 function persist() {
   const current = room()
-  writeJson(roomFile(current.id), current.state)
+  inTransaction(() => {
+    dbSaveRoomHeader(current.id, current.state)
+    dbSyncSeats(current.id, current.state.agents)
+  })
 }
 
 function emit() {
@@ -520,10 +619,20 @@ function colorFor(name: string) {
   return COLORS[hash % COLORS.length] ?? COLORS[0]
 }
 
+function publicBindings(list: SeatBinding[] | undefined): PublicSeatBinding[] | undefined {
+  if (!list || list.length === 0) return undefined
+  return list.map(({ session: _session, ...rest }, index) => {
+    void _session
+    return { ...rest, index }
+  })
+}
+
 function present(agent: Agent, now = Date.now()): PublicAgent {
   // A seat the room has woken is working until that run ends, even through a
   // quiet stretch (a client queueing, a long command) longer than STALE_MS.
   const run = activeRun(agent.id)
+  const laneView = readLaneSnapshot(agent.id)
+  const hasProfile = Boolean(agent.profile && (agent.profile.persona.trim() || agent.profile.memory.trim()))
   return {
     id: agent.id,
     name: agent.name,
@@ -546,7 +655,13 @@ function present(agent: Agent, now = Date.now()): PublicAgent {
     runStartedAt: run?.startedAt,
     stepAt: run ? (run.steps.at(-1)?.at ?? run.startedAt) : undefined,
     fullAccess: hasFull(agent.id) || undefined,
+    autoFull: agent.autoFull || undefined,
     terminal: terminalOpen(agent.id) || undefined,
+    queuedCount: laneView?.queuedCount || undefined,
+    queuePaused: laneView?.paused || undefined,
+    queuedItems: laneView && laneView.queuedItems.length > 0 ? laneView.queuedItems.slice(0, 20) : undefined,
+    hasProfile: hasProfile || undefined,
+    previousBindings: publicBindings(agent.previousBindings),
     createdAt: agent.createdAt,
     lastSeenAt: agent.lastSeenAt,
   }
@@ -571,23 +686,36 @@ function sortTasks(tasks: Task[]) {
   )
 }
 
+function snapshotTasks(tasks: Task[]): Task[] {
+  const sorted = sortTasks(tasks)
+  const active = sorted.filter((t) => t.status !== "done")
+  const done = sorted.filter((t) => t.status === "done").slice(0, SNAPSHOT_DONE_TASKS)
+  return [...active, ...done]
+}
+
 export function snapshot(): RoomSnapshot {
-  const state = room().state
+  const current = room()
+  const state = current.state
   const talk = talkSince(summaryBase())
   const chars = talk.reduce((sum, message) => sum + withAttachments(message.text, message.attachments).length, 0)
+  const firstHotSeq = state.messages[0]?.seq
+  const openAsks = firstHotSeq !== undefined && firstHotSeq > 1 ? dbLoadOpenAsks(current.id, firstHotSeq) : undefined
+  const totalMessages = dbCountMessages(current.id)
   return {
-    project: projectInfo(room().id),
+    project: projectInfo(current.id),
     agents: sortAgents(state.agents.map((agent) => present(agent))),
     messages: state.messages,
-    tasks: sortTasks(state.tasks),
+    tasks: snapshotTasks(state.tasks),
+    openAsks: openAsks && openAsks.length > 0 ? openAsks : undefined,
+    totalMessages,
     seq: state.seq,
     rev: state.rev,
     summary: state.summary ?? null,
     sinceSummary: { count: talk.length, chars },
     summaryDue: chars >= CATCH_UP_CHARS,
-    summaryWriter: room().summaryJob?.agentId ?? null,
-    relayClosed: room().state.relayClosed === true,
-    permits: permitsFor(room().id),
+    summaryWriter: current.summaryJob?.agentId ?? null,
+    relayClosed: state.relayClosed === true,
+    permits: permitsFor(current.id),
     userName: userName(),
   }
 }
@@ -598,7 +726,12 @@ function summaryBase() {
 }
 
 function talkSince(after: number) {
-  return room().state.messages.filter((message) => message.seq > after && message.kind !== "system" && !message.recalled)
+  const current = room()
+  const firstHotSeq = current.state.messages[0]?.seq
+  if (firstHotSeq !== undefined && after < firstHotSeq - 1) {
+    return dbLoadTalkAfter(current.id, after)
+  }
+  return current.state.messages.filter((message) => message.seq > after && message.kind !== "system" && !message.recalled)
 }
 
 // A message as an agent reads it: its id, so it can answer that one, and
@@ -626,29 +759,22 @@ function gist(message: Message) {
   return line.length > 30 ? `${line.slice(0, 30)}…` : line
 }
 
+function findMessageAny(id: string | undefined): Message | undefined {
+  if (!id) return undefined
+  const current = room()
+  return current.state.messages.find((item) => item.id === id) ?? dbGetMessage(current.id, id) ?? undefined
+}
+
 // The message this one answers, if it is still in the room.
 function replyOf(message: Message) {
   if (!message.replyTo) return undefined
-  const target = room().state.messages.find((item) => item.id === message.replyTo)
+  const target = findMessageAny(message.replyTo)
   return target ? { id: target.id, authorName: target.authorName, gist: gist(target) } : undefined
 }
 
 function withReply(message: Message) {
   const reply = replyOf(message)
   return reply ? { ...message, reply } : message
-}
-
-// The first message of the reply chain this one belongs to.
-function chainRoot(message: Message, byId: Map<string, Message>) {
-  let at = message
-  const seen = new Set<string>()
-  while (at.replyTo && !seen.has(at.id)) {
-    seen.add(at.id)
-    const up = byId.get(at.replyTo)
-    if (!up || up.kind === "system") break
-    at = up
-  }
-  return at.id
 }
 
 // A message as data, for an agent that wants the whole thread the way the
@@ -688,40 +814,50 @@ function structured(message: Message) {
 
 const MESSAGES_LIMIT = 200
 
-// The room's talk as data. `chain`: every message of the reply chain that
-// message is in. `about`: what a seat said, was called in, or handed on.
+// The room's talk as data, backed by full SQLite history.
+// `chain`: every message of the reply chain that message is in.
+// `about`: what a seat said, was called in, or handed on.
+// `q`: full-text / substring search across messages.
 // `before`: only messages older than that seq, to page back. Newest `limit` kept.
 export function messagesFor(input: unknown) {
   const body = asRecord(input)
   actorFrom(body)
-  const all = room().state.messages
-  let list = all
+  const current = room()
+  const singleId = asString(body.id)
+  if (singleId) {
+    const found = findMessageAny(singleId)
+    if (!found) throw new ApiError(404, "这条消息不在房间里了")
+    return { messages: [structured(found)], raw: [found], hasMore: false, roomSeq: current.state.seq }
+  }
   const chain = asString(body.chain)
-  if (chain) {
-    const byId = new Map(all.map((message) => [message.id, message]))
-    const start = byId.get(chain)
-    if (!start) throw new ApiError(404, "这条消息不在房间里了")
-    const root = chainRoot(start, byId)
-    list = all.filter((message) => message.kind !== "system" && chainRoot(message, byId) === root)
+  if (chain && !findMessageAny(chain)) {
+    throw new ApiError(404, "这条消息不在房间里了")
   }
   const about = asString(body.about)
+  let seatId: string | undefined
   if (about) {
     const seat = resolveAgent(about)
     if (!seat) throw new ApiError(404, `没有叫 ${about} 的席位`)
-    list = list.filter(
-      (message) =>
-        message.authorId === seat.id ||
-        message.mentions.includes(seat.id) ||
-        message.handoff?.fromId === seat.id ||
-        message.handoff?.toId === seat.id,
-    )
+    seatId = seat.id
   }
+  const query = asString(body.q ?? body.query)?.trim() || undefined
   const before = Number(body.before ?? 0)
-  if (Number.isFinite(before) && before > 0) list = list.filter((message) => message.seq < before)
+  const beforeSeq = Number.isFinite(before) && before > 0 ? before : undefined
   const asked = Number(body.limit ?? 50)
   const limit = Math.min(MESSAGES_LIMIT, Math.max(1, Number.isFinite(asked) ? Math.floor(asked) : 50))
-  const page = list.slice(-limit)
-  return { messages: page.map(structured), hasMore: list.length > page.length, roomSeq: room().state.seq }
+  const { messages: page, hasMore } = dbQueryMessages(current.id, {
+    chainId: chain || undefined,
+    seatId,
+    query,
+    beforeSeq,
+    limit,
+  })
+  return {
+    messages: page.map(structured),
+    raw: body.raw === true ? page : undefined,
+    hasMore,
+    roomSeq: current.state.seq,
+  }
 }
 
 function bumpRev() {
@@ -742,12 +878,18 @@ export function refreshRooms() {
 export function markReached(ids: string[], agentId: string) {
   const agent = findAgent(agentId)
   if (!agent) return
+  const current = room()
   const at = Date.now()
-  for (const message of room().state.messages) {
-    if (!ids.includes(message.id)) continue
-    const list = (message.reached ?? []).filter((item) => item.id !== agent.id)
-    message.reached = [...list, { id: agent.id, name: agent.name, at }]
-  }
+  inTransaction(() => {
+    for (const id of ids) {
+      const hot = current.state.messages.find((m) => m.id === id)
+      const target = hot ?? dbGetMessage(current.id, id)
+      if (!target) continue
+      const list = (target.reached ?? []).filter((item) => item.id !== agent.id)
+      target.reached = [...list, { id: agent.id, name: agent.name, at }]
+      dbPutMessage(current.id, target)
+    }
+  })
   bumpRev()
   commit()
 }
@@ -814,21 +956,287 @@ export function renameAgent(id: string, input: unknown) {
   checkName(name)
   const old = agent.name
   if (name === old) return { agent: present(agent) }
-  if (room().state.agents.some((other) => other.id !== id && other.name === name)) {
+  const current = room()
+  if (current.state.agents.some((other) => other.id !== id && other.name === name)) {
     throw new ApiError(409, `已经有人叫 ${name}，换个名字`)
   }
   agent.name = name
   agent.formerNames = [old, ...(agent.formerNames ?? []).filter((item) => item !== name && item !== old)].slice(0, 5)
   const pattern = mentionPattern(old)
-  for (const message of room().state.messages) {
-    if (message.authorId === id) message.authorName = name
-    if (message.mentions.includes(id)) message.text = message.text.replace(pattern, `@${name}`)
-  }
-  for (const task of room().state.tasks) {
-    if (task.ownerId === id) task.ownerName = name
-  }
+  inTransaction(() => {
+    for (const message of current.state.messages) {
+      if (message.authorId === id) message.authorName = name
+      if (message.mentions.includes(id)) message.text = message.text.replace(pattern, `@${name}`)
+    }
+    dbRewriteMessages(current.id, (message) => {
+      let changed = false
+      if (message.authorId === id && message.authorName !== name) {
+        message.authorName = name
+        changed = true
+      }
+      if (message.mentions.includes(id)) {
+        const replaced = message.text.replace(pattern, `@${name}`)
+        if (replaced !== message.text) {
+          message.text = replaced
+          changed = true
+        }
+      }
+      return changed
+    })
+    for (const task of current.state.tasks) {
+      if (task.ownerId === id) {
+        task.ownerName = name
+        dbPutTask(current.id, task)
+      }
+    }
+  })
+  if (agent.profile) writeSeatMarkdown(agent.id, agent.name, agent.role, agent.profile)
   postSystem(`${old} 改名为 ${name}，之后 @${name}；@${old} 也还能找到它`)
   return { agent: present(agent) }
+}
+
+// ---- Seat profile (persona & long-term memory) and cross-vendor rebinding ----
+
+export function getSeatProfile(id: string) {
+  const agent = findAgent(id)
+  if (!agent) throw new ApiError(404, "这个席位不在了")
+  return {
+    agent: present(agent),
+    profile: agent.profile ?? { persona: "", memory: "", updatedAt: 0 },
+    markdownPath: seatMarkdownPath(agent.id),
+  }
+}
+
+export function setSeatProfile(
+  id: string,
+  input: { persona?: string; memory?: string },
+  byAgentSelf = false,
+) {
+  const agent = findAgent(id)
+  if (!agent) throw new ApiError(404, "这个席位不在了")
+  const persona =
+    input.persona !== undefined
+      ? clip(input.persona.trim(), MAX_PERSONA_CHARS)
+      : (agent.profile?.persona ?? "")
+  const memory =
+    input.memory !== undefined
+      ? clip(input.memory.trim(), MAX_MEMORY_CHARS)
+      : (agent.profile?.memory ?? "")
+  const updatedAt = Date.now()
+  if (!persona && !memory) {
+    delete agent.profile
+  } else {
+    agent.profile = { persona, memory, updatedAt }
+  }
+  if (!byAgentSelf) agent.profileDirty = true
+  writeSeatMarkdown(agent.id, agent.name, agent.role, agent.profile)
+  bumpRev()
+  commit()
+  return {
+    agent: present(agent),
+    profile: agent.profile ?? { persona: "", memory: "", updatedAt },
+    markdownPath: seatMarkdownPath(agent.id),
+  }
+}
+
+function appendMemoryEntry(existing: string, note: string) {
+  const stamp = new Date().toISOString().slice(0, 16).replace("T", " ")
+  const formatted = note.startsWith("- ") || note.startsWith("* ") ? note : `- [${stamp}] ${note}`
+  const combined = existing.trim() ? `${existing.trim()}\n${formatted}` : formatted
+  if (combined.length <= MAX_MEMORY_CHARS) return combined
+  // Trim oldest lines when full so new lessons always land cleanly.
+  const lines = combined.split("\n")
+  while (lines.length > 1 && lines.join("\n").length > MAX_MEMORY_CHARS) {
+    lines.shift()
+  }
+  return lines.join("\n").slice(-MAX_MEMORY_CHARS)
+}
+
+export function memoryAction(input: unknown) {
+  const body = asRecord(input)
+  const actor = actorFrom(body)
+  let target: Agent | undefined
+  if (actor.type === "agent") {
+    const named = asString(body.seat)
+    target = named ? resolveAgent(named) : findAgent(actor.id)
+    if (!target) throw new ApiError(404, "没有找到对应席位")
+    const action = asString(body.action) ?? "read"
+    if (action !== "read" && target.id !== actor.id) {
+      throw new ApiError(403, "只能修改自己席位的长期记忆；看队友档案可用 action: read")
+    }
+  } else {
+    const ref = asString(body.targetId ?? body.seat)
+    if (!ref) throw new ApiError(400, "请指明席位 targetId 或 seat")
+    target = resolveAgent(ref)
+    if (!target) throw new ApiError(404, `没有叫 ${ref} 的席位`)
+  }
+
+  const action = asString(body.action) ?? "read"
+  if (action === "read") {
+    return getSeatProfile(target.id)
+  }
+  if (action === "append") {
+    const note = clip((asString(body.note ?? body.text ?? body.memory ?? body.content) ?? "").trim(), 1500)
+    if (!note) throw new ApiError(400, "要追加的记忆 note 不能为空")
+    const nextMemory = appendMemoryEntry(target.profile?.memory ?? "", note)
+    return setSeatProfile(target.id, { memory: nextMemory }, actor.type === "agent")
+  }
+  if (action === "replace") {
+    const memory = body.memory !== undefined ? (asString(body.memory) ?? "") : undefined
+    const persona =
+      actor.type === "human" && body.persona !== undefined ? (asString(body.persona) ?? "") : undefined
+    if (memory === undefined && persona === undefined) {
+      throw new ApiError(400, "replace 需要提供 memory（或由用户提供 persona）")
+    }
+    return setSeatProfile(target.id, { persona, memory }, actor.type === "agent")
+  }
+  throw new ApiError(400, "action 只能是 read、append 或 replace")
+}
+
+// Compact seat briefing injected when a session is fresh, rebound across AI
+// vendors, or after its persona/memory was edited.
+export function seatBriefing(id: string): string {
+  const agent = findAgent(id)
+  if (!agent) return ""
+  const blocks: string[] = []
+  if (agent.reboundFrom) {
+    blocks.push(
+      `【跨客户端接力说明】你正在接手席位「${agent.name}」（分工：${agent.role}）。此前该席位运行在 ${agent.reboundFrom.agentName}（${agent.reboundFrom.model}），现已切换到当前客户端继续工作，你的席位身份、待办归属和工作目录保持不变。需要查看更早的房间讨论时，可用 bench_messages（支持 q 关键词搜索或 chain 回复链）按需翻阅。`,
+    )
+  }
+  if (agent.profile?.persona?.trim()) {
+    blocks.push(`【席位职责与规范】\n${agent.profile.persona.trim()}`)
+  }
+  if (agent.profile?.memory?.trim()) {
+    blocks.push(`【席位长期记忆与备忘】（发现新的关键约定或踩坑结论时，可用 bench_memory 记录）\n${agent.profile.memory.trim()}`)
+  }
+  const ownedTasks = room().state.tasks.filter((t) => t.ownerId === id && t.status !== "done")
+  if (ownedTasks.length > 0 && (agent.reboundFrom || agent.fresh)) {
+    const taskLines = ownedTasks.map((t) => {
+      const steps = (t.steps ?? [])
+        .map((s, idx) => `  ${idx + 1}. [${s.state}] ${s.text}${s.note ? `（${s.note}）` : ""}`)
+        .join("\n")
+      const brief = t.brief ? `\n  交接记录：已完成 ${t.brief.done}；剩余 ${t.brief.left}；注意 ${t.brief.caveats}` : ""
+      return `- [${t.id}] ${t.title}（状态：${t.status}）${t.detail ? `\n  说明：${clip(t.detail, 240)}` : ""}${brief}${steps ? `\n${steps}` : ""}`
+    })
+    blocks.push(`【当前由你负责的待办】\n${taskLines.join("\n")}`)
+  }
+  return blocks.join("\n\n")
+}
+
+// Internal seat credentials & metadata for `lib/spawn.ts` when rebinding a seat
+// to another AI client while keeping the exact same seat id and token.
+export function seatCredentials(id: string) {
+  const agent = findAgent(id)
+  if (!agent) throw new ApiError(404, "这个席位不在了")
+  return {
+    id: agent.id,
+    token: agent.token,
+    name: agent.name,
+    role: agent.role,
+    workdir: agent.workdir,
+    agentName: agent.agentName,
+    session: agent.session,
+    model: agent.model,
+    modelPick: agent.modelPick,
+    effortPick: agent.effortPick,
+    windowPick: agent.windowPick,
+    compactPct: agent.compactPct,
+    previousBindings: agent.previousBindings ? [...agent.previousBindings] : [],
+  }
+}
+
+export function rebindAgent(
+  id: string,
+  input: {
+    agentName: string
+    session: string
+    model: string
+    modelPick?: string | null
+    effortPick?: string | null
+    workdir?: string
+    fromRunId?: string
+  },
+) {
+  const agent = findAgent(id)
+  if (!agent) throw new ApiError(404, "这个席位不在了")
+  const prevClient = agent.agentName || "未绑定"
+  const prevModel = agent.model
+  if (agent.agentName && agent.session && (agent.agentName !== input.agentName || agent.session !== input.session)) {
+    const entry: SeatBinding = {
+      agentName: agent.agentName,
+      session: agent.session,
+      model: agent.model,
+      modelPick: agent.modelPick,
+      effortPick: agent.effortPick,
+      workdir: agent.workdir,
+      switchedAt: Date.now(),
+    }
+    const rest = (agent.previousBindings ?? []).filter(
+      (b) => !(b.agentName === entry.agentName && b.session === entry.session),
+    )
+    agent.previousBindings = [entry, ...rest].slice(0, 5)
+  }
+  agent.agentName = input.agentName
+  agent.session = input.session
+  agent.token = randomBytes(18).toString("hex")
+  agent.model = clip(input.model || "默认模型", 48)
+  if (input.modelPick) agent.modelPick = input.modelPick
+  else delete agent.modelPick
+  if (input.effortPick) agent.effortPick = input.effortPick
+  else delete agent.effortPick
+  if (input.workdir) agent.workdir = input.workdir
+  agent.fresh = true
+  agent.reboundFrom = { agentName: prevClient, model: prevModel, runId: input.fromRunId }
+  agent.lastSeenAt = Date.now()
+  if (agent.status === "offline") agent.status = "idle"
+  standbyOf().delete(agent.id)
+  postSystem(
+    `${agent.name} 切换客户端：${prevClient}（${prevModel}）→ ${input.agentName}（${agent.model}），席位身份、待办与长期记忆已接续`,
+  )
+  leaveOtherProjects({ agentName: input.agentName, uuid: input.session }, agent.id)
+  return { agent: present(agent), token: agent.token }
+}
+
+export function restoreAgentBinding(id: string, index: number) {
+  const agent = findAgent(id)
+  if (!agent) throw new ApiError(404, "这个席位不在了")
+  const list = agent.previousBindings ?? []
+  const target = list[index]
+  if (!target) throw new ApiError(404, "没有找到这条历史会话记录")
+  const prevClient = agent.agentName || "未绑定"
+  const prevModel = agent.model
+  const nextList = list.filter((_, i) => i !== index)
+  if (agent.agentName && agent.session && (agent.agentName !== target.agentName || agent.session !== target.session)) {
+    nextList.unshift({
+      agentName: agent.agentName,
+      session: agent.session,
+      model: agent.model,
+      modelPick: agent.modelPick,
+      effortPick: agent.effortPick,
+      workdir: agent.workdir,
+      switchedAt: Date.now(),
+    })
+  }
+  agent.previousBindings = nextList.slice(0, 5)
+  agent.agentName = target.agentName
+  agent.session = target.session
+  agent.token = randomBytes(18).toString("hex")
+  agent.model = target.model
+  if (target.modelPick) agent.modelPick = target.modelPick
+  else delete agent.modelPick
+  if (target.effortPick) agent.effortPick = target.effortPick
+  else delete agent.effortPick
+  if (target.workdir) agent.workdir = target.workdir
+  // Historical sessions already exist on disk in their client, so resume rather than create.
+  agent.fresh = false
+  agent.reboundFrom = { agentName: prevClient, model: prevModel }
+  agent.lastSeenAt = Date.now()
+  if (agent.status === "offline") agent.status = "idle"
+  standbyOf().delete(agent.id)
+  postSystem(`${agent.name} 切回原客户端会话：${target.agentName}（${target.model}）`)
+  leaveOtherProjects({ agentName: target.agentName, uuid: target.session }, agent.id)
+  return { agent: present(agent), restored: target, token: agent.token }
 }
 
 // The user picks the model a seat's wakes run on; null goes back to the
@@ -1008,6 +1416,15 @@ export function join(input: unknown) {
     if (!token || existing.token !== token) {
       throw new ApiError(409, `已经有人叫 ${name}。带上原来的 token 才能回到这个席位`)
     }
+    if (
+      link &&
+      existing.agentName &&
+      existing.session &&
+      (link.agentName !== existing.agentName || link.uuid !== existing.session) &&
+      existing.previousBindings?.some((b) => b.agentName === link.agentName && b.session === link.uuid)
+    ) {
+      throw new ApiError(409, `席位「${existing.name}」已切换到其他客户端会话，旧会话不能自动抢回；如需切回请在网页席位菜单操作`)
+    }
     if (existing.name !== name) renameAgent(existing.id, name)
     existing.model = model
     existing.role = role
@@ -1085,6 +1502,7 @@ export function seatCreated(input: {
   agentName: string
   session: string
   workdir: string
+  autoFull?: boolean
 }) {
   if (room().state.agents.some((agent) => agent.name === input.name)) {
     throw new ApiError(409, `已经有人叫 ${input.name}，换个名字`)
@@ -1105,17 +1523,39 @@ export function seatCreated(input: {
     if (input.effortPick) agent.effortPick = input.effortPick
     if (input.windowPick) agent.windowPick = input.windowPick
     if (input.compactPct) agent.compactPct = input.compactPct
+    if (input.autoFull) agent.autoFull = true
     commit()
     return { ...result, agent: present(agent) }
   }
   return result
 }
 
-// Its first wake went through: the session exists now.
-export function markWoken(id: string) {
+// Its wake went through: clear fresh/rebound/profile-dirty flags, unless the
+// seat was rebound to another client/session while that wake was running.
+export function markWoken(
+  id: string,
+  wokenLink?: { agentName?: string; session?: string },
+  rules?: { sig: string; at: number; short?: boolean },
+) {
   const agent = findAgent(id)
-  if (!agent?.fresh) return
+  if (!agent) return
+  if (wokenLink && (agent.agentName !== wokenLink.agentName || agent.session !== wokenLink.session)) {
+    return
+  }
+  // What the wake said of the house rules: whole (from now on the reference)
+  // or the short reminder.
+  if (rules) {
+    agent.rulesGiven = rules.short && agent.rulesGiven
+      ? { ...agent.rulesGiven, shorts: agent.rulesGiven.shorts + 1 }
+      : { sig: rules.sig, at: rules.at, session: agent.session, shorts: 0 }
+  }
+  if (!agent.fresh && !agent.profileDirty && !agent.reboundFrom) {
+    if (rules) commit()
+    return
+  }
   agent.fresh = false
+  delete agent.profileDirty
+  delete agent.reboundFrom
   commit()
 }
 
@@ -1141,6 +1581,14 @@ export function registerSession(input: unknown) {
   if (agent.demo) throw new ApiError(400, "演示席位不用报会话")
   const link = reportedLink(body)
   if (!link) throw new ApiError(400, "要一起报 agent 名和 uuid，比如 agent_name:cursor,uuid:123456")
+  if (
+    agent.agentName &&
+    agent.session &&
+    (link.agentName !== agent.agentName || link.uuid !== agent.session) &&
+    agent.previousBindings?.some((b) => b.agentName === link.agentName && b.session === link.uuid)
+  ) {
+    throw new ApiError(409, `席位「${agent.name}」已切换到其他客户端会话，旧会话不能覆盖当前绑定`)
+  }
   const changed = agent.agentName !== link.agentName || agent.session !== link.uuid
   agent.agentName = link.agentName
   agent.session = link.uuid
@@ -1161,13 +1609,10 @@ export function summonCandidates(message: Message) {
   // The user replying to an agent calls it, no @ needed. Between agents a
   // reply alone doesn't: every wake's answer replies to what woke it, and
   // that would bounce back and forth.
-  if (message.authorId === "human" && message.replyTo) {
-    const answered = room().state.messages.find((item) => item.id === message.replyTo)
-    if (answered && findAgent(answered.authorId)) ids.add(answered.authorId)
-  }
+  const answered = message.authorId === "human" && message.replyTo ? findMessageAny(message.replyTo) : undefined
+  if (answered && findAgent(answered.authorId)) ids.add(answered.authorId)
   ids.delete(message.authorId)
   // An answer the asker is waiting for in bench_ask reaches it there.
-  const answered = message.authorId === "human" && message.replyTo ? room().state.messages.find((item) => item.id === message.replyTo) : undefined
   if (answered?.ask?.answerId === message.id && answered.ask.handed) ids.delete(answered.authorId)
   const found: { id: string; name: string; agentName?: string; session?: string }[] = []
   for (const id of ids) {
@@ -1257,7 +1702,8 @@ function takePinned(agentId: string) {
   return held.runId === activeRun(agentId)?.id ? held.list : []
 }
 
-export function say(input: unknown) {
+// `final`: the room posting a wake's answer (lib/summon.ts), never from the API.
+export function say(input: unknown, { final = false }: { final?: boolean } = {}) {
   const body = asRecord(input)
   const actor = actorFrom(body)
   const own = attachmentsOf(body.attachments) ?? []
@@ -1267,7 +1713,7 @@ export function say(input: unknown) {
   const text = asString(body.text) ?? ""
   if (!text.trim() && !attachments) throw new ApiError(400, "消息是空的")
   const asked = asString(body.replyTo)
-  const there = (id?: string) => Boolean(id) && room().state.messages.some((message) => message.id === id)
+  const there = (id?: string) => Boolean(findMessageAny(id))
   if (asked && !there(asked)) {
     throw new ApiError(404, "要回复的那条消息不在了")
   }
@@ -1294,6 +1740,7 @@ export function say(input: unknown) {
     end: end || undefined,
     // Said during a wake, by stdout or by its own bench_say: tie it to the steps.
     runId: agent ? activeRun(agent.id)?.id : undefined,
+    runEnd: (final && Boolean(agent && activeRun(agent.id))) || undefined,
   })
   if (agent) agent.lastSeenAt = Date.now()
   if (actor.type === "human" && replyTo) answerAsk(replyTo, message)
@@ -1328,9 +1775,11 @@ function optionsOf(value: unknown): AskOption[] | undefined {
   return options.length ? options : undefined
 }
 
-// The user's reply to an open question is its answer.
+// The user's reply to an open question is its answer (even if older than HOT_MESSAGES).
 function answerAsk(questionId: string, reply: Message) {
-  const question = room().state.messages.find((item) => item.id === questionId)
+  const current = room()
+  const hot = current.state.messages.find((item) => item.id === questionId)
+  const question = hot ?? dbGetMessage(current.id, questionId) ?? undefined
   if (!question?.ask || question.ask.state !== "open") return
   question.ask = {
     ...question.ask,
@@ -1340,6 +1789,7 @@ function answerAsk(questionId: string, reply: Message) {
     answeredAt: reply.createdAt,
     handed: askingOf().has(questionId) || undefined,
   }
+  dbPutMessage(current.id, question)
   bumpRev()
 }
 
@@ -1366,7 +1816,7 @@ export function askUser(input: unknown) {
     text,
     mentions: [],
     ask,
-    replyTo: woke && room().state.messages.some((item) => item.id === woke) ? woke : undefined,
+    replyTo: woke && Boolean(findMessageAny(woke)) ? woke : undefined,
     runId: activeRun(agent.id)?.id,
   })
   agent.status = "blocked"
@@ -1385,7 +1835,7 @@ export async function awaitAnswer(input: unknown, signal?: AbortSignal) {
   const actor = actorFrom(body)
   if (actor.type !== "agent") throw new ApiError(400, "只有入座的 agent 能等回答")
   const id = asString(body.id) ?? ""
-  const question = () => room().state.messages.find((item) => item.id === id)
+  const question = () => findMessageAny(id)
   const first = question()
   if (!first?.ask) throw new ApiError(404, "这个问题不在房间里了")
   if (first.authorId !== actor.id) throw new ApiError(403, "只能等自己提的问题")
@@ -1445,7 +1895,10 @@ export function recall(input: unknown) {
   const body = asRecord(input)
   const actor = actorFrom(body)
   if (actor.type !== "human") throw new ApiError(403, `只有 ${userName()} 能撤回`)
-  const message = room().state.messages.find((item) => item.id === asString(body.id))
+  const current = room()
+  const targetId = asString(body.id)
+  const hot = current.state.messages.find((item) => item.id === targetId)
+  const message = hot ?? (targetId ? dbGetMessage(current.id, targetId) : null) ?? undefined
   if (!message) throw new ApiError(404, "这条消息不在房间里了")
   if (message.authorId !== "human") throw new ApiError(403, "只能撤回自己发的消息")
   if (message.recalled) throw new ApiError(409, "这条已经撤回了")
@@ -1455,6 +1908,7 @@ export function recall(input: unknown) {
   message.mentions = []
   message.attachments = undefined
   message.ask = undefined
+  dbPutMessage(current.id, message)
   bumpRev()
   commit()
   return { message, original }
@@ -1512,9 +1966,19 @@ export function postLimited(text: string, limited: LimitedRun) {
 
 // Where the card has got to; false if it is no longer in this room.
 export function markLimited(runId: string, patch: Partial<LimitedRun>) {
-  for (const message of room().state.messages) {
+  const current = room()
+  for (const message of current.state.messages) {
     if (message.limited?.runId !== runId) continue
     Object.assign(message.limited, patch)
+    dbPutMessage(current.id, message)
+    bumpRev()
+    commit()
+    return true
+  }
+  const older = dbFindMessageByRunField(current.id, (m) => m.limited?.runId === runId)
+  if (older?.limited) {
+    Object.assign(older.limited, patch)
+    dbPutMessage(current.id, older)
     bumpRev()
     commit()
     return true
@@ -1523,27 +1987,39 @@ export function markLimited(runId: string, patch: Partial<LimitedRun>) {
 }
 
 export function markInterruptedResumed(runId: string, at: number) {
-  for (const message of room().state.messages) {
+  const current = room()
+  for (const message of current.state.messages) {
     const item = message.interrupted?.find((entry) => entry.runId === runId)
     if (!item) continue
     item.resumedAt = at
+    dbPutMessage(current.id, message)
     bumpRev()
     commit()
     return
   }
+  const older = dbFindMessageByRunField(current.id, (m) => Boolean(m.interrupted?.some((entry) => entry.runId === runId)))
+  const olderItem = older?.interrupted?.find((entry) => entry.runId === runId)
+  if (older && olderItem) {
+    olderItem.resumedAt = at
+    dbPutMessage(current.id, older)
+    bumpRev()
+    commit()
+  }
 }
 
 function appendMessage(input: Omit<Message, "id" | "seq" | "createdAt">) {
+  const current = room()
   const message: Message = {
     ...input,
     id: uid("m"),
     seq: nextSeq(),
     createdAt: Date.now(),
   }
-  const state = room().state
+  dbPutMessage(current.id, message)
+  const state = current.state
   state.messages.push(message)
-  if (state.messages.length > 400) {
-    state.messages.splice(0, state.messages.length - 400)
+  if (state.messages.length > HOT_MESSAGES) {
+    state.messages.splice(0, state.messages.length - HOT_MESSAGES)
   }
   return message
 }
@@ -1559,7 +2035,12 @@ export function inbox(input: unknown) {
   if (!Number.isFinite(after) || after < 0) {
     throw new ApiError(400, "after 要是一个不小于 0 的数字")
   }
-  const pending = room().state.messages.filter((message) => message.seq > after && !message.recalled)
+  const current = room()
+  const firstHotSeq = current.state.messages[0]?.seq
+  const pending =
+    firstHotSeq !== undefined && after < firstHotSeq - 1
+      ? dbLoadMessagesAfter(current.id, after, 101)
+      : current.state.messages.filter((message) => message.seq > after && !message.recalled)
   const fresh = pending.slice(0, 100)
   const cursor = fresh.at(-1)?.seq ?? after
   agent.lastSeenAt = Date.now()
@@ -1584,14 +2065,21 @@ export function inbox(input: unknown) {
 // Everything said since this seat last looked, newest kept when it runs past
 // `limit` characters, and marks it as seen. Join and leave notices are left
 // out; lines aimed at the seat are starred so they stand out in a long batch.
-export function catchUp(id: string, limit: number) {
+export function catchUp(id: string, limit: number, omitIds?: ReadonlySet<string>) {
   const agent = findAgent(id)
   if (!agent) return { text: "", skipped: 0 }
-  const { messages, seq } = room().state
-  const unseen = messages.filter(
-    (message) =>
-      message.seq > (agent.seenSeq ?? 0) && message.kind !== "system" && message.authorId !== id && !message.recalled,
-  )
+  const current = room()
+  const { messages, seq } = current.state
+  const seen = agent.seenSeq ?? 0
+  const firstHotSeq = messages[0]?.seq
+  const unseen = (
+    firstHotSeq !== undefined && seen < firstHotSeq - 1
+      ? dbLoadTalkAfter(current.id, seen).filter((message) => message.authorId !== id)
+      : messages.filter(
+          (message) =>
+            message.seq > seen && message.kind !== "system" && message.authorId !== id && !message.recalled,
+        )
+  ).filter((message) => !omitIds?.has(message.id))
   const lines: string[] = []
   let size = 0
   let index = unseen.length - 1
@@ -1605,7 +2093,7 @@ export function catchUp(id: string, limit: number) {
   agent.seenSeq = seq
   commit()
   const skipped = index + 1
-  return { text: lines.join("\n\n"), skipped, summary: skipped > 0 ? room().state.summary : undefined }
+  return { text: lines.join("\n\n"), skipped, summary: skipped > 0 ? current.state.summary : undefined }
 }
 
 // What a summary writer works from: the last summary and the talk after it.
@@ -1627,8 +2115,8 @@ export function summaryJob() {
   return room().summaryJob
 }
 
-export function startSummaryJob(agentId: string, upToSeq: number) {
-  room().summaryJob = { agentId, upToSeq }
+export function startSummaryJob(agentId: string, upToSeq: number, flowsAt?: Record<string, number>) {
+  room().summaryJob = { agentId, upToSeq, flowsAt }
   bumpRev()
   commit()
 }
@@ -1640,11 +2128,15 @@ export function endSummaryJob(agentId: string) {
   commit()
 }
 
-export function saveSummary(text: string, by: string, upToSeq = room().state.seq) {
-  const clean = text.trim()
+// `flowsAt`: the 「流程」 pieces the writer was asked about (lib/flow-summary.ts);
+// their summaries come after the summary proper and are kept apart from it.
+export function saveSummary(text: string, by: string, upToSeq = room().state.seq, flowsAt?: Record<string, number>) {
+  const { main, flows } = splitFlowSummaries(text)
+  const clean = main.trim()
   if (!clean) throw new ApiError(400, "摘要是空的")
   const state = room().state
-  state.summary = { text: clip(clean, 8000), upToSeq, by, at: Date.now() }
+  const kept = mergeFlowSummaries(state.summary?.flows, flows, flowsAt, by)
+  state.summary = { text: clip(clean, 8000), upToSeq, by, at: Date.now(), ...(Object.keys(kept).length > 0 ? { flows: kept } : {}) }
   bumpRev()
   commit()
   return state.summary
@@ -1659,8 +2151,8 @@ export function summaryAction(input: unknown) {
   if (actor.type === "agent") {
     if (action !== "write") throw new ApiError(400, "agent 只能 write 摘要")
     const job = room().summaryJob
-    const upTo = job?.agentId === actor.id ? job.upToSeq : undefined
-    return { summary: saveSummary(asString(body.text) ?? "", actor.name, upTo) }
+    const mine = job?.agentId === actor.id
+    return { summary: saveSummary(asString(body.text) ?? "", actor.name, mine ? job.upToSeq : undefined, mine ? job.flowsAt : undefined) }
   }
   if (action === "skip") {
     room().state.summarySkipSeq = room().state.seq
@@ -1680,7 +2172,9 @@ function isForAgent(message: Message, agentId: string, messages: Message[]) {
   if (message.mentions.includes(agentId)) return true
   if (message.handoff?.toId === agentId) return true
   if (!message.replyTo) return false
-  return messages.some((item) => item.id === message.replyTo && item.authorId === agentId)
+  const hit = messages.find((item) => item.id === message.replyTo)
+  if (hit) return hit.authorId === agentId
+  return findMessageAny(message.replyTo)?.authorId === agentId
 }
 
 function withActor(actor: Actor, input: Record<string, unknown>) {
@@ -1690,8 +2184,12 @@ function withActor(actor: Actor, input: Record<string, unknown>) {
   return { ...input, agentId: agent.id, token: agent.token }
 }
 
-export function sayAs(actor: Actor, input: { text: string; replyTo?: string; attachments?: { path: string }[] }) {
-  return say(withActor(actor, input))
+export function sayAs(
+  actor: Actor,
+  input: { text: string; replyTo?: string; attachments?: { path: string }[] },
+  options: { final?: boolean } = {},
+) {
+  return say(withActor(actor, input), options)
 }
 
 export function createTaskAs(
@@ -1769,9 +2267,9 @@ export function createTask(input: unknown) {
       },
     ],
   }
-  const state = room().state
-  state.tasks.push(task)
-  if (state.tasks.length > 200) state.tasks.splice(0, state.tasks.length - 200)
+  const current = room()
+  current.state.tasks.push(task)
+  dbPutTask(current.id, task)
   commit()
   return { task }
 }
@@ -1781,7 +2279,8 @@ export function actOnTask(input: unknown) {
   const actor = actorFrom(body)
   const taskId = asString(body.taskId)
   if (!taskId) throw new ApiError(400, "缺少任务 id")
-  const task = room().state.tasks.find((item) => item.id === taskId)
+  const current = room()
+  const task = current.state.tasks.find((item) => item.id === taskId)
   if (!task) throw new ApiError(404, "没有这条任务")
   const action = asString(body.action)
   const note = clip(asString(body.note) ?? "", 500)
@@ -1800,6 +2299,7 @@ export function actOnTask(input: unknown) {
     })
     copy.forkedFrom = { id: task.id, title: task.title }
     copy.history[0].note = `复制自「${task.title}」（${task.id}）${copy.history[0].note ? `，${copy.history[0].note}` : ""}`
+    dbPutTask(current.id, copy)
     commit()
     return { task: copy }
   }
@@ -1883,6 +2383,7 @@ export function actOnTask(input: unknown) {
     })
     task.updatedAt = now
     task.seq = message.seq
+    dbPutTask(current.id, task)
     commit()
     runtime().bus.emit("message", message)
     return { task, message }
@@ -1922,6 +2423,7 @@ export function actOnTask(input: unknown) {
     })
     task.updatedAt = now
     task.seq = message.seq
+    dbPutTask(current.id, task)
     commit()
     runtime().bus.emit("message", message)
     return { task, message }
@@ -1962,27 +2464,33 @@ export function actOnTask(input: unknown) {
 
   task.updatedAt = now
   task.seq = nextSeq()
+  dbPutTask(current.id, task)
   commit()
   return { task }
 }
 
 export function removeAgent(id: string, silent = false, note?: string) {
-  const state = room().state
+  const current = room()
+  const state = current.state
   const agent = state.agents.find((item) => item.id === id)
   if (!agent) throw new ApiError(404, "这个席位不在了")
   const now = Date.now()
-  for (const task of state.tasks) {
-    if (task.ownerId === agent.id && task.status !== "done") {
-      task.status = "blocked"
-      task.updatedAt = now
-      task.history.push({
-        at: now,
-        actor: "并坐",
-        action: "卡住",
-        note: `${note ?? `${agent.name} 离席`}，这阶段先停着`,
-      })
+  inTransaction(() => {
+    for (const task of state.tasks) {
+      if (task.ownerId === agent.id && task.status !== "done") {
+        task.status = "blocked"
+        task.updatedAt = now
+        task.history.push({
+          at: now,
+          actor: "并坐",
+          action: "卡住",
+          note: `${note ?? `${agent.name} 离席`}，这阶段先停着`,
+        })
+        dbPutTask(current.id, task)
+      }
     }
-  }
+    dbDeleteSeat(agent.id)
+  })
   state.agents = state.agents.filter((item) => item.id !== agent.id)
   standbyOf().delete(agent.id)
   if (!silent) {
@@ -2034,8 +2542,15 @@ export async function waitFor(input: unknown, signal?: AbortSignal) {
   const id = agent.id
   standbyOf().set(id, Date.now() + timeoutMs + STANDBY_GRACE_MS)
 
-  const pending = () =>
-    room().state.messages.some((message) => message.seq > after && isForAgent(message, id, room().state.messages))
+  const pending = () => {
+    const current = room()
+    const firstHotSeq = current.state.messages[0]?.seq
+    const source =
+      firstHotSeq !== undefined && after < firstHotSeq - 1
+        ? dbLoadMessagesAfter(current.id, after, 100)
+        : current.state.messages
+    return source.some((message) => message.seq > after && isForAgent(message, id, current.state.messages))
+  }
   const reply = (timedOut: boolean) => ({ ...inbox({ agentId, token, after }), timedOut })
   if (pending()) {
     standbyOf().set(id, Date.now() + STANDBY_GRACE_MS)
@@ -2098,7 +2613,9 @@ export function debugClearSummary() {
 }
 
 export function resetRoom() {
-  room().state = emptyState()
+  const current = room()
+  dbResetProjectRoom(current.id)
+  current.state = emptyState()
   standbyOf().clear()
   commit()
   return snapshot()

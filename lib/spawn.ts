@@ -11,7 +11,18 @@ import { cliCommand, dataHome } from "@/lib/platform"
 import { checkEffort, checkPick, dshFlags } from "@/lib/models"
 import { ApiError } from "@/lib/http"
 import { KINDS } from "@/lib/kinds"
-import { agentState, currentProjectInfo, sayAs, seatCreated, snapshot, userName } from "@/lib/store"
+import {
+  agentState,
+  currentProjectInfo,
+  rebindAgent,
+  restoreAgentBinding,
+  sayAs,
+  seatCreated,
+  seatCredentials,
+  snapshot,
+  userName,
+} from "@/lib/store"
+import { isSeatBusy, resumeLimitedAfterRebind } from "@/lib/summon"
 
 // 「开新会话」: the room creates a session of an agent kind itself, seats it
 // and, if given a task, hands it over, in the folder picked here: the same
@@ -91,7 +102,7 @@ function claudeDir(session: string) {
 }
 
 // Where a seat works, when the room can tell.
-function seatDir(agentId: string) {
+export function seatDir(agentId: string) {
   const agent = agentState(agentId)
   if (!agent) return null
   if (agent.workdir) return agent.workdir
@@ -157,9 +168,26 @@ async function newWorktree(base: string, name: string) {
 
 // Hand the new session's bench tools its seat, the way bench_join would have,
 // so it doesn't have to join again (see the state files in bench-mcp.mjs).
-function giveSeat(kind: string, session: string, seat: { agentId: string; token: string; name: string; project: string }) {
+function giveSeat(
+  kind: string,
+  session: string,
+  seat: { agentId: string; token: string; name: string; project: string },
+  purgeOldForAgent = false,
+) {
   const dir = path.join(process.env.XDG_STATE_HOME || path.join(os.homedir(), ".local", "state"), "bench-mcp")
   mkdirSync(dir, { recursive: true })
+  if (purgeOldForAgent) {
+    try {
+      for (const file of readdirSync(dir)) {
+        if (!file.endsWith(".json")) continue
+        const full = path.join(dir, file)
+        try {
+          const parsed = JSON.parse(readFileSync(full, "utf8")) as { agentId?: string }
+          if (parsed?.agentId === seat.agentId) rmSync(full, { force: true })
+        } catch {}
+      }
+    } catch {}
+  }
   const body = JSON.stringify({ ...seat, cursor: snapshot().seq })
   writeFileSync(path.join(dir, `${kind}-${session}.json`), body, { mode: 0o600 })
   writeFileSync(path.join(dir, `${kind}-name-${Buffer.from(`${seat.project}/${seat.name}`).toString("hex")}.json`), body, { mode: 0o600 })
@@ -372,6 +400,20 @@ function asText(value: unknown, max: number) {
   return typeof value === "string" ? value.trim().slice(0, max) : ""
 }
 
+async function createClientSession(
+  kindId: string,
+  dir: string,
+  about: { name: string; role: string; project: string },
+  pick: string | null,
+) {
+  if (kindId === "dsh") return newDshSession(dir, about, pick)
+  if (kindId === "antigravity") return newAgySession(dir, about, pick)
+  if (kindId === "codex") return newCodexSession(dir, about, pick)
+  if (kindId === "cursor") return newCursorSession(dir)
+  if (kindId === "codebuddy" || kindId === "workbuddy") return newBuddySession(kindId, dir, about, pick)
+  return randomUUID()
+}
+
 export async function spawnSession(input: Record<string, unknown>) {
   const kind = KINDS.find((item) => item.id === input.kind)
   if (!kind || !SPAWNABLE.includes(kind.id)) throw new ApiError(400, "这一家还不能由房间开新会话")
@@ -399,26 +441,122 @@ export async function spawnSession(input: Record<string, unknown>) {
 
   const project = currentProjectInfo()
   const about = { name, role, project: project.name }
-  const session =
-    kind.id === "dsh"
-      ? await newDshSession(dir, about, pick)
-      : kind.id === "antigravity"
-        ? await newAgySession(dir, about, pick)
-        : kind.id === "codex"
-          ? await newCodexSession(dir, about, pick)
-          : kind.id === "cursor"
-            ? await newCursorSession(dir)
-          : kind.id === "codebuddy" || kind.id === "workbuddy"
-          ? await newBuddySession(kind.id, dir, about, pick)
-          : randomUUID()
+  const session = await createClientSession(kind.id, dir, about, pick)
   // Someone may have taken the name while the session was being made.
   if (snapshot().agents.some((agent) => agent.name === name)) throw new ApiError(409, `已经有人叫 ${name}，换个名字`)
   const adapter = adapterFor(kind.id)
   const model = pick ?? (kind.id === "claude" ? "Claude Code" : ((adapter && modelOf(adapter)) ?? kind.harness))
-  const seat = seatCreated({ name, role, model, modelPick: pick, effortPick: effort, windowPick: window, compactPct, agentName: kind.id, session, workdir: dir })
+  const seat = seatCreated({
+    name,
+    role,
+    model,
+    modelPick: pick,
+    effortPick: effort,
+    windowPick: window,
+    compactPct,
+    agentName: kind.id,
+    session,
+    workdir: dir,
+    autoFull: input.autoFull === true,
+  })
   giveSeat(kind.id, session, { agentId: seat.agent.id, token: seat.token, name, project: project.id })
   // A task is said in the room, so everyone sees what the new seat is for, and
   // it is what wakes the seat for the first time.
   if (task) sayAs({ type: "human", id: "human", name: userName() }, { text: `@${name} ${task}` })
   return { agent: seat.agent, dir, branch }
+}
+
+// Rebind an existing seat onto another AI vendor/client (e.g. Claude hit usage
+// limit -> Codex or Gemini steps in) while preserving seat id, tasks, persona
+// and long-term memory, and rotating the seat token so the old session cannot
+// reclaim or speak as the seat.
+export async function rebindSession(agentId: string, input: Record<string, unknown>) {
+  const creds = seatCredentials(agentId)
+  if (isSeatBusy(agentId)) {
+    throw new ApiError(409, `${creds.name} 正在跑一轮，先停下或等这一轮结束再切换客户端`)
+  }
+  const kindId = asText(input.kind, 24)
+  if (!kindId) throw new ApiError(400, "请选择要切换到的客户端类型")
+  const knownKind = KINDS.find((item) => item.id === kindId)
+  const customAdapter = adapterFor(kindId)
+  const explicitSession = asText(input.session, 128)
+  if (!knownKind?.spawn && !customAdapter && !explicitSession) {
+    throw new ApiError(400, `${kindId} 不能由房间自动开新会话，也未配置自定义唤起适配器`)
+  }
+
+  const pick = checkPick(input.model)
+  const effort = checkEffort(kindId, input.effort)
+  const fromRunId = asText(input.fromRunId, 64) || undefined
+  const task = asText(input.task, 4000)
+
+  const project = currentProjectInfo()
+  const rawDir = asText(input.workdir, 1000)
+  let dir = rawDir ? path.resolve(rawDir.replace(/^~(?=\/|$)/, os.homedir())) : (seatDir(agentId) ?? project.dir ?? process.cwd())
+  if (!isDir(dir)) {
+    if (rawDir) throw new ApiError(400, `${dir} 不存在或不是目录`)
+    dir = process.cwd()
+  }
+
+  const about = { name: creds.name, role: creds.role, project: project.name }
+  const session = explicitSession
+    ? explicitSession
+    : knownKind?.spawn
+      ? await createClientSession(kindId, dir, about, pick)
+      : randomUUID()
+
+  if (isSeatBusy(agentId)) {
+    throw new ApiError(409, `${creds.name} 正在跑一轮，先停下或等这一轮结束再切换客户端`)
+  }
+
+  const adapter = adapterFor(kindId)
+  const model =
+    pick ??
+    (kindId === "claude"
+      ? "Claude Code"
+      : ((adapter && modelOf(adapter)) ?? knownKind?.harness ?? kindId))
+
+  const updated = rebindAgent(agentId, {
+    agentName: kindId,
+    session,
+    model,
+    modelPick: pick,
+    effortPick: effort,
+    workdir: dir,
+    fromRunId,
+  })
+  giveSeat(kindId, session, { agentId: creds.id, token: updated.token, name: updated.agent.name, project: project.id }, true)
+
+  let resumed = false
+  if (fromRunId) {
+    const r = resumeLimitedAfterRebind(fromRunId, `${knownKind?.label ?? kindId}（${model}）`)
+    resumed = Boolean(r.started)
+  } else if (task) {
+    sayAs({ type: "human", id: "human", name: userName() }, { text: `@${updated.agent.name} ${task}` })
+    resumed = true
+  }
+
+  return { agent: updated.agent, dir, resumed }
+}
+
+// Switch a seat back to one of its previous `<agentName, session>` bindings
+// (e.g. after the original vendor's quota has reset).
+export function switchBackBinding(agentId: string, index: number) {
+  const creds = seatCredentials(agentId)
+  if (isSeatBusy(agentId)) {
+    throw new ApiError(409, `${creds.name} 正在跑一轮，先停下或等这一轮结束再切回原会话`)
+  }
+  const project = currentProjectInfo()
+  const { agent, restored, token } = restoreAgentBinding(agentId, index)
+  giveSeat(
+    restored.agentName,
+    restored.session,
+    {
+      agentId: creds.id,
+      token,
+      name: agent.name,
+      project: project.id,
+    },
+    true,
+  )
+  return { agent, restored: { agentName: restored.agentName, model: restored.model } }
 }

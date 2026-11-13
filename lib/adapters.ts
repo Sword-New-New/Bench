@@ -102,6 +102,20 @@ function executable(file: string) {
 }
 
 // Whether the first word of a command resolves to something runnable.
+// Where a bare command name is found on the wake PATH (summonPath), as a full
+// path: something the room starts itself must use this, because the room's
+// own PATH may be shorter (started from the desktop entry) and spawn() only
+// looks there.
+export function whereIs(name: string) {
+  for (const dir of summonPath().split(pathDelimiter())) {
+    for (const file of commandNames(name)) {
+      const full = path.join(dir, file)
+      if (executable(full)) return full
+    }
+  }
+  return null
+}
+
 export function installed(command: string) {
   const first = command.trim().match(/^(?:'([^']*)'|"([^"]*)"|(\S+))/)
   const bin = first?.[1] ?? first?.[2] ?? first?.[3]

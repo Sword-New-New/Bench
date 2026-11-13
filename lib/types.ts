@@ -35,10 +35,42 @@ export type PublicAgent = {
   stepAt?: number
   // The user let it do anything for the rest of this wake.
   fullAccess?: boolean
+  // ...or whenever it is woken, until turned off (「默认开启全部权限」).
+  autoFull?: boolean
   // Its session is open in a terminal the room holds (lib/terminal.ts).
   terminal?: boolean
+  // Messages queued in its wake lane, and whether its lane is paused.
+  queuedCount?: number
+  queuePaused?: boolean
+  queuedItems?: { id: string; line: string }[]
+  // Whether this seat has a saved persona or long-term memory card.
+  hasProfile?: boolean
+  // Earlier client sessions this seat used (without exposing raw session uuids),
+  // newest first, so the user can switch it back after a quota reset.
+  previousBindings?: PublicSeatBinding[]
   createdAt: number
   lastSeenAt: number
+}
+
+export type SeatProfile = {
+  persona: string
+  memory: string
+  updatedAt: number
+}
+
+export type SeatBinding = {
+  agentName: string
+  session: string
+  model: string
+  modelPick?: string
+  effortPick?: string
+  workdir?: string
+  switchedAt: number
+  reason?: string
+}
+
+export type PublicSeatBinding = Omit<SeatBinding, "session"> & {
+  index: number
 }
 
 export type Handoff = {
@@ -96,6 +128,10 @@ export type Message = {
   handoff?: Handoff
   // Posted during a wake: the steps that led to it.
   runId?: string
+  // The wake's own answer, posted by the room as the run ends (stdout); a
+  // bench_say in the middle of the run has the runId but not this. The page
+  // keeps the 「正在做」 bubble until it sees one.
+  runEnd?: boolean
   attachments?: Attachment[]
   ask?: Ask
   // The user took it back: text and attachments are gone, the line stays.
@@ -185,6 +221,21 @@ export type RoomSummary = {
   upToSeq: number
   by: string
   at: number
+  // Short summaries of the 「流程」 view's pieces of work, by the piece's
+  // first message id; written along with the room summary (lib/flow-summary.ts).
+  flows?: Record<string, FlowSummary>
+}
+
+export type FlowSummary = {
+  text: string
+  // The piece's short name, and each block's (by node id), shown in the
+  // picture instead of the message's opening words.
+  title?: string
+  nodes?: Record<string, string>
+  // The piece's lastAt it was written from; later activity shows as new.
+  upToAt: number
+  by: string
+  at: number
 }
 
 // A project: one room of its own, and optionally the folder its work is in.
@@ -211,7 +262,11 @@ export type Project = ProjectInfo & {
   bench: BenchSeat[]
   // Every seat's name, for the card's tooltip.
   names: string[]
+  // The newest 「【本轮结束】」 in it, for the desktop notification.
+  lastEnd?: ProjectEnd
 }
+
+export type ProjectEnd = { id: string; at: number; name: string; color: string; text: string }
 
 export type BenchSeat = {
   id: string
@@ -249,6 +304,11 @@ export type RoomSnapshot = {
   agents: PublicAgent[]
   messages: Message[]
   tasks: Task[]
+  // Open bench_ask questions older than the snapshot's latest 400 messages, so
+  // PinnedAsks can still surface and answer them.
+  openAsks?: Message[]
+  // Total stored messages in this project (messages[] holds at most the latest 400).
+  totalMessages?: number
   seq: number
   rev: number
   summary: RoomSummary | null
@@ -323,10 +383,12 @@ export type LimitedRun = {
   agentName: string
   label: string
   resetsAt?: number
-  state: "open" | "scheduled" | "resumed" | "failed" | "dismissed"
-  // scheduled: when it will be woken; resumed: when it was.
+  state: "open" | "scheduled" | "resumed" | "rebound" | "failed" | "dismissed"
+  // scheduled: when it will be woken; resumed/rebound: when it was.
   at?: number
   note?: string
+  // rebound: which client/model picked up this seat's work.
+  reboundTo?: string
 }
 
 // A wake the room stopped in the middle of, listed so the user can wake it again.

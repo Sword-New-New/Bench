@@ -18,7 +18,7 @@ const store = globalThis as typeof globalThis & { __benchHumanKey?: string }
 
 export function humanKey(): string {
   if (store.__benchHumanKey) return store.__benchHumanKey
-  const file = path.join(process.cwd(), "data", "human-key")
+  const file = path.join(process.env.BENCH_DATA_DIR || path.join(process.cwd(), "data"), "human-key")
   let key = ""
   try {
     key = readFileSync(file, "utf8").trim()

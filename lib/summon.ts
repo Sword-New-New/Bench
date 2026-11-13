@@ -1,11 +1,13 @@
 import { spawn } from "node:child_process"
-import { randomBytes } from "node:crypto"
+import { createHash, randomBytes } from "node:crypto"
 import { StringDecoder } from "node:string_decoder"
 
 import { adapterFor, commandFor, summonPath, type Adapter } from "@/lib/adapters"
 import { compactEnv, CONTEXT_KINDS, seatContext, type SeatContext } from "@/lib/context"
+import { dbLoadLanes, dbSaveLane } from "@/lib/db"
 import { createParser, liveLine } from "@/lib/events"
 import { ApiError } from "@/lib/http"
+import { registerLaneReader } from "@/lib/lane-state"
 import { detectLimit, whenText } from "@/lib/limits"
 import { commandLine, killTree } from "@/lib/platform"
 import { accepting, deliver, openTerminal } from "@/lib/terminal"
@@ -25,6 +27,7 @@ import {
   markReached,
   postInterrupted,
   postLimited,
+  projectOfSeat,
   endSummaryJob,
   isStandby,
   isWaiting,
@@ -33,9 +36,10 @@ import {
   onMessage,
   postSystem,
   pulseAgent,
-  relayClosed,
+  roomChanged,
   saveSummary,
   sayAs,
+  seatBriefing,
   snapshot,
   startSummaryJob,
   summaryJob,
@@ -47,6 +51,8 @@ import {
 } from "@/lib/store"
 import { withAttachments } from "@/lib/text"
 import type { Message, RoomSummary, Run } from "@/lib/types"
+import { flowsOf } from "@/lib/flow"
+import { flowSummaryPrompt, flowsToSummarize } from "@/lib/flow-summary"
 
 const NOTE_GAP_MS = 30_000
 // After the stream says its turn is over, how long the process may take to exit.
@@ -64,9 +70,6 @@ const LIVE_GAP_MS = 800
 // seconds), so the run isn't stopped: the seat and the 「过程」 panel just say
 // how long it has been waiting, so it doesn't look frozen.
 const WAIT_NOTE_MS = 30_000
-// Agents answering agents can bounce forever. Stop the relay after this many
-// automatic hops and wait for a human message.
-const MAX_HOPS = 3
 
 // One queue per seat. A seat runs one command at a time; messages that land
 // while it runs are batched into the next run instead of being dropped.
@@ -77,8 +80,10 @@ const MAX_HOPS = 3
 // `whisper`: what the user said to this seat alone, run before anything else.
 type Lane = {
   running: boolean
-  // What called it since its last run, by message id, so a recalled message
-  // can be taken back out before the run starts.
+  paused?: boolean
+  projectId?: string
+  // What called it since its last run, by message id, so a recalled or dropped
+  // message can be taken back out before the run starts.
   pending: { id: string; line: string }[]
   hops: number
   summary?: boolean
@@ -91,6 +96,8 @@ type Lane = {
   whisper?: string
   // The latest message that called this seat; the next reply answers it.
   trigger?: string
+  // Message IDs explicitly dropped from this seat's wake queue, omitted on next catchUp.
+  dropped?: string[]
   // While a reply run is going: the key its hook asks with (BENCH_RUN_KEY),
   // the project and run log it belongs to, and the furthest relay hop of the
   // messages it was handed mid-run (see takeQueued).
@@ -107,8 +114,10 @@ type SummonGlobal = typeof globalThis & {
   // Runs the user asked to be woken again after a usage limit: when.
   __benchResumeTimers?: Map<string, NodeJS.Timeout>
   __benchSummonHandler?: (message: Message) => void
+  __benchCalledHop?: Map<string, number>
   __benchSummonAt?: Map<string, number>
   __benchLanes?: Map<string, Lane>
+  __benchLanesDataPath?: string
   __benchHops?: Map<string, number>
 }
 
@@ -116,8 +125,53 @@ function g() {
   return globalThis as SummonGlobal
 }
 
+function lanesMap(): Map<string, Lane> {
+  const currentDataPath = process.env.BENCH_DATA_DIR || ""
+  if (!g().__benchLanes || g().__benchLanesDataPath !== currentDataPath) {
+    const loaded = new Map<string, Lane>()
+    try {
+      for (const row of dbLoadLanes()) {
+        // After a server restart, any seat with queued work starts paused so
+        // queued messages never jump ahead of an interrupted wake or run behind
+        // the user's back when they restarted to stop things.
+        const hasWork =
+          row.pending.length > 0 ||
+          row.carry !== undefined ||
+          row.summary ||
+          row.compact ||
+          row.goal !== undefined ||
+          row.whisper !== undefined
+        const paused = Boolean(row.paused || hasWork)
+        const entry: Lane = {
+          running: false,
+          paused: paused || undefined,
+          projectId: row.projectId,
+          pending: row.pending,
+          hops: row.hops,
+          summary: row.summary || undefined,
+          compact: row.compact || undefined,
+          goal: row.goal,
+          carry: row.carry,
+          whisper: row.whisper,
+          trigger: row.trigger,
+          dropped: row.dropped,
+        }
+        loaded.set(row.agentId, entry)
+        if (paused && !row.paused && row.projectId) {
+          try {
+            dbSaveLane(row.agentId, row.projectId, entry)
+          } catch {}
+        }
+      }
+    } catch {}
+    g().__benchLanes = loaded
+    g().__benchLanesDataPath = currentDataPath
+  }
+  return g().__benchLanes!
+}
+
 function lane(id: string) {
-  const store = (g().__benchLanes ??= new Map())
+  const store = lanesMap()
   let found = store.get(id)
   if (!found) {
     found = { running: false, pending: [], hops: 0 }
@@ -125,6 +179,32 @@ function lane(id: string) {
   }
   return found
 }
+
+function syncLane(agentId: string, notify = true) {
+  const queue = lane(agentId)
+  const projId = queue.projectId ?? projectOfSeat(agentId)
+  if (!projId) return
+  queue.projectId = projId
+  try {
+    dbSaveLane(agentId, projId, queue)
+  } catch {}
+  if (notify) {
+    try {
+      inProject(projId, () => roomChanged())
+    } catch {}
+  }
+}
+
+registerLaneReader((agentId) => {
+  const q = lanesMap().get(agentId)
+  if (!q) return undefined
+  if (!q.paused && q.pending.length === 0) return undefined
+  return {
+    paused: Boolean(q.paused),
+    queuedCount: q.pending.length,
+    queuedItems: q.pending,
+  }
+})
 
 function hops() {
   return (g().__benchHops ??= new Map())
@@ -146,14 +226,31 @@ function stamp(at: number) {
   return new Date(at).toTimeString().slice(0, 5)
 }
 
-// Said once, on the first wake of a session the room created: it starts with
-// no idea where it is.
+// Said on the first wake of a session the room created, after a cross-vendor
+// rebind, or after the seat's persona/memory was updated.
 function introduce(agent: NonNullable<ReturnType<typeof agentState>>) {
-  if (!agent.fresh) return ""
-  return `【你是并坐房间新开的会话】你在「${currentProjectInfo().name}」项目里叫 ${agent.name}，分工是「${agent.role}」，工作目录是 ${agent.workdir}。房间已经替你入座了，bench 工具直接能用，不用再 bench_join。别人 @${agent.name} 时房间会叫醒你。\n\n`
+  const parts: string[] = []
+  if (agent.fresh) {
+    parts.push(
+      `【你是并坐房间新开的会话】你在「${currentProjectInfo().name}」项目里叫 ${agent.name}，分工是「${agent.role}」，工作目录是 ${agent.workdir}。房间已经替你入座了，bench 工具直接能用，不用再 bench_join。别人 @${agent.name} 时房间会叫醒你。`,
+    )
+  }
+  if (agent.fresh || agent.profileDirty || agent.reboundFrom) {
+    const brief = seatBriefing(agent.id)
+    if (brief) parts.push(brief)
+  }
+  return parts.length > 0 ? `${parts.join("\n\n")}\n\n` : ""
 }
 
-function envelope(body: string, skipped: number, summary: RoomSummary | undefined, replyByStdout: boolean, claude = false) {
+function envelope(
+  body: string,
+  skipped: number,
+  summary: RoomSummary | undefined,
+  replyByStdout: boolean,
+  claude = false,
+  full = false,
+  seat?: NonNullable<ReturnType<typeof agentState>>,
+) {
   const how = replyByStdout
     ? "最后的回答直接输出就行，会作为你的发言贴回房间，不用调用 bench_say。中途的进度、逐条汇报直接说出来：这些话会实时显示在你自己的席位和过程记录里，用户看得到，但不会进群聊，所以不要用 bench_say 刷进度。"
     : `回复请发回房间：有 bench_say 工具就用它；没有的话 POST ${roomUrl()}/api/v1/say，带你入座时的 agentId 和 token。`
@@ -170,10 +267,12 @@ function envelope(body: string, skipped: number, summary: RoomSummary | undefine
     ? `如果这一轮交接已经完成、不需要谁再接手，回答以「${END_MARK}」开头，写一句做完了什么，不要 @ 任何人。`
     : `如果这一轮交接已经完成、不需要谁再接手，用 bench_say 带 end: true 发一句做完了什么，不要 @ 任何人。`
   // Claude Code's prompts reach the page (claude-code.sh, lib/permits.ts).
-  const permit = claude
+  const permit = claude && full
+    ? `${userName()} 给了你这个席位默认的全部权限：命令和工具直接用，不用 bench_elevate 申请。改动、删除、对外发送这类事照样以他说的为准。sudo 密码只能他自己在终端输。`
+    : claude
     ? `跑命令被权限拦住、需要确认或要用没放行的工具时，先用 bench_elevate 说明要做什么、为什么，请 ${userName()} 给这次唤起临时完整权限，别直接放弃或绕路；单条命令的确认也会弹到他的网页上等他点。sudo 密码只能他自己在终端输。`
     : ""
-  const stop = `${end}这之后 agent 之间不再互相唤起，等 ${userName()} 发话再继续。`
+  const stop = `${end}这条消息不会叫醒任何人。`
   // Woken, nobody watches the client: questions go to the page.
   const ask =
     `要问 ${userName()}、让他拍板时用 bench_ask（可以给选项），不要用你客户端自带的提问工具，这里没人看得到；它会等他在网页上回答，答案作为工具结果返回。能自己判断的别问。`
@@ -190,11 +289,58 @@ function envelope(body: string, skipped: number, summary: RoomSummary | undefine
         ? `你上次之后的消息太多，更早的 ${skipped} 条没列；先附上房间摘要（${summary.by} 写于 ${stamp(summary.at)}，概括了那之前的对话），再列最近的原文。需要原文用 bench_inbox 查。`
         : `下面是你上次之后房间里的消息，太长只列了最近这些；更早还有 ${skipped} 条没列，需要的话用 bench_inbox 查。`
   const digest = skipped > 0 && summary ? `【房间摘要】\n${summary.text}\n\n【最近的原文】\n` : ""
-  return `【并坐「${currentProjectInfo().name}」项目转来的消息】\n${scope}只略去了你自己说的话和入座、离席这类系统通知。★ 是在叫你的。\n\n${digest}${body}\n\n（${how}${thread}${todo}${ask}${attach}${permit}${stop}）`
+  const whole = `${how}${thread}${todo}${ask}${attach}${permit}${stop}`
+  // The same rules in a line, for a session that has them whole further up.
+  const brief = [
+    "守则同前，要点：",
+    replyByStdout ? "最后的回答直接输出，会挂成回复；" : "回复用 bench_say；",
+    `新功能先用 bench_task 建待办、bench_step 逐步推进，做完用 review 请 ${userName()} 验收，验收不要自己勾；`,
+    `问 ${userName()} 用 bench_ask；附件用 ${replyByStdout ? "bench_attach" : "bench_say 的 attachments"}；`,
+    claude && full ? "你有默认全部权限，不用 bench_elevate；" : claude ? "被权限拦住先用 bench_elevate 申请；" : "",
+    replyByStdout ? `交接完成就以「${END_MARK}」开头、不 @ 任何人。` : "交接完成就用 bench_say 带 end: true、不 @ 任何人。",
+    "这条消息不会叫醒任何人。",
+  ].join("")
+  const rules = rulesFor(seat, whole, brief)
+  return {
+    text: `【并坐「${currentProjectInfo().name}」项目转来的消息】\n${scope}只略去了你自己说的话和入座、离席这类系统通知。★ 是在叫你的。\n\n${digest}${body}\n\n（${rules.text}）`,
+    rules: rules.given,
+  }
+}
+
+// After this many short reminders in a row the rules are said whole again,
+// in case a compaction went by that the room could not see.
+const RULES_SHORTS = 10
+
+// The rules a wake ends with run to ~900 characters and stay in the seat's
+// conversation, so they are said whole only when its session may not have
+// them: its first wake, a new session, a new version of the rules, a
+// compaction since they were last given (read from the session's record:
+// Claude Code's compact_boundary, Codex's compacted), or every RULES_SHORTS
+// wakes. Clients whose record the room can't read get them whole every time.
+function rulesFor(seat: NonNullable<ReturnType<typeof agentState>> | undefined, whole: string, brief: string) {
+  const sig = createHash("sha1").update(whole).digest("hex").slice(0, 12)
+  const at = Date.now()
+  const all = { text: whole, given: { sig, at } }
+  const given = seat?.rulesGiven
+  if (!seat || !given || seat.fresh || seat.reboundFrom || seat.profileDirty) return all
+  if (given.sig !== sig || given.session !== seat.session || given.shorts >= RULES_SHORTS) return all
+  if (!CONTEXT_KINDS.includes(seat.agentName ?? "")) return all
+  const context = seatContext(seat.agentName, seat.session, seat)
+  if (!context || (context.compacted && context.compacted.at >= given.at)) return all
+  return { text: brief, given: { sig, at, short: true } }
 }
 
 function summaryPrompt(replyByStdout: boolean) {
   const source = summarySource()
+  // The 「流程」 pieces that moved since their summary was written: written
+  // along with this one, after it (lib/flow-summary.ts).
+  const room = snapshot()
+  const moved = flowsToSummarize(flowsOf(room.messages, room.tasks, room.agents, room.userName), source.previous)
+  const byId = new Map(room.messages.map((message) => [message.id, message.text]))
+  const taskTitle = new Map(room.tasks.map((task) => [task.id, task.title]))
+  const flowBrief = flowSummaryPrompt(moved, source.previous, (node) =>
+    (node.taskId ? taskTitle.get(node.taskId) : byId.get(node.id)) ?? node.title,
+  )
   const previous = source.previous
     ? `【上一份摘要】（${source.previous.by} 写于 ${stamp(source.previous.at)}）\n${source.previous.text}`
     : "【上一份摘要】还没有，这是第一份。"
@@ -218,8 +364,10 @@ function summaryPrompt(replyByStdout: boolean) {
       `【之后的对话】${scope}`,
       source.text || "（没有新对话）",
       "",
-      `（${how}）`,
+      ...(flowBrief ? [flowBrief, ""] : []),
+      `（${how}${flowBrief ? "流程那一段写在同一份里，跟在「## 待定」后面。" : ""}）`,
     ].join("\n"),
+    flowsAt: Object.fromEntries(moved.map((flow) => [flow.id, flow.lastAt])),
   }
 }
 
@@ -483,6 +631,7 @@ function run(agentId: string) {
     queue.summary = false
     queue.compact = false
     queue.goal = undefined
+    syncLane(agentId)
     return
   }
   const adapter = adapterFor(agent.agentName)
@@ -491,6 +640,7 @@ function run(agentId: string) {
     queue.summary = false
     queue.compact = false
     queue.goal = undefined
+    syncLane(agentId)
     return
   }
   // Its session is open in a terminal on the page (lib/terminal.ts): what
@@ -500,31 +650,42 @@ function run(agentId: string) {
     intoTerminal(agent, queue)
     return
   }
+  // Urgent private words from the user always go through, even if the room
+  // queue is paused.
   if (queue.whisper !== undefined) {
     const text = queue.whisper
     queue.whisper = undefined
+    syncLane(agentId)
     answerWhisper(agent, text)
     return
   }
+  // When the user pauses a seat's queue, queued mentions and tasks stay held
+  // in SQLite until resumed (or individually dropped).
+  if (queue.paused) return
+
   if (queue.summary) {
     queue.summary = false
+    syncLane(agentId)
     writeSummary(agent, adapter)
     return
   }
   if (queue.compact) {
     queue.compact = false
+    syncLane(agentId)
     compactSession(agent)
     return
   }
   if (queue.goal !== undefined) {
     const text = queue.goal
     queue.goal = undefined
+    syncLane(agentId)
     setGoal(agent, adapter, text)
     return
   }
   if (queue.pending.length === 0 && !queue.carry) return
 
-  const seen = catchUp(agentId, CATCH_UP_CHARS)
+  const seen = catchUp(agentId, CATCH_UP_CHARS, queue.dropped ? new Set(queue.dropped) : undefined)
+  queue.dropped = undefined
   // Its inbox may already have shown it the mention; fall back to the queue.
   const fresh = seen.text || queue.pending.map((item: { line: string }) => item.line).join("\n\n")
   const carried = queue.carry
@@ -532,10 +693,11 @@ function run(agentId: string) {
   const body = carried
     ? `【刚才被打断、还没回的】\n${carried}${fresh ? `\n\n【之后的新消息】\n${fresh}` : ""}`
     : fresh
+  const wrapped = envelope(body, seen.skipped, seen.summary, adapter.reply === "stdout", agent.agentName === "claude", Boolean(agent.autoFull), agent)
   const command = commandFor(
     agent.agentName,
     agent.session,
-    introduce(agent) + envelope(body, seen.skipped, seen.summary, adapter.reply === "stdout", agent.agentName === "claude"),
+    introduce(agent) + wrapped.text,
     agent.modelPick,
     agent.effortPick,
   )
@@ -544,9 +706,11 @@ function run(agentId: string) {
   queue.pending = []
   queue.hops = 0
   queue.trigger = undefined
+  syncLane(agentId)
   if (!command) return
 
   queue.running = true
+  const startedLink = { agentName: agent.agentName, session: agent.session }
   const log = startRun(agentId, agent.name, "reply", { project: currentProject(), body, replyTo: trigger })
   queue.key = randomBytes(12).toString("hex")
   queue.project = currentProject()
@@ -560,6 +724,7 @@ function run(agentId: string) {
     const reach = Math.max(hop, queue.midHop ?? 0)
     queue.midHop = undefined
     const still = agentState(agentId)
+    const sameBinding = still?.agentName === startedLink.agentName && still?.session === startedLink.session
     if (lost && !stopped) {
       postSystem(`${agent.name} 这次有一行输出太长（超过 8MB）没读，下面贴出的回答可能不完整，「查看过程」里能看到读到的部分`)
     }
@@ -568,6 +733,7 @@ function run(agentId: string) {
       if (queue.whisper !== undefined) {
         queue.carry = body
         queue.trigger ??= trigger
+        syncLane(agentId)
       }
       endRun(log, "failed", queue.whisper !== undefined ? "被单独插话打断，回完接着做" : "被你停下了")
       seat.settle()
@@ -575,17 +741,17 @@ function run(agentId: string) {
       return
     } else if (failure) {
       reportFailure(agent, log, failure, out, `唤起 ${agent.name} `)
-    } else if (adapter.reply === "stdout" && still && out) {
+    } else if (adapter.reply === "stdout" && still && sameBinding && out) {
       try {
         // Posted while the run is still open, so the message links to it.
-        const said = sayAs({ type: "agent", id: still.id, name: still.name }, { text: out.slice(0, 4000) })
+        const said = sayAs({ type: "agent", id: still.id, name: still.name }, { text: out.slice(0, 4000) }, { final: true })
         hops().set(said.message.id, reach + 1)
         if (hops().size > 500) hops().delete(hops().keys().next().value ?? "")
       } catch (error) {
         console.error(error)
       }
     }
-    if (!failure && agent.fresh) markWoken(agentId)
+    if (!failure) markWoken(agentId, startedLink, wrapped.rules)
     endRun(log, failure ? "failed" : "done", failure ? `没成功：${failure}` : undefined)
     seat.settle()
     run(agentId)
@@ -593,14 +759,17 @@ function run(agentId: string) {
 }
 
 function intoTerminal(agent: NonNullable<ReturnType<typeof agentState>>, queue: ReturnType<typeof lane>) {
+  if (queue.paused) return
   // A /goal is typed in just as the user wrote it: the client's own command.
   if (queue.goal !== undefined && accepting(agent.id)) {
     deliver(agent.id, goalLine(queue.goal))
     queue.goal = undefined
+    syncLane(agent.id)
   }
   // On its way out: it all waits for the closing, then runs the usual way.
   if ((queue.pending.length === 0 && !queue.carry) || !accepting(agent.id)) return
-  const seen = catchUp(agent.id, CATCH_UP_CHARS)
+  const seen = catchUp(agent.id, CATCH_UP_CHARS, queue.dropped ? new Set(queue.dropped) : undefined)
+  queue.dropped = undefined
   const fresh = seen.text || queue.pending.map((item: { line: string }) => item.line).join("\n\n")
   const carried = queue.carry
   queue.carry = undefined
@@ -608,9 +777,17 @@ function intoTerminal(agent: NonNullable<ReturnType<typeof agentState>>, queue: 
   queue.pending = []
   queue.hops = 0
   queue.trigger = undefined
+  syncLane(agent.id)
   // Typed in, there is no answer to read off stdout: it replies with bench_say.
   // Its permission prompts show in the terminal itself, not on the page.
-  deliver(agent.id, introduce(agent) + envelope(body, seen.skipped, seen.summary, false, false))
+  const startedLink = { agentName: agent.agentName, session: agent.session }
+  const wrapped = envelope(body, seen.skipped, seen.summary, false, false, false, agent)
+  deliver(agent.id, introduce(agent) + wrapped.text)
+  markWoken(agent.id, startedLink, wrapped.rules)
+}
+
+export function isSeatBusy(agentId: string) {
+  return Boolean(lanesMap().get(agentId)?.running) || terminalOpen(agentId)
 }
 
 // The user opens a seat's terminal. Not while a headless wake runs on the
@@ -630,7 +807,7 @@ function writeSummary(agent: NonNullable<ReturnType<typeof agentState>>, adapter
   const queue = lane(agent.id)
   queue.running = true
   const asked = Date.now()
-  startSummaryJob(agent.id, prompt.upToSeq)
+  startSummaryJob(agent.id, prompt.upToSeq, prompt.flowsAt)
   const log = startRun(agent.id, agent.name, "summary", { project: currentProject() })
   const seat = busy(agent.id, "在写房间摘要")
   launch(agent, command, log, seat.live, ({ out, failure, stopped }) => {
@@ -645,7 +822,7 @@ function writeSummary(agent: NonNullable<ReturnType<typeof agentState>>, adapter
       reportFailure(agent, log, failure, out, `请 ${agent.name} 写摘要`)
     } else if (byStdout) {
       try {
-        saveSummary(out, agent.name, prompt.upToSeq)
+        saveSummary(out, agent.name, prompt.upToSeq, prompt.flowsAt)
       } catch {
         postSystem(`${agent.name} 没写出摘要`)
       }
@@ -654,7 +831,7 @@ function writeSummary(agent: NonNullable<ReturnType<typeof agentState>>, adapter
       // bench_summary; a full one in the asked format is taken as handed in.
       const written = out.slice(out.indexOf("## 结论")).trim()
       if (out.includes("## 结论") && written.includes("## 进行中") && written.includes("## 待定")) {
-        saveSummary(written, agent.name, prompt.upToSeq)
+        saveSummary(written, agent.name, prompt.upToSeq, prompt.flowsAt)
       } else {
         postSystem(`${agent.name} 这一轮没交摘要`)
       }
@@ -712,6 +889,7 @@ export function requestCompact(agentId: string) {
   const queue = lane(agent.id)
   if (queue.running || queue.compact) throw new ApiError(409, `${agent.name} 正在忙，等这一轮做完再压缩`)
   queue.compact = true
+  syncLane(agent.id)
   run(agent.id)
   return { started: queue.running }
 }
@@ -737,6 +915,7 @@ function setGoal(agent: NonNullable<ReturnType<typeof agentState>>, adapter: Ada
   const clearing = CLEAR_GOAL.test(text)
   const queue = lane(agent.id)
   queue.running = true
+  const startedLink = { agentName: agent.agentName, session: agent.session }
   const log = startRun(agent.id, agent.name, "goal", { project: currentProject(), ask: text })
   queue.key = randomBytes(12).toString("hex")
   queue.project = currentProject()
@@ -749,16 +928,17 @@ function setGoal(agent: NonNullable<ReturnType<typeof agentState>>, adapter: Ada
     queue.log = undefined
     queue.midHop = undefined
     const still = agentState(agent.id)
+    const sameBinding = still?.agentName === startedLink.agentName && still?.session === startedLink.session
     if (failure && !stopped) reportFailure(agent, log, failure, out, clearing ? `清掉 ${agent.name} 的目标` : `让 ${agent.name} 按目标干活`)
     else if (!stopped && clearing) postSystem(`${agent.name} 的目标清掉了`)
-    else if (!stopped && adapter.reply === "stdout" && still && out) {
+    else if (!stopped && adapter.reply === "stdout" && still && sameBinding && out) {
       try {
         sayAs({ type: "agent", id: still.id, name: still.name }, { text: out.slice(0, 4000) })
       } catch (error) {
         console.error(error)
       }
     }
-    if (!failure && agent.fresh) markWoken(agent.id)
+    if (!failure) markWoken(agent.id, startedLink)
     endRun(log, failure || stopped ? "failed" : "done", stopped ? "被你停下了" : failure ? `没成功：${failure}` : undefined)
     seat.settle()
     run(agent.id)
@@ -776,13 +956,14 @@ export function requestGoal(agentId: string, input: unknown) {
   const queue = lane(agent.id)
   if (queue.goal !== undefined) throw new ApiError(409, `上一条 /goal 还没交给 ${agent.name}，稍等`)
   queue.goal = text
+  syncLane(agent.id)
   const clearing = CLEAR_GOAL.test(text)
   postSystem(
     clearing
       ? `${userName()} 让 ${agent.name} 清掉目标`
       : `${userName()} 给 ${agent.name} 定了目标：${text}\n它会一直做到达成为止；要停就 /stop，要撤掉目标就 /goal clear`,
   )
-  const waiting = queue.running || terminalOpen(agent.id)
+  const waiting = queue.running || terminalOpen(agent.id) || Boolean(queue.paused)
   run(agent.id)
   return { queued: waiting && !terminalOpen(agent.id) }
 }
@@ -816,13 +997,14 @@ function answerWhisper(agent: NonNullable<ReturnType<typeof agentState>>, text: 
   )
   if (!command) return
   queue.running = true
+  const startedLink = { agentName: agent.agentName, session: agent.session }
   const log = startRun(agent.id, agent.name, "private", { project: currentProject(), ask: text })
   const seat = busy(agent.id, "在回你单独说的话")
   launch(agent, command, log, seat.live, ({ out, failure, stopped }) => {
     queue.running = false
     if (!stopped && !failure) {
       log.answer = out.slice(0, 4000)
-      if (agent.fresh) markWoken(agent.id)
+      markWoken(agent.id, startedLink)
     }
     // Nothing is said in the room about a failed private turn, except that the
     // account ran out: that one comes with its card.
@@ -853,6 +1035,7 @@ export function whisper(agentId: string, text: string) {
   const queue = lane(agent.id)
   if (queue.whisper !== undefined) throw new ApiError(409, `上一句还没交给 ${agent.name}，稍等`)
   queue.whisper = clean
+  syncLane(agent.id)
   const interrupted = queue.running
   if (interrupted) queue.stop?.()
   else run(agent.id)
@@ -871,8 +1054,46 @@ export function stopAgent(agentId: string) {
   queue.summary = false
   queue.compact = false
   queue.goal = undefined
+  syncLane(agentId)
   queue.stop()
   return { dropped }
+}
+
+// Pause or resume automatic wakes on a seat's lane. Queued messages stay safe
+// in SQLite and can be inspected or dropped individually while paused.
+export function pauseQueue(agentId: string, paused: boolean) {
+  const agent = agentState(agentId)
+  if (!agent) throw new ApiError(404, "这个席位不在了")
+  const queue = lane(agentId)
+  queue.paused = paused || undefined
+  syncLane(agentId)
+  if (!paused) {
+    run(agentId)
+  }
+  return { paused: Boolean(queue.paused), queuedCount: queue.pending.length }
+}
+
+// Drop one queued message (or all when messageId is omitted / "*") from a seat's lane.
+export function dropQueuedMessage(agentId: string, messageId?: string) {
+  const agent = agentState(agentId)
+  if (!agent) throw new ApiError(404, "这个席位不在了")
+  const queue = lane(agentId)
+  const before = queue.pending.length
+  if (!messageId || messageId === "*") {
+    const ids = queue.pending.map((item) => item.id)
+    if (ids.length > 0) queue.dropped = [...new Set([...(queue.dropped ?? []), ...ids])].slice(-200)
+    queue.pending = []
+    queue.carry = undefined
+    queue.trigger = undefined
+    queue.hops = 0
+  } else {
+    const had = queue.pending.some((item) => item.id === messageId)
+    queue.pending = queue.pending.filter((item) => item.id !== messageId)
+    if (had) queue.dropped = [...new Set([...(queue.dropped ?? []), messageId])].slice(-200)
+    if (queue.trigger === messageId) queue.trigger = queue.pending.at(-1)?.id
+  }
+  syncLane(agentId)
+  return { dropped: before - queue.pending.length, queuedCount: queue.pending.length }
 }
 
 // Messages that call a seat while it is in a reply run wait in its lane for
@@ -883,23 +1104,28 @@ export function stopAgent(agentId: string) {
 export function takeQueued(by: { key?: string; agentId?: string }) {
   let agentId = by.agentId
   if (by.key) {
-    for (const [id, item] of g().__benchLanes ?? []) if (item.key === by.key) agentId = id
+    for (const [id, item] of lanesMap()) if (item.key === by.key) agentId = id
     if (!agentId) throw new ApiError(404, "这次唤起已经结束了")
   }
   if (!agentId) return { text: "", count: 0 }
   const queue = lane(agentId)
-  if (!queue.running || !queue.key || !queue.project || queue.pending.length === 0) return { text: "", count: 0 }
+  if (queue.paused || !queue.running || !queue.key || !queue.project || queue.pending.length === 0) {
+    return { text: "", count: 0 }
+  }
   const items = queue.pending
   const log = queue.log
+  const droppedSet = queue.dropped ? new Set(queue.dropped) : undefined
   const text = inProject(queue.project, () => {
-    const seen = catchUp(agentId, CATCH_UP_CHARS)
+    const seen = catchUp(agentId, CATCH_UP_CHARS, droppedSet)
     markReached(items.map((item: { id: string }) => item.id), agentId)
     return seen.text || items.map((item: { line: string }) => item.line).join("\n\n")
   })
+  queue.dropped = undefined
   queue.pending = []
   queue.trigger = undefined
   queue.midHop = Math.max(queue.midHop ?? 0, queue.hops)
   queue.hops = 0
+  syncLane(agentId)
   if (log) {
     putStep(log, {
       id: `mid-${Date.now()}`,
@@ -929,27 +1155,46 @@ export function requestSummary(agentId: string) {
     throw new ApiError(409, `${writer?.name ?? "有人"}正在写摘要`)
   }
   lane(agentId).summary = true
+  syncLane(agentId)
   run(agentId)
   return snapshot()
 }
 
+// How far down a relay each seat was last called: the hop of the latest
+// message that called it. Whatever a seat says next, by its stdout answer,
+// bench_say in the middle of a run, a handoff, or from a session the room
+// didn't wake (a wait loop, its own window), is one hop further. So every way
+// two agents can keep @-ing each other is counted, and the user speaking puts
+// it back to the start. Nothing is capped on it any more (see wake).
+function calledAt() {
+  return (g().__benchCalledHop ??= new Map())
+}
+
+function hopOf(message: Message) {
+  const known = hops().get(message.id)
+  if (known !== undefined) return known
+  if (message.authorId === "human") return 0
+  const called = calledAt().get(message.authorId)
+  return called === undefined ? 0 : called + 1
+}
+
 function wake(message: Message) {
   if (message.kind === "system") return
-  const hop = hops().get(message.id) ?? 0
+  const hop = hopOf(message)
   const fromHuman = message.authorId === "human"
-  // Someone ended the round: agents' messages wake nobody until the user speaks.
-  if (!fromHuman && relayClosed()) return
+  // 【本轮结束】 needs nothing here: that message mentions nobody, so it wakes
+  // nobody, and it stops only its own line. It used to close every agent-to-
+  // agent line in the project until the user spoke, which silently dropped
+  // mentions that had nothing to do with it.
   for (const agent of summonCandidates(message)) {
     // Between agents only an explicit @ or a handoff wakes someone.
     if (!fromHuman && !message.mentions.includes(agent.id) && message.handoff?.toId !== agent.id) {
       continue
     }
-    if (hop >= MAX_HOPS) {
-      if (cooled("relay-cap", NOTE_GAP_MS)) {
-        postSystem(`agent 之间已经自动接力 ${MAX_HOPS} 轮，先停下，等 ${userName()} 发话再继续`)
-      }
-      continue
-    }
+    // No cap on agents relaying to each other (the user's call, 2026-11-11):
+    // a line stops when a seat ends it (【本轮结束】 / end: true, which
+    // mentions nobody) or the user steps in. The hop is still kept per seat.
+    calledAt().set(agent.id, hop)
     // A seat on standby picks the message up from its own wait loop; waking it
     // with a command would start a second run on the same session.
     if (isStandby(agent.id)) {
@@ -983,9 +1228,11 @@ function enqueue(agent: { id: string; name: string; agentName?: string; session?
     return
   }
   const queue = lane(agent.id)
+  queue.projectId = currentProject()
   queue.pending.push({ id: message.id, line: `${message.authorName}：${withAttachments(message.text, message.attachments)}` })
   queue.hops = Math.max(queue.hops, hop)
   queue.trigger = message.id
+  syncLane(agent.id)
   run(agent.id)
 }
 
@@ -1073,8 +1320,48 @@ export function rewake(runId: string) {
     markResumed(item)
     markInterruptedResumed(item.id, item.resumedAt ?? Date.now())
     markLimited(item.id, { state: "resumed", at: item.resumedAt ?? Date.now(), note: undefined })
+    if (item.interrupted) queue.paused = undefined
+    syncLane(agent.id)
     run(agent.id)
     return { agent: agent.name, started: queue.running }
+  })
+}
+
+// Carry over a usage-limited run onto the seat's newly rebound AI backend and
+// wake it right away so the work continues without waiting for quota reset.
+export function resumeLimitedAfterRebind(runId: string, reboundToLabel: string) {
+  const item = getRun(runId)
+  if (!item?.limited || item.resumedAt || !item.project) return { started: false }
+  return inProject(item.project, () => {
+    clearTimeout(resumeTimers().get(runId))
+    resumeTimers().delete(runId)
+    const agent = agentState(item.agentId)
+    if (!agent) return { started: false }
+    const queue = lane(agent.id)
+    queue.projectId = item.project
+    queue.paused = undefined
+    if (item.purpose === "private" && item.ask) {
+      queue.whisper = item.ask
+    } else if (item.purpose === "summary") {
+      if (!summaryJob()) queue.summary = true
+    } else if (item.purpose === "goal" && item.ask) {
+      if (GOAL_KINDS.includes(agent.agentName ?? "")) queue.goal = item.ask
+      else queue.carry = queue.carry ? `【原持续目标】${item.ask}\n\n${queue.carry}` : `【原持续目标】${item.ask}`
+    } else if (item.body) {
+      queue.carry = queue.carry ? `${item.body}\n\n${queue.carry}` : item.body
+      queue.trigger ??= item.replyTo
+    }
+    setLimited(item, { resetsAt: item.limited?.resetsAt })
+    markResumed(item)
+    markLimited(item.id, {
+      state: "rebound",
+      at: item.resumedAt ?? Date.now(),
+      reboundTo: reboundToLabel,
+      note: undefined,
+    })
+    syncLane(agent.id)
+    run(agent.id)
+    return { started: queue.running }
   })
 }
 
@@ -1160,17 +1447,19 @@ function rearmResumes() {
 // The user took a message back: a seat it called and that hasn't started on it
 // yet no longer will. A run already going has read it.
 export function forgetMessage(messageId: string) {
-  for (const queue of g().__benchLanes?.values() ?? []) {
+  for (const [agentId, queue] of lanesMap()) {
     if (queue.running) continue
     const left = queue.pending.filter((item) => item.id !== messageId)
     if (left.length === queue.pending.length) continue
     queue.pending = left
     if (queue.trigger === messageId) queue.trigger = left.at(-1)?.id
+    syncLane(agentId)
   }
 }
 
 export function ensureSummon() {
   g().__benchSummonHandler = wake
+  lanesMap()
   if (!g().__benchTermBound) {
     g().__benchTermBound = true
     // What waited while the terminal was open runs now, the usual way.

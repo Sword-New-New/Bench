@@ -1,7 +1,7 @@
 "use client"
 
 import { type ComponentProps, startTransition, useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react"
-import { Gauge, ListTodo, MessageSquare, Monitor, Moon, Plug, Settings, Sparkles, Sun, TerminalSquare, Users } from "lucide-react"
+import { Gauge, ListTodo, MessageSquare, Monitor, Moon, Plug, Settings, Smartphone, Sparkles, Sun, TerminalSquare, Users } from "lucide-react"
 import { useTheme } from "next-themes"
 import { toast } from "sonner"
 
@@ -26,6 +26,7 @@ import { TerminalDialog } from "@/components/room/terminal-dialog"
 import { Trajectory } from "@/components/room/trajectory"
 import { WhisperDialog } from "@/components/room/whisper-dialog"
 import { CommitDialog } from "@/components/room/commit-dialog"
+import { PUSH_OPEN, PushDialog } from "@/components/room/push-dialog"
 import { GOTO_EVENT, goto, type Goto } from "@/components/room/refs"
 import { FlowView } from "@/components/room/flow"
 import { flowsOf } from "@/lib/flow"
@@ -549,10 +550,11 @@ export function RoomApp() {
   // working bubble in the thread.
   const stopSeat = (agent: PublicAgent) =>
     void run(async () => {
-      const result = await api<{ dropped: number }>(`/api/v1/agents/${agent.id}`, {
+      const result = await api<{ dropped: number; retryCancelled?: boolean }>(`/api/v1/agents/${agent.id}`, {
         method: "POST",
         body: JSON.stringify({ as: "human", action: "stop" }),
       })
+      if (result.retryCancelled) return void toast.success(`${agent.name} 不再自动重试了`)
       toast.success(`${agent.name} 停下了${result.dropped > 0 ? `，排队的 ${result.dropped} 条也取消了` : ""}`)
     })
 
@@ -643,24 +645,41 @@ export function RoomApp() {
                   </DropdownMenuCheckboxItem>
                 ) : null}
               </DropdownMenuGroup>
-              {canNotify ? (
-                <>
-                  <DropdownMenuSeparator />
-                  <DropdownMenuCheckboxItem
-                    checked={notify}
-                    closeOnClick
-                    onCheckedChange={(on) => {
-                      void setNotify(on).then((result) => {
-                        if (result === "blocked") toast.error("浏览器拦下了通知：点地址栏左边的图标，把「通知」改成允许，再打开一次")
-                        else if (result === "on") toast.success("好了：页面不在前台时，别的项目做完或有事等你也会弹到桌面")
-                      })
-                    }}
-                  >
-                    别的项目做完时也弹桌面通知
-                  </DropdownMenuCheckboxItem>
-                </>
-              ) : null}
               <DropdownMenuSeparator />
+              {canNotify ? (
+                <DropdownMenuCheckboxItem
+                  checked={notify}
+                  closeOnClick
+                  onCheckedChange={(on) => {
+                    void setNotify(on).then((result) => {
+                      if (result === "blocked") toast.error("浏览器拦下了通知：点地址栏左边的图标，把「通知」改成允许，再打开一次")
+                      else if (result === "on") toast.success("好了：页面不在前台时，别的项目做完或有事等你也会弹到桌面")
+                    })
+                  }}
+                >
+                  别的项目做完时也弹桌面通知
+                </DropdownMenuCheckboxItem>
+              ) : null}
+              <DropdownMenuItem onClick={() => window.dispatchEvent(new Event(PUSH_OPEN))}>
+                <Smartphone />
+                推送到手机…
+              </DropdownMenuItem>
+              <DropdownMenuSeparator />
+              {room ? (
+                <DropdownMenuCheckboxItem
+                  checked={room.netRetry}
+                  closeOnClick
+                  title="唤起因为断网、连接被重置、网关 502/503/504 这类原因没成功时，房间隔 20 秒、60 秒带着同样的消息再叫两次，都不行才在群里报错"
+                  onCheckedChange={(on) =>
+                    void run(
+                      () => api("/api/v1/retry", { method: "POST", body: JSON.stringify({ as: "human", on }) }).then(() => undefined),
+                      on ? "网络错误会自动重试了" : "网络错误不再自动重试",
+                    )
+                  }
+                >
+                  网络错误自动重试
+                </DropdownMenuCheckboxItem>
+              ) : null}
               <DropdownMenuItem
                 onClick={() => {
                   setAdapterName(null)
@@ -884,6 +903,7 @@ export function RoomApp() {
               agents={agents}
               highlightId={highlight}
               busy={busy}
+              onOpenRun={setRunId}
               header={
                 <SummaryCard
                   room={room}
@@ -990,6 +1010,7 @@ export function RoomApp() {
       <SeatProfileDialog agents={agents} adapters={adapters} />
       <ModelDialog agent={agents.find((agent) => agent.id === modelId) ?? null} onClose={() => setModelId(null)} />
       <CommitDialog />
+      <PushDialog />
       <WhisperDialog
         agent={agents.find((agent) => agent.id === whisperId) ?? null}
         onClose={() => setWhisperId(null)}

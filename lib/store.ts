@@ -39,8 +39,10 @@ import { readLaneSnapshot } from "@/lib/lane-state"
 import { mediaKind } from "@/lib/media"
 import { ApiError, asRecord, asString } from "@/lib/http"
 import { hasFull, permitsFor } from "@/lib/permits"
+import { enqueuePushEvent } from "@/lib/push"
 import { activeRun } from "@/lib/runs"
-import { liveStatus } from "@/lib/status"
+import { seatState } from "@/lib/status"
+import { owedTasks, owesOf } from "@/lib/owes"
 import { terminalOpen } from "@/lib/terminal-state"
 import { awaitingReview, isReviewStep } from "@/lib/review"
 import { mentionedAgentIds, mentionPattern, namedAgentIds, withAttachments } from "@/lib/text"
@@ -49,6 +51,8 @@ import type {
   AskOption,
   Actor,
   Attachment,
+  Call,
+  CallState,
   InterruptedRun,
   LimitedRun,
   AgentStatus,
@@ -66,6 +70,7 @@ import type {
   TaskStatus,
   TaskStep,
   TaskStepState,
+  TaskCheck,
 } from "@/lib/types"
 import { mergeFlowSummaries, splitFlowSummaries } from "@/lib/flow-summary"
 
@@ -108,11 +113,19 @@ type Agent = Omit<
   | "queuedCount"
   | "queuePaused"
   | "queuedItems"
+  | "retry"
   | "hasProfile"
   | "previousBindings"
+  | "unsure"
+  | "owes"
 > & {
   token: string
   status: AgentStatus
+  // When `status` was last said, by the seat or by the room for it.
+  statusAt?: number
+  // When a wake of it last ended well: calls that failed before then have
+  // been made up for (its next wake hands it everything it has not read).
+  wokeAt?: number
   agentName?: string
   session?: string
   // The last message seq this seat has been shown, by its inbox or a wake.
@@ -125,6 +138,9 @@ type Agent = Omit<
   // 全部权限」 when it was made, or its seat menu): permission prompts and
   // bench_elevate pass without asking (lib/permits.ts).
   autoFull?: boolean
+  // This project's checker (「请验收时先复验」, the project settings): woken
+  // to check a task when its owner asks for review. One per project.
+  checker?: boolean
   // Names it had before, newest first: an @ to one still reaches it, unless
   // another seat has taken that name since.
   formerNames?: string[]
@@ -293,6 +309,44 @@ export function setAutoFull(agentId: string, on: boolean) {
   return present(agent, Date.now())
 }
 
+// The project settings' 「请验收时先复验」: this seat checks tasks before the
+// user signs them off (lib/summon.ts checkTask), or nobody does. One per
+// project: choosing a seat clears the one before.
+export function setChecker(agentId: string, on: boolean) {
+  const agent = findAgent(agentId)
+  if (!agent) throw new ApiError(404, "这个席位不在了")
+  for (const other of room().state.agents) if (other.id !== agent.id) delete other.checker
+  if (on) agent.checker = true
+  else delete agent.checker
+  commit()
+  return present(agent, Date.now())
+}
+
+// The seat that checks tasks here, if any.
+export function checkerSeat() {
+  return room().state.agents.find((agent) => agent.checker) ?? null
+}
+
+// Where a task's check stands (lib/summon.ts moves it along). Only the check
+// it was started as: a newer request for review has its own.
+export function setTaskCheck(taskId: string, at: number, check: Partial<TaskCheck>) {
+  const current = room()
+  const task = current.state.tasks.find((item) => item.id === taskId)
+  if (!task?.check || task.check.at !== at) return null
+  task.check = { ...task.check, ...check, at }
+  task.updatedAt = Date.now()
+  dbPutTask(current.id, task)
+  commit()
+  return task
+}
+
+// A request for review the checker should look at: lib/summon.ts takes it.
+export function onCheckWanted(listener: (wanted: { project: string; taskId: string; at: number }) => void) {
+  const bus = runtime().bus
+  bus.on("check", listener)
+  return () => bus.off("check", listener)
+}
+
 export function projectOfSeat(agentId: string) {
   for (const [id, item] of runtime().rooms) if (item.state.agents.some((agent) => agent.id === agentId)) return id
   return undefined
@@ -329,6 +383,31 @@ function projectInfo(id: string): ProjectInfo {
   return { id: found.id, name: found.name, dir: found.dir, createdAt: found.createdAt }
 }
 
+export function projectNameOf(id: string): string | null {
+  return runtime().projects.find((item) => item.id === id)?.name ?? null
+}
+
+function isMessageNotRecalledInProject(projectId: string, messageId: string): boolean {
+  const r = runtime().rooms.get(projectId)
+  if (!r) return false
+  const msg = r.state.messages.find((item) => item.id === messageId) ?? dbGetMessage(projectId, messageId)
+  return Boolean(msg && !msg.recalled)
+}
+
+function isAskStillOpenInProject(projectId: string, messageId: string): boolean {
+  const r = runtime().rooms.get(projectId)
+  if (!r) return false
+  const msg = r.state.messages.find((item) => item.id === messageId) ?? dbGetMessage(projectId, messageId)
+  return Boolean(msg && !msg.recalled && msg.ask?.state === "open")
+}
+
+function isTaskStillWaitingReviewInProject(projectId: string, taskId: string): boolean {
+  const r = runtime().rooms.get(projectId)
+  if (!r) return false
+  const t = r.state.tasks.find((item) => item.id === taskId)
+  return Boolean(t && awaitingReview(t))
+}
+
 function saveProjects() {
   const rt = runtime()
   inTransaction(() => {
@@ -360,6 +439,25 @@ export function userName(): string {
   userStore.__benchUserName = name || "用户"
   userStore.__benchUserDataPath = currentDataPath
   return userStore.__benchUserName
+}
+
+// The to-dos a seat still owes, by the same test as 「停着 · 还欠」 (lib/owes.ts).
+export function tasksOwedBy(seatId: string) {
+  return owedTasks(seatId, room().state.tasks)
+}
+
+// Wakes that failed on the network are tried again by themselves
+// (lib/netfail.ts, lib/summon.ts). On unless the user turned it off; one
+// setting for every project, kept in SQLite meta.
+export function netRetry(): boolean {
+  return dbGetMeta("net_retry") !== "off"
+}
+
+export function setNetRetry(on: unknown) {
+  if (typeof on !== "boolean") throw new ApiError(400, "on 要填 true 或 false")
+  dbSetMeta("net_retry", on ? "on" : "off")
+  refreshRooms()
+  return { on }
 }
 
 // A new name for the user. What they said, the tasks they own and what they
@@ -633,6 +731,10 @@ function present(agent: Agent, now = Date.now()): PublicAgent {
   const run = activeRun(agent.id)
   const laneView = readLaneSnapshot(agent.id)
   const hasProfile = Boolean(agent.profile && (agent.profile.persona.trim() || agent.profile.memory.trim()))
+  const state = seatState(
+    { status: agent.status, statusAt: agent.statusAt, lastSeenAt: agent.lastSeenAt, running: Boolean(run), ranUntil: agent.ranUntil },
+    now,
+  )
   return {
     id: agent.id,
     name: agent.name,
@@ -643,7 +745,9 @@ function present(agent: Agent, now = Date.now()): PublicAgent {
     compactPct: agent.compactPct,
     role: agent.role,
     strengths: agent.strengths,
-    status: run ? "working" : liveStatus(agent.status, agent.lastSeenAt, now),
+    status: state.status,
+    unsure: state.unsure,
+    ranUntil: agent.ranUntil,
     doing: agent.doing,
     color: agent.color,
     demo: agent.demo,
@@ -656,10 +760,12 @@ function present(agent: Agent, now = Date.now()): PublicAgent {
     stepAt: run ? (run.steps.at(-1)?.at ?? run.startedAt) : undefined,
     fullAccess: hasFull(agent.id) || undefined,
     autoFull: agent.autoFull || undefined,
+    checker: agent.checker || undefined,
     terminal: terminalOpen(agent.id) || undefined,
     queuedCount: laneView?.queuedCount || undefined,
     queuePaused: laneView?.paused || undefined,
     queuedItems: laneView && laneView.queuedItems.length > 0 ? laneView.queuedItems.slice(0, 20) : undefined,
+    retry: laneView?.retry,
     hasProfile: hasProfile || undefined,
     previousBindings: publicBindings(agent.previousBindings),
     createdAt: agent.createdAt,
@@ -701,9 +807,17 @@ export function snapshot(): RoomSnapshot {
   const firstHotSeq = state.messages[0]?.seq
   const openAsks = firstHotSeq !== undefined && firstHotSeq > 1 ? dbLoadOpenAsks(current.id, firstHotSeq) : undefined
   const totalMessages = dbCountMessages(current.id)
+  const seats = state.agents.map((agent) => present(agent))
+  const owed = owesOf(
+    seats.map((seat) => ({ seat, wokeAt: findAgent(seat.id)?.wokeAt })),
+    state.tasks,
+    state.messages,
+    openAsks,
+  )
+  for (const seat of seats) seat.owes = owed.get(seat.id)
   return {
     project: projectInfo(current.id),
-    agents: sortAgents(state.agents.map((agent) => present(agent))),
+    agents: sortAgents(seats),
     messages: state.messages,
     tasks: snapshotTasks(state.tasks),
     openAsks: openAsks && openAsks.length > 0 ? openAsks : undefined,
@@ -717,6 +831,7 @@ export function snapshot(): RoomSnapshot {
     relayClosed: state.relayClosed === true,
     permits: permitsFor(current.id),
     userName: userName(),
+    netRetry: netRetry(),
   }
 }
 
@@ -890,6 +1005,85 @@ export function markReached(ids: string[], agentId: string) {
       dbPutMessage(current.id, target)
     }
   })
+  bumpRev()
+  commit()
+}
+
+// What became of these messages' call to a seat (Message.calls). `from`: only
+// where the call is now in one of these states, so a late note never
+// overwrites an outcome; `run`: only the calls that wake made.
+export function markCalls(
+  ids: string[],
+  agentId: string,
+  state: CallState,
+  extra: { runId?: string; note?: string; from?: CallState[]; run?: string } = {},
+) {
+  if (ids.length === 0) return
+  const agent = findAgent(agentId)
+  const current = room()
+  const at = Date.now()
+  let changed = false
+  inTransaction(() => {
+    for (const id of new Set(ids)) {
+      const hot = current.state.messages.find((m) => m.id === id)
+      const target = hot ?? dbGetMessage(current.id, id)
+      if (!target || target.recalled) continue
+      const before = target.calls?.find((item) => item.id === agentId)
+      if (extra.from && !(before && extra.from.includes(before.state))) continue
+      if (extra.run && before?.runId !== extra.run) continue
+      if (before?.state === state && before.note === extra.note) continue
+      const name = agent?.name ?? before?.name
+      if (!name) continue
+      const call: Call = { id: agentId, name, state, at }
+      const runId = extra.runId ?? before?.runId
+      if (runId) call.runId = runId
+      if (extra.note) call.note = clip(extra.note, 160)
+      target.calls = [...(target.calls ?? []).filter((item) => item.id !== agentId), call]
+      dbPutMessage(current.id, target)
+      changed = true
+    }
+  })
+  if (!changed) return
+  bumpRev()
+  commit()
+}
+
+// Calls still on their way, as the hot window has them: after a restart the
+// room checks each against what it really holds (lib/summon.ts).
+export function openCalls() {
+  const list: { messageId: string; seq: number; call: Call }[] = []
+  for (const message of room().state.messages) {
+    for (const call of message.calls ?? []) {
+      if (["queued", "held", "started", "picked", "retrying"].includes(call.state)) list.push({ messageId: message.id, seq: message.seq, call })
+    }
+  }
+  return list
+}
+
+// The messages a wake was answering.
+export function callsOfRun(runId: string) {
+  return room().state.messages.filter((message) => message.calls?.some((call) => call.runId === runId)).map((message) => message.id)
+}
+
+// Whether the seat said anything in the room during that wake.
+export function saidInRun(agentId: string, runId: string) {
+  return room().state.messages.some((message) => message.runId === runId && message.authorId === agentId && message.kind !== "system")
+}
+
+// A seat spoke outside any wake of the room's (its own wait loop, its terminal,
+// its own window): the calls it took there count as answered.
+export function settleCalls(agentId: string) {
+  const ids = room().state.messages
+    .filter((message) => message.calls?.some((call) => call.id === agentId && !call.runId && (call.state === "picked" || call.state === "held")))
+    .map((message) => message.id)
+  markCalls(ids, agentId, "answered", { from: ["picked", "held"] })
+}
+
+// A wake of the room's ended for this seat, however it went.
+export function ranUntilNow(agentId: string) {
+  const agent = findAgent(agentId)
+  if (!agent) return
+  agent.ranUntil = Date.now()
   bumpRev()
   commit()
 }
@@ -1542,6 +1736,7 @@ export function markWoken(
   if (wokenLink && (agent.agentName !== wokenLink.agentName || agent.session !== wokenLink.session)) {
     return
   }
+  agent.wokeAt = Date.now()
   // What the wake said of the house rules: whole (from now on the reference)
   // or the short reminder.
   if (rules) {
@@ -1653,6 +1848,7 @@ export function pulseAgent(id: string, status: AgentStatus, doing: string) {
   agent.status = status
   agent.doing = clip(doing, 120)
   agent.lastSeenAt = Date.now()
+  agent.statusAt = agent.lastSeenAt
   bumpRev()
   commit()
   return { agent: present(agent) }
@@ -1746,6 +1942,18 @@ export function say(input: unknown, { final = false }: { final?: boolean } = {})
   if (actor.type === "human" && replyTo) answerAsk(replyTo, message)
   commit()
   runtime().bus.emit("message", message)
+  if (end) {
+    const pid = currentProject()
+    enqueuePushEvent({
+      projectId: pid,
+      getProjectName: () => projectNameOf(pid) ?? "并坐",
+      kind: "end",
+      actor: actor.name,
+      what: "完成了本轮",
+      snippet: message.text,
+      stillValid: () => isMessageNotRecalledInProject(pid, message.id),
+    })
+  }
   return { message }
 }
 
@@ -1825,6 +2033,16 @@ export function askUser(input: unknown) {
   bumpRev()
   commit()
   runtime().bus.emit("message", message)
+  const pid = currentProject()
+  enqueuePushEvent({
+    projectId: pid,
+    getProjectName: () => projectNameOf(pid) ?? "并坐",
+    kind: "ask",
+    actor: agent.name,
+    what: "向你提问",
+    snippet: text,
+    stillValid: () => isAskStillOpenInProject(pid, message.id),
+  })
   return { message }
 }
 
@@ -2285,6 +2503,9 @@ export function actOnTask(input: unknown) {
   const action = asString(body.action)
   const note = clip(asString(body.note) ?? "", 500)
   const now = Date.now()
+  const wasWaitingReview = awaitingReview(task)
+  // A check to start after this is saved (review, below).
+  let wanted: { project: string; taskId: string; at: number } | undefined
 
   // A copy to carry on in: the same title, detail and steps (all to do again),
   // as a new task. The original is not touched.
@@ -2389,11 +2610,24 @@ export function actOnTask(input: unknown) {
     return { task, message }
   } else if (action === "review") {
     // Done on the agent's side: the task waits for the user's sign-off.
+    const again = task.review?.state === "waiting"
     task.review = { state: "waiting", at: now, by: actor.name, note: note || undefined }
     for (const step of task.steps ?? []) {
       if (isReviewStep(step) && step.state !== "done") moveStep(step, "doing", actor.name, now)
     }
     task.history.push({ at: now, actor: actor.name, action: "请验收", note: note || `做完了，等 ${userName()} 验收` })
+    // 「请验收时先复验」: once per request. Asking again while it still waits
+    // keeps the check there is; after a send-back it is checked anew.
+    if (!(again && task.check)) {
+      const checker = checkerSeat()
+      task.check = undefined
+      if (checker && checker.id === task.ownerId) {
+        task.check = { state: "skipped", by: checker.id, name: checker.name, note: `复验人 ${checker.name} 就是这条的负责人，这次跳过`, at: now }
+      } else if (checker) {
+        task.check = { state: "queued", by: checker.id, name: checker.name, at: now }
+        wanted = { project: current.id, taskId: task.id, at: now }
+      }
+    }
   } else if (action === "pass" || action === "reject") {
     if (actor.type !== "human") throw new ApiError(403, `验收只有 ${userName()} 能点：做完了用 review 请他验收`)
     const pass = action === "pass"
@@ -2466,6 +2700,20 @@ export function actOnTask(input: unknown) {
   task.seq = nextSeq()
   dbPutTask(current.id, task)
   commit()
+  if (wanted) runtime().bus.emit("check", wanted)
+  if (!wasWaitingReview && awaitingReview(task)) {
+    const pid = current.id
+    const tid = task.id
+    enqueuePushEvent({
+      projectId: pid,
+      getProjectName: () => projectNameOf(pid) ?? "并坐",
+      kind: "review",
+      actor: actor.name,
+      what: `请你验收「${clip(task.title, 28)}」`,
+      snippet: note || task.detail || task.title,
+      stillValid: () => isTaskStillWaitingReviewInProject(pid, tid),
+    })
+  }
   return { task }
 }
 

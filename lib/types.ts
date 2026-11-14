@@ -37,19 +37,82 @@ export type PublicAgent = {
   fullAccess?: boolean
   // ...or whenever it is woken, until turned off (「默认开启全部权限」).
   autoFull?: boolean
+  // This project's checker: woken to check a task before the user signs it
+  // off (「请验收时先复验」). One seat per project at most.
+  checker?: boolean
   // Its session is open in a terminal the room holds (lib/terminal.ts).
   terminal?: boolean
   // Messages queued in its wake lane, and whether its lane is paused.
   queuedCount?: number
   queuePaused?: boolean
   queuedItems?: { id: string; line: string }[]
+  // Its last wake failed on the network and goes again by itself: when, and
+  // which try of how many (lib/netfail.ts).
+  retry?: { at: number; n: number; of: number }
   // Whether this seat has a saved persona or long-term memory card.
   hasProfile?: boolean
   // Earlier client sessions this seat used (without exposing raw session uuids),
   // newest first, so the user can switch it back after a quota reset.
   previousBindings?: PublicSeatBinding[]
+  // When the room's latest wake of it ended. A seat that says it is working
+  // and then goes quiet is only "not sure" if it said so after this
+  // (lib/status.ts seatState): a woken session can't work once its run is over.
+  ranUntil?: number
+  // It said it was working at this time and has not said anything since, long
+  // enough that the room no longer takes its word for it.
+  unsure?: number
+  // Quiet, with work still on it (lib/owes.ts): to-dos it owns that wait on
+  // nobody else, and calls to it that never got through. The page shows it
+  // once the seat has been quiet a while.
+  owes?: SeatOwes
   createdAt: number
   lastSeenAt: number
+}
+
+// What became of one call to one seat (a mention, a reply to it, a handoff).
+// The room writes it where each thing happens (lib/summon.ts); the page shows
+// it and never guesses it from other signs.
+//   queued    waiting in the seat's lane (behind its run, or the lane is paused)
+//   held      the seat keeps a wait loop (bench_wait) and takes it from there
+//   started   a wake with this message in it began
+//   picked    its client showed a first sign of life, or the message was
+//             handed over in the middle of a run, or to a seat waiting for it
+//   answered  the wake ended and the seat spoke in the room during it
+//   silent    the wake ended fine, and the seat said nothing in the room
+//   retrying  the wake failed on the network; the room tries it again by
+//             itself (`note` says which try and why; lib/netfail.ts)
+//   failed    it could not be woken, or the wake ended in an error (`note`)
+//   stopped   the user stopped that wake
+//   cut       the room restarted, or lost track of it, in the middle
+//   dropped   taken out of the lane before it ran
+export type CallState =
+  | "queued"
+  | "held"
+  | "started"
+  | "picked"
+  | "answered"
+  | "silent"
+  | "retrying"
+  | "failed"
+  | "stopped"
+  | "cut"
+  | "dropped"
+
+export type Call = {
+  // The seat that was called.
+  id: string
+  name: string
+  state: CallState
+  at: number
+  runId?: string
+  note?: string
+}
+
+export type SeatOwes = {
+  // Since when it has been quiet.
+  since: number
+  tasks: { id: string; title: string; step?: string }[]
+  calls: { messageId: string; from: string; state: CallState; at: number }[]
 }
 
 export type SeatProfile = {
@@ -139,6 +202,8 @@ export type Message = {
   // Seats that were already working when it called them and got it mid-run
   // (lib/summon.ts takeQueued), instead of after their turn.
   reached?: { id: string; name: string; at: number }[]
+  // What became of its call to each seat it woke, or tried to.
+  calls?: Call[]
   // An agent saying its round of handoffs is over: it mentions nobody, and
   // agents stop waking each other until the user speaks again.
   end?: boolean
@@ -190,6 +255,23 @@ export type Task = {
   // The user's sign-off: an agent asks for it when the work is done, and only
   // the user passes it or sends it back with a reason.
   review?: TaskReview
+  // Another seat's check before the user's sign-off (「请验收时先复验」):
+  // started when the owner asks for review, one per request.
+  check?: TaskCheck
+}
+
+export type TaskCheck = {
+  // queued/running: on its way; passed/failed/unverified: its verdict;
+  // skipped: not run (no checker that may or can); error: the wake failed.
+  state: "queued" | "running" | "passed" | "failed" | "unverified" | "skipped" | "error"
+  // The checking seat (id and name at the time), when there is one.
+  by?: string
+  name?: string
+  // Its reasons, and what it couldn't check; or why it was skipped / failed.
+  note?: string
+  at: number
+  // The wake it ran in, to open its steps.
+  runId?: string
 }
 
 export type TaskReview = {
@@ -323,6 +405,8 @@ export type RoomSnapshot = {
   permits: PermitRequest[]
   // What the user goes by in the room.
   userName: string
+  // Wakes that failed on the network are tried again by themselves (lib/netfail.ts).
+  netRetry: boolean
 }
 
 export type Actor = {
@@ -349,7 +433,7 @@ export type Run = {
   agentName: string
   // compact: the user had the room compact its context (lib/summon.ts compactSession).
   // goal: the user typed /goal for it (lib/summon.ts setGoal); `ask` is what came after.
-  purpose: "reply" | "summary" | "private" | "compact" | "goal"
+  purpose: "reply" | "summary" | "private" | "compact" | "goal" | "check"
   // A private run: what the user said and what it answered.
   ask?: string
   answer?: string

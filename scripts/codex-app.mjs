@@ -126,16 +126,18 @@ function onMessage(message) {
     else resolve(message.result)
     return
   }
-  // A request from the server (an approval it wants): nobody is here to
-  // click, and the turn runs with approvals off, so decline anything asked.
+  // A request from the server (an approval it wants): asked on the room's
+  // page as a permission card, the way a woken Claude Code turn is.
   if (message.id !== undefined && message.method) {
-    server.stdin.write(`${JSON.stringify({ jsonrpc: "2.0", id: message.id, result: { decision: "decline" } })}\n`)
+    void answer(message)
     return
   }
   const params = message.params ?? {}
   switch (message.method) {
     case "item/started":
     case "item/completed": {
+      // The files a change touches, for when it asks to write them.
+      if (params.item?.type === "fileChange") filesOf.set(params.item.id, (params.item.changes ?? []).map((change) => change.path).filter(Boolean))
       const item = execItem(params.item)
       if (item) out({ type: message.method === "item/started" ? "item.started" : "item.completed", item })
       return
@@ -183,6 +185,112 @@ function onMessage(message) {
   }
 }
 
+// ---- Permissions -------------------------------------------------------
+// The room says how much the seat may do (lib/permits.ts): with full
+// permission the turn runs without a sandbox and never asks; otherwise it
+// may write in its workspace and asks for anything past that (another
+// folder, the network, a command outside the sandbox). Codex sends those as
+// requests; each becomes a card on the page and waits for the user. With no
+// room to ask (no BENCH_RUN_KEY), nothing can be asked: it stays in the
+// workspace and what needs more is refused.
+const filesOf = new Map()
+const ASK_WAIT_MS = 11 * 60_000
+
+async function roomPermit(body, timeoutMs) {
+  const res = await fetch(`${room}/api/v1/permit`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ key, ...body }),
+    signal: AbortSignal.timeout(timeoutMs),
+  })
+  const data = await res.json().catch(() => ({}))
+  if (!res.ok) throw new Error(data.error || `房间回了 ${res.status}`)
+  return data
+}
+
+async function fullNow() {
+  if (!key) return false
+  try {
+    return (await roomPermit({ action: "mode" }, 5000)).full === true
+  } catch {
+    return false
+  }
+}
+
+// One question on the page. { allow, full }: full means the user gave the
+// seat full permission, so what it asks for the rest of the session goes.
+async function askRoom(tool, text) {
+  if (!key) return { allow: false }
+  try {
+    const data = await roomPermit({ action: "tool", tool, input: { command: text } }, ASK_WAIT_MS)
+    return { allow: data.allow === true, full: data.full === true }
+  } catch {
+    return { allow: false }
+  }
+}
+
+const withWhy = (text, why) => (why ? `${text}\n（${why}）` : text)
+const listFiles = (paths) => (paths.length ? paths.join("\n") : "（没说哪些文件）")
+
+function permissionsText(want) {
+  const lines = []
+  const fs = want?.fileSystem
+  for (const entry of fs?.entries ?? []) {
+    const where = entry.path?.path ?? entry.path?.pattern ?? entry.path?.value ?? JSON.stringify(entry.path)
+    lines.push(`${entry.access === "write" ? "写" : entry.access === "read" ? "读" : entry.access} ${where}`)
+  }
+  for (const where of fs?.write ?? []) lines.push(`写 ${where}`)
+  for (const where of fs?.read ?? []) lines.push(`读 ${where}`)
+  if (want?.network?.enabled) lines.push("联网")
+  return lines.join("\n") || JSON.stringify(want ?? {})
+}
+
+async function answer(message) {
+  const p = message.params ?? {}
+  const reply = (result) => server.stdin.write(`${JSON.stringify({ jsonrpc: "2.0", id: message.id, result })}\n`)
+  try {
+    switch (message.method) {
+      case "item/commandExecution/requestApproval": {
+        const host = p.networkApprovalContext?.host
+        const what = p.command || (host ? `联网：${host}` : "（一条命令）")
+        const decision = await askRoom(host && !p.command ? "网络" : "终端", withWhy(what, p.reason))
+        return reply({ decision: decision.allow ? (decision.full ? "acceptForSession" : "accept") : "decline" })
+      }
+      case "item/fileChange/requestApproval": {
+        const where = p.grantRoot ? `${p.grantRoot} 下的文件` : listFiles(filesOf.get(p.itemId) ?? [])
+        const decision = await askRoom("文件编辑", withWhy(where, p.reason))
+        return reply({ decision: decision.allow ? (decision.full ? "acceptForSession" : "accept") : "decline" })
+      }
+      case "item/permissions/requestApproval": {
+        const decision = await askRoom("额外权限", withWhy(permissionsText(p.permissions), p.reason))
+        return reply(
+          decision.allow
+            ? { permissions: p.permissions ?? {}, scope: decision.full ? "session" : "turn" }
+            : { permissions: {}, scope: "turn" },
+        )
+      }
+      // The older shapes of the same two questions.
+      case "execCommandApproval": {
+        const decision = await askRoom("终端", withWhy((p.command ?? []).join(" "), p.reason))
+        return reply({ decision: decision.allow ? (decision.full ? "approved_for_session" : "approved") : "denied" })
+      }
+      case "applyPatchApproval": {
+        const decision = await askRoom("文件编辑", withWhy(listFiles(Object.keys(p.fileChanges ?? {})), p.reason))
+        return reply({ decision: decision.allow ? (decision.full ? "approved_for_session" : "approved") : "denied" })
+      }
+      // The bench tools are approved up front; another server's form has nobody to fill it.
+      case "mcpServer/elicitation/request":
+        return reply({ action: "decline" })
+      case "item/tool/requestUserInput":
+        return reply({ answers: {} })
+      default:
+        server.stdin.write(`${JSON.stringify({ jsonrpc: "2.0", id: message.id, error: { code: -32601, message: "并坐里没人能回答这个" } })}\n`)
+    }
+  } catch (error) {
+    server.stdin.write(`${JSON.stringify({ jsonrpc: "2.0", id: message.id, error: { code: -32603, message: String(error) } })}\n`)
+  }
+}
+
 createInterface({ input: server.stdout }).on("line", (line) => {
   if (!line.trim()) return
   try {
@@ -227,7 +335,16 @@ const steerTimer = setInterval(() => void steer(), STEER_EVERY_MS)
 try {
   await request("initialize", { clientInfo: { name: "bench", title: "并坐", version: "1" } })
   notify("initialized")
-  await request("thread/resume", { threadId: thread, approvalPolicy: "never" })
+  // Asked once per wake; granting full later lets what it asks through.
+  const full = await fullNow()
+  const policy = full ? "never" : key ? "on-request" : "never"
+  const sandboxPolicy = full ? { type: "dangerFullAccess" } : { type: "workspaceWrite" }
+  await request("thread/resume", {
+    threadId: thread,
+    approvalPolicy: policy,
+    approvalsReviewer: "user",
+    sandbox: full ? "danger-full-access" : "workspace-write",
+  })
   out({ type: "thread.started", thread_id: thread })
   if (compacting) {
     await request("thread/compact/start", { threadId: thread })
@@ -256,7 +373,9 @@ try {
   } else {
     const started = await request("turn/start", {
       threadId: thread,
-      approvalPolicy: "never",
+      approvalPolicy: policy,
+      approvalsReviewer: "user",
+      sandboxPolicy,
       ...(model ? { model } : {}),
       ...(effort ? { effort } : {}),
       input: [{ type: "text", text: text ?? "", text_elements: [] }],

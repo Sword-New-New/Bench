@@ -1,7 +1,8 @@
 import { boot } from "@/lib/boot"
 import { ApiError, asRecord, asString, handle, json, readBody } from "@/lib/http"
-import { ask, decide, describe, setFull } from "@/lib/permits"
-import { currentProject, inProject, inRequest, requireAgent, roomChanged } from "@/lib/store"
+import { ask, decide, describe, hasFull, setFull } from "@/lib/permits"
+import { agentState, currentProject, inProject, inRequest, requireAgent, roomChanged } from "@/lib/store"
+import { seatOfRunKey } from "@/lib/summon"
 
 const TOOL_WAIT_MS = 10 * 60_000
 
@@ -11,17 +12,26 @@ const TOOL_WAIT_MS = 10 * 60_000
 // the wake; both wait for the user. The user (`as: "human"`): `id` with
 // `decision: "once" | "full" | "deny"` (and a `note`), or `agentId` with
 // `full: true | false` to grant or take back full permission at any time.
+// A woken Codex turn (scripts/codex-app.mjs) has no seat token: it asks with
+// its run's `key` (BENCH_RUN_KEY) instead, and `action: "mode"` tells it
+// whether the seat has full permission right now.
 export async function POST(request: Request) {
   try {
     await boot()
     const body = asRecord(await readBody(request))
+    const key = body.as === "human" ? undefined : asString(body.key)
+    if (key) {
+      const agentId = seatOfRunKey(key)
+      if (!agentId) throw new ApiError(404, "这次唤起已经结束了")
+      return json(await inRequest({ agentId }, () => permit(body, request.signal, agentId)))
+    }
     return json(await inRequest(body, () => permit(body, request.signal)))
   } catch (error) {
     return handle(error)
   }
 }
 
-async function permit(body: Record<string, unknown>, signal: AbortSignal) {
+async function permit(body: Record<string, unknown>, signal: AbortSignal, byKey?: string) {
   const project = currentProject()
   const changed = () => inProject(project, roomChanged)
   if (body.as === "human") {
@@ -43,11 +53,10 @@ async function permit(body: Record<string, unknown>, signal: AbortSignal) {
     changed()
     return { ok: true, full: body.full }
   }
-  const agentId = asString(body.agentId)
-  const token = asString(body.token)
-  if (!agentId || !token) throw new ApiError(401, "要带 agentId 和 token")
-  const agent = requireAgent(agentId, token)
+  const agent = byKey ? agentState(byKey) : seat(body)
+  if (!agent) throw new ApiError(404, "没有这个席位")
   const action = asString(body.action)
+  if (action === "mode") return { full: hasFull(agent.id) }
   if (action === "tool") {
     const tool = asString(body.tool)?.slice(0, 120)
     if (!tool) throw new ApiError(400, "缺少 tool")
@@ -64,5 +73,12 @@ async function permit(body: Record<string, unknown>, signal: AbortSignal) {
       { timeoutMs: TOOL_WAIT_MS, signal, changed },
     )
   }
-  throw new ApiError(400, "action 只能是 tool 或 full")
+  throw new ApiError(400, "action 只能是 tool、full 或 mode")
+}
+
+function seat(body: Record<string, unknown>) {
+  const agentId = asString(body.agentId)
+  const token = asString(body.token)
+  if (!agentId || !token) throw new ApiError(401, "要带 agentId 和 token")
+  return requireAgent(agentId, token)
 }

@@ -14,7 +14,7 @@ import { Reveal } from "@/components/room/reveal"
 import { RunTrail } from "@/components/room/run-trail"
 import { Button } from "@/components/ui/button"
 import { clock } from "@/lib/status"
-import type { Message, PublicAgent } from "@/lib/types"
+import type { CallState, Message, PublicAgent } from "@/lib/types"
 
 const EXAMPLES = [
   "@所有人 各自说一下你现在在做什么、擅长什么",
@@ -829,6 +829,7 @@ function ChainLine({
         {message.attachments?.length ? <MessageFiles files={message.attachments} folded={folded(fold)} /> : null}
         {message.ask ? <AskCard message={message} /> : null}
         <Reached message={message} />
+        <Calls message={message} />
         <div className="mt-0.5 -ml-1 flex items-center gap-1">
           <FoldButton fold={fold} />
           {message.runId && !detail ? (
@@ -1031,6 +1032,7 @@ function MessageRow({
           ) : null}
           {message.attachments?.length ? <MessageFiles files={message.attachments} align="end" folded={folded(fold)} /> : null}
           <Reached message={message} align="end" />
+          <Calls message={message} align="end" />
           <div className="mt-1 flex items-center justify-end gap-2 text-[11px] text-muted-foreground">
             <FoldButton fold={fold} />
             <RecallButton message={message} />
@@ -1085,6 +1087,7 @@ function MessageRow({
         {message.attachments?.length ? <MessageFiles files={message.attachments} folded={folded(fold)} /> : null}
         {message.ask ? <AskCard message={message} /> : null}
         <Reached message={message} />
+        <Calls message={message} />
         <div className="mt-1 flex items-center gap-1">
           <FoldButton fold={fold} />
           {message.runId && !detail ? (
@@ -1218,6 +1221,71 @@ function Reached({ message, align = "start" }: { message: Message; align?: "star
     >
       <Zap className="size-3" />
       已送到正在干活的 {names}
+    </p>
+  )
+}
+
+// What became of this message's call to each seat it woke, or tried to
+// (Message.calls). The room writes it as it happens (lib/summon.ts); nothing
+// here is worked out from other signs. A seat that answered is left out: its
+// answer is in the room. So the line only shows while a call is on its way,
+// or when it never got an answer.
+const CALL_LOOK: Record<CallState, { text: string; tone: "going" | "wrong" | "flat" }> = {
+  queued: { text: "排着", tone: "going" },
+  held: { text: "等它来取", tone: "going" },
+  started: { text: "已叫到", tone: "going" },
+  picked: { text: "在做", tone: "going" },
+  answered: { text: "答了", tone: "flat" },
+  silent: { text: "跑完了，没在群里说话", tone: "flat" },
+  retrying: { text: "重试中", tone: "going" },
+  failed: { text: "没成功", tone: "wrong" },
+  stopped: { text: "被停下", tone: "flat" },
+  cut: { text: "中途断了", tone: "wrong" },
+  dropped: { text: "从队列拿掉了", tone: "flat" },
+}
+
+const CALL_TONE = {
+  going: "text-sky-700 dark:text-sky-300",
+  wrong: "text-red-600 dark:text-red-400",
+  flat: "text-muted-foreground",
+}
+
+function Calls({ message, align = "start" }: { message: Message; align?: "start" | "end" }) {
+  if (message.recalled) return null
+  // Handed over mid-run: the line above already says so.
+  const reached = new Set((message.reached ?? []).map((item) => item.id))
+  const list = (message.calls ?? []).filter(
+    (call) => call.state !== "answered" && !(call.state === "picked" && reached.has(call.id)),
+  )
+  if (list.length === 0) return null
+  return (
+    <p
+      data-calls
+      className={`mt-1 flex flex-wrap items-center gap-x-2.5 gap-y-0.5 text-[11px] leading-4 ${align === "end" ? "justify-end" : ""}`}
+    >
+      {list.map((call) => {
+        const look = CALL_LOOK[call.state]
+        // Taken by the seat itself (its wait loop, its terminal): no wake of
+        // the room's to watch, so not "working".
+        // A retry's note starts with which try it is: 「1/2，20 秒后再叫：…」.
+        const text =
+          call.state === "picked" && !call.runId
+            ? "已取走"
+            : call.state === "retrying"
+              ? `${look.text} ${call.note?.match(/^\d+\/\d+/)?.[0] ?? ""}`.trim()
+              : look.text
+        const why = call.state === "failed" && call.note ? `：${call.note.length > 28 ? `${call.note.slice(0, 28)}…` : call.note}` : ""
+        return (
+          <span
+            key={call.id}
+            className={CALL_TONE[look.tone]}
+            title={[call.note, clock(call.at)].filter(Boolean).join(" · ")}
+          >
+            {call.name} {text}
+            {why}
+          </span>
+        )
+      })}
     </p>
   )
 }

@@ -1021,6 +1021,8 @@ export type StoredLane = {
   whisper?: string
   trigger?: string
   dropped?: string[]
+  // The messages a cut-short wake will take up again (carry), by id.
+  carryIds?: string[]
   pending: { id: string; line: string }[]
 }
 
@@ -1030,6 +1032,9 @@ function ensureLaneDroppedCol() {
   laneDroppedColChecked = true
   try {
     getDb().exec("ALTER TABLE lane_state ADD COLUMN dropped_json TEXT")
+  } catch {}
+  try {
+    getDb().exec("ALTER TABLE lane_state ADD COLUMN carry_ids_json TEXT")
   } catch {}
 }
 
@@ -1048,8 +1053,16 @@ export function dbLoadLanes(): StoredLane[] {
         if (Array.isArray(parsed) && parsed.length > 0) dropped = parsed.map(String)
       } catch {}
     }
+    let carryIds: string[] | undefined
+    if (typeof r.carry_ids_json === "string" && r.carry_ids_json) {
+      try {
+        const parsed = JSON.parse(r.carry_ids_json)
+        if (Array.isArray(parsed) && parsed.length > 0) carryIds = parsed.map(String)
+      } catch {}
+    }
     byAgent.set(agentId, {
       agentId,
+      carryIds,
       projectId: String(r.project_id),
       paused: Number(r.paused) === 1,
       hops: Number(r.hops ?? 0),
@@ -1098,6 +1111,7 @@ export function dbSaveLane(
     whisper?: string
     trigger?: string
     dropped?: string[]
+    carryIds?: string[]
     pending: { id: string; line: string }[]
   },
 ) {
@@ -1123,8 +1137,8 @@ export function dbSaveLane(
     }
     stmt(
       `INSERT OR REPLACE INTO lane_state (
-         agent_id, project_id, paused, hops, summary, compact, goal, carry, whisper, trigger_id, dropped_json
-       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+         agent_id, project_id, paused, hops, summary, compact, goal, carry, whisper, trigger_id, dropped_json, carry_ids_json
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     ).run(
       agentId,
       projectId,
@@ -1137,6 +1151,7 @@ export function dbSaveLane(
       lane.whisper ?? null,
       lane.trigger ?? null,
       hasDropped ? JSON.stringify(lane.dropped) : null,
+      lane.carry !== undefined && lane.carryIds && lane.carryIds.length > 0 ? JSON.stringify(lane.carryIds) : null,
     )
     const ins = stmt(
       "INSERT INTO lane_queue (agent_id, project_id, message_id, line, created_at) VALUES (?, ?, ?, ?, ?)",

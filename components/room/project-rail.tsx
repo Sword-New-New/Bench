@@ -226,6 +226,13 @@ function Card({ item, buttonRef, onPick, onEdit, ahead }: { item: Item; buttonRe
         type="button"
         onClick={() => onPick(project.id)}
         {...aheadProps(project.id, ahead)}
+        // A mouse starts on the press, not the release: the press-to-release
+        // time was part of the wait. Touch (could be a scroll) and keys
+        // stay on the click; the click after a press is ignored as a repeat.
+        onPointerDown={(event) => {
+          ahead(project.id, true)
+          if (event.pointerType === "mouse" && event.button === 0 && !event.ctrlKey && !event.metaKey && !event.shiftKey) onPick(project.id)
+        }}
         aria-current={on ? "page" : undefined}
         aria-label={[project.name, on ? "当前项目，点了回到房间" : "", ...notes].filter(Boolean).join("，")}
         title={[project.name, ...notes, project.names.length ? `席位：${project.names.join("、")}` : ""].filter(Boolean).join(" · ")}

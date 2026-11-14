@@ -1,5 +1,5 @@
 import { useState } from "react"
-import { Check, ChevronDown } from "lucide-react"
+import { Check, ChevronDown, Loader2 } from "lucide-react"
 
 import { Reveal } from "@/components/room/reveal"
 import { Button } from "@/components/ui/button"
@@ -12,7 +12,7 @@ import {
 import { Textarea } from "@/components/ui/textarea"
 import { awaitingReview } from "@/lib/review"
 import { TASK_STATUS_LABEL, clock } from "@/lib/status"
-import type { PublicAgent, Task, TaskStatus, TaskStep, TaskStepState } from "@/lib/types"
+import type { PublicAgent, Task, TaskCheck, TaskStatus, TaskStep, TaskStepState } from "@/lib/types"
 
 // Cards are frosted glass like the rest of the page (they were sticky notes
 // on colored paper, which clashed). Status is a dot and a chip; amber is
@@ -43,6 +43,7 @@ export function TasksPanel({
   onStep,
   onReview,
   onFork,
+  onOpenRun,
   header,
 }: {
   tasks: Task[]
@@ -57,6 +58,8 @@ export function TasksPanel({
   onReview: (task: Task, pass: boolean, note: string) => void
   // A finished task is not edited; this makes a copy to carry on in.
   onFork: (task: Task) => void
+  // A wake's steps (the check before the user's sign-off).
+  onOpenRun?: (runId: string) => void
 }) {
   const active = tasks.filter((task) => task.status !== "done")
   const done = tasks.filter((task) => task.status === "done")
@@ -88,6 +91,7 @@ export function TasksPanel({
             onStep={onStep}
             onReview={onReview}
             onFork={onFork}
+            onOpenRun={onOpenRun}
           />
         ))}
         {done.length > 0 ? (
@@ -109,6 +113,7 @@ export function TasksPanel({
                   onStep={onStep}
                   onReview={onReview}
                   onFork={onFork}
+                  onOpenRun={onOpenRun}
                 />
               ))}
             </div>
@@ -130,6 +135,7 @@ function TaskCard({
   onStep,
   onReview,
   onFork,
+  onOpenRun,
 }: {
   task: Task
   agents: PublicAgent[]
@@ -140,6 +146,7 @@ function TaskCard({
   onStep: (task: Task, step: number, state: TaskStepState) => void
   onReview: (task: Task, pass: boolean, note: string) => void
   onFork: (task: Task) => void
+  onOpenRun?: (runId: string) => void
 }) {
   const waiting = awaitingReview(task)
   const others = agents.filter((agent) => agent.id !== task.ownerId)
@@ -164,7 +171,7 @@ function TaskCard({
         {task.forkedFrom ? ` · 复制自「${task.forkedFrom.title}」` : ""}
       </p>
       {waiting ? (
-        <ReviewBox task={task} busy={busy} onReview={(pass, note) => onReview(task, pass, note)} />
+        <ReviewBox task={task} busy={busy} onReview={(pass, note) => onReview(task, pass, note)} onOpenRun={onOpenRun} />
       ) : task.review?.state === "rejected" && task.status !== "done" ? (
         <p className="mt-2.5 rounded-xl bg-red-500/10 px-2.5 py-1.5 text-[11px] leading-5 text-red-800 ring-1 ring-red-500/20 dark:text-red-200">
           {clock(task.review.at)} 打回：{task.review.note}
@@ -267,10 +274,12 @@ function ReviewBox({
   task,
   busy,
   onReview,
+  onOpenRun,
 }: {
   task: Task
   busy: boolean
   onReview: (pass: boolean, note: string) => void
+  onOpenRun?: (runId: string) => void
 }) {
   const [rejecting, setRejecting] = useState(false)
   const [reason, setReason] = useState("")
@@ -283,6 +292,7 @@ function ReviewBox({
           {asked ? ` · ${asked.by} ${clock(asked.at)} 请验收${asked.note ? `：${asked.note}` : ""}` : " · 其余步骤都做完了"}
         </span>
       </p>
+      {asked && task.check ? <CheckLine check={task.check} onOpenRun={onOpenRun} /> : null}
       {rejecting ? (
         <form
           className="space-y-1.5"
@@ -329,6 +339,67 @@ function ReviewBox({
           </Button>
         </div>
       )}
+    </div>
+  )
+}
+
+// Another seat's check before the sign-off (「请验收时先复验」, lib/summon.ts
+// checkTask): one line in the review box, its reasons folded under it.
+const CHECK_TEXT: Record<TaskCheck["state"], string> = {
+  queued: "复验排着",
+  running: "复验中",
+  passed: "复验通过",
+  failed: "复验没过",
+  unverified: "复验没验到",
+  skipped: "没复验",
+  error: "复验没跑成",
+}
+const CHECK_TONE: Record<TaskCheck["state"], string> = {
+  queued: "text-sky-700 dark:text-sky-300",
+  running: "text-sky-700 dark:text-sky-300",
+  passed: "text-emerald-700 dark:text-emerald-300",
+  failed: "text-red-700 dark:text-red-300",
+  unverified: "text-amber-800 dark:text-amber-200",
+  skipped: "text-muted-foreground",
+  error: "text-red-700 dark:text-red-300",
+}
+
+function CheckLine({ check, onOpenRun }: { check: TaskCheck; onOpenRun?: (runId: string) => void }) {
+  const [open, setOpen] = useState(false)
+  const going = check.state === "queued" || check.state === "running"
+  // A verdict's reasons fold; a skip or a failure is one short reason, shown.
+  const folds = Boolean(check.note) && (check.state === "passed" || check.state === "failed" || check.state === "unverified")
+  return (
+    <div className="rounded-lg bg-background/40 px-2 py-1 ring-1 ring-foreground/[0.06]">
+      <div className="flex items-start gap-1.5">
+        {going ? <Loader2 className="size-3 shrink-0 animate-spin text-sky-600 dark:text-sky-300" /> : null}
+        <span className={`shrink-0 font-medium ${CHECK_TONE[check.state]}`}>{CHECK_TEXT[check.state]}</span>
+        {/* With a verdict: who checked (the reasons fold below). Skipped or
+            failed: the reason, which names the seat itself. */}
+        <span className={`min-w-0 flex-1 text-muted-foreground ${folds || !check.note ? "truncate" : "line-clamp-2"}`}>
+          {!folds && check.note ? check.note.replace(/^复验没跑成[:：]\s*/, "") : (check.name ?? "")}
+        </span>
+        {folds ? (
+          <button
+            type="button"
+            className="shrink-0 rounded px-1 text-muted-foreground hover:bg-foreground/[0.06] hover:text-foreground"
+            aria-expanded={open}
+            onClick={() => setOpen((value) => !value)}
+          >
+            {open ? "收起" : "依据"}
+          </button>
+        ) : null}
+        {check.runId && onOpenRun ? (
+          <button
+            type="button"
+            className="shrink-0 rounded px-1 text-muted-foreground hover:bg-foreground/[0.06] hover:text-foreground"
+            onClick={() => onOpenRun(check.runId!)}
+          >
+            过程
+          </button>
+        ) : null}
+      </div>
+      {folds && open ? <p className="mt-1 max-h-48 overflow-y-auto whitespace-pre-wrap text-foreground/80">{check.note}</p> : null}
     </div>
   )
 }

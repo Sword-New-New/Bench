@@ -274,6 +274,16 @@ export const KINDS: Kind[] = [
 
 export const KIND_IDS = KINDS.map((kind) => kind.id)
 
+// The kinds whose woken turns ask on the page before going past what they may
+// do (lib/permits.ts): Claude Code through bench_permit (claude-code.sh),
+// Codex through its app-server's approval requests (codex-app.mjs). Only these
+// get 「默认开启全部权限」 and the full-permission button.
+export const PERMIT_KINDS = ["claude", "codex"]
+
+export function asksOnPage(kind: string | undefined | null) {
+  return Boolean(kind && PERMIT_KINDS.includes(kind))
+}
+
 export function kindById(id: string | undefined | null) {
   return KINDS.find((kind) => kind.id === id) ?? null
 }

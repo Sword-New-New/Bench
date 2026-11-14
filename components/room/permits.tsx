@@ -7,6 +7,7 @@ import { toast } from "sonner"
 import { api } from "@/components/room/api"
 import { Reveal } from "@/components/room/reveal"
 import type { PermitRequest, PublicAgent, RoomSnapshot } from "@/lib/types"
+import { asksOnPage } from "@/lib/kinds"
 
 // Permission prompts of woken Claude Code turns (lib/permits.ts), over the
 // composer: the seat waits until one of these buttons is pressed.
@@ -119,7 +120,7 @@ export function PermitBar({ room }: { room: RoomSnapshot }) {
 // or take it back.
 export function FullAccessToggle({ agent }: { agent: PublicAgent }) {
   const [busy, setBusy] = useState(false)
-  if (agent.agentName !== "claude" || !agent.runId) return null
+  if (!asksOnPage(agent.agentName) || !agent.runId) return null
   const on = Boolean(agent.fullAccess)
   // 「默认开启全部权限」: it can be taken back for this wake; the next one
   // has it again.

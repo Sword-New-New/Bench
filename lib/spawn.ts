@@ -9,6 +9,7 @@ import { adapterFor, installed, modelOf, summonPath } from "@/lib/adapters"
 import { checkPct, checkWindow, CONTEXT_KINDS } from "@/lib/context"
 import { cliCommand, dataHome } from "@/lib/platform"
 import { checkEffort, checkPick, dshFlags } from "@/lib/models"
+import { isNetworkFailure } from "@/lib/netfail"
 import { ApiError } from "@/lib/http"
 import { KINDS } from "@/lib/kinds"
 import {
@@ -193,6 +194,23 @@ function giveSeat(
   writeFileSync(path.join(dir, `${kind}-name-${Buffer.from(`${seat.project}/${seat.name}`).toString("hex")}.json`), body, { mode: 0o600 })
 }
 
+// A first turn that ended without naming its session said why somewhere:
+// the last line it wrote (stderr first). With the network down agy exits 0
+// and prints only that (m_68c8a77c); without it the error said nothing.
+function lastWords(...outputs: string[]) {
+  for (const output of outputs) {
+    const line = output
+      .split("\n")
+      .map((item) => item.trim())
+      .filter(Boolean)
+      .at(-1)
+    if (!line) continue
+    const hint = isNetworkFailure(line) ? "（多半是网络不通：房间的环境里要带上代理变量）" : ""
+    return `：${line.slice(0, 300)}${hint}`
+  }
+  return "（它什么也没输出）"
+}
+
 // dsh-agent picks the session id itself: run a short first turn in the
 // folder and read the id from its JSON events. Only sessions made by
 // `dsh-agent exec` can be resumed by a wake later.
@@ -224,7 +242,7 @@ async function newDshSession(dir: string, seat: { name: string; role: string; pr
       // progress lines that aren't JSON
     }
   }
-  throw new ApiError(500, "dsh-agent 跑完了，但没报出会话 id")
+  throw new ApiError(500, `dsh-agent 跑完了，但没报出会话 id${lastWords(stdout)}`)
 }
 
 // agy also picks the conversation id itself: one short first turn in the
@@ -238,8 +256,9 @@ async function newAgySession(dir: string, seat: { name: string; role: string; pr
     "房间已经替你入座，不用调用 bench_join。之后有人 @你，房间会把消息转给你，你的回答会贴回房间。现在只回一个字：好"
   const settings = JSON.stringify({ permissions: { allow: ["mcp(bench/*)"] } })
   let stdout = ""
+  let stderr = ""
   try {
-    ;({ stdout } = await run(
+    ;({ stdout, stderr } = await run(
       "agy",
       ["--model", pick ?? "gemini-3.8-flash-low", "--settings", settings, "--output-format", "json", "-p", intro],
       { cwd: dir, timeout: 180_000, maxBuffer: 16 * 1024 * 1024 },
@@ -247,13 +266,14 @@ async function newAgySession(dir: string, seat: { name: string; role: string; pr
   } catch (error) {
     const err = error as { stderr?: string; stdout?: string; message?: string }
     stdout = err.stdout ?? ""
+    stderr = err.stderr ?? ""
     if (!stdout.includes("conversation_id")) {
       const why = (err.stderr || err.message || "").trim().split("\n").slice(-1)[0]
       throw new ApiError(500, `agy 没开出会话：${why.slice(0, 300)}`)
     }
   }
   const id = stdout.match(/"conversation_id"\s*:\s*"([\w-]+)"/)?.[1]
-  if (!id) throw new ApiError(500, "agy 跑完了，但没报出会话 id")
+  if (!id) throw new ApiError(500, `agy 跑完了，但没报出会话 id${lastWords(stderr, stdout)}`)
   return id
 }
 
@@ -322,7 +342,7 @@ async function newCodexSession(dir: string, seat: { name: string; role: string; 
       // log lines that aren't JSON
     }
   }
-  if (!id) throw new ApiError(500, "codex 跑完了，但没报出会话 id")
+  if (!id) throw new ApiError(500, `codex 跑完了，但没报出会话 id${lastWords(stdout)}`)
   return id
 }
 

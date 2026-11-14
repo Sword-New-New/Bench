@@ -1,6 +1,7 @@
-import { autoFullOf, userName } from "@/lib/store"
+import { autoFullOf, projectNameOf, userName } from "@/lib/store"
 import { randomBytes } from "node:crypto"
 
+import { cancelPermitPush, schedulePermitPush } from "@/lib/push"
 import { activeRun } from "@/lib/runs"
 import type { PermitRequest } from "@/lib/types"
 
@@ -63,8 +64,9 @@ export function setFull(agentId: string, on: boolean) {
     // A seat full by default: taken back for the rest of this wake only.
     if (autoFullOf(agentId)) held.set(agentId, wakeOf(agentId))
   }
-  // Granting full settles what that seat is waiting on.
-  if (on) for (const item of permits().pending.values()) if (item.agentId === agentId) settle(item.id, { allow: true })
+  // Granting full settles what that seat is waiting on, as full (a woken
+  // Codex turn then lets the rest of the session through, codex-app.mjs).
+  if (on) for (const item of permits().pending.values()) if (item.agentId === agentId) settle(item.id, { allow: true, full: true })
 }
 
 export function permitsFor(project: string): PermitRequest[] {
@@ -119,6 +121,7 @@ export function ask(
     const id = `p_${randomBytes(4).toString("hex")}`
     const finish = (decision: Decision) => {
       clearTimeout(timer)
+      cancelPermitPush(id)
       signal?.removeEventListener("abort", onAbort)
       resolve(decision)
       changed()
@@ -130,6 +133,20 @@ export function ask(
     const onAbort = () => settle(id, { allow: false, note: "已取消" })
     signal?.addEventListener("abort", onAbort)
     permits().pending.set(id, { ...input, id, at: Date.now(), runId: activeRun(input.agentId)?.id, settle: finish })
+    const detail = typeof input.input === "string" ? input.input : describe(input.tool ?? "", input.input)
+    const snippet =
+      input.kind === "full"
+        ? input.reason || "请求这轮完整权限"
+        : `${input.tool ? `${input.tool}：` : ""}${detail}`
+    schedulePermitPush({
+      permitId: id,
+      projectId: input.project,
+      getProjectName: () => projectNameOf(input.project) ?? "并坐",
+      actor: input.agentName,
+      what: input.kind === "full" ? "申请完整权限等你批" : "申请权限等你批",
+      snippet,
+      stillValid: () => permits().pending.has(id),
+    })
     changed()
   })
 }

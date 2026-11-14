@@ -689,12 +689,12 @@
    the transition's own snapshot work. */
 ::view-transition-group(.tier-pane),
 ::view-transition-group(.tier-title) {
-  animation-duration: 300ms;
+  animation-duration: 240ms;
   animation-timing-function: cubic-bezier(0.2, 0, 0, 1);
 }
 html:active-view-transition-type(tier-leave)::view-transition-group(.tier-pane),
 html:active-view-transition-type(tier-leave)::view-transition-group(.tier-title) {
-  animation-duration: 260ms;
+  animation-duration: 220ms;
 }
 ::view-transition-image-pair(.tier-pane) {
   overflow: hidden;
@@ -729,8 +729,8 @@ html:active-view-transition-type(tier-leave)::view-transition-new(.tier-pane) {
 }
 /* Seats: out to the rows a little after the panel starts, home at once. */
 html:active-view-transition-type(tier-enter)::view-transition-group(.bench-out) {
-  animation-duration: 320ms;
-  animation-delay: 40ms;
+  animation-duration: 260ms;
+  animation-delay: 20ms;
 }
 html:active-view-transition-type(tier-leave)::view-transition-group(.bench-in) {
   animation-duration: 240ms;
@@ -738,17 +738,17 @@ html:active-view-transition-type(tier-leave)::view-transition-group(.bench-in) {
 }
 .tier-in .tier-rows > *,
 .tier-in .tier-head > :not(:first-child) {
-  animation: tier-row-in 220ms cubic-bezier(0.2, 0, 0, 1) 120ms both;
+  animation: tier-row-in 200ms cubic-bezier(0.2, 0, 0, 1) 80ms both;
 }
-.tier-in .tier-rows > :nth-child(2) { animation-delay: 140ms; }
-.tier-in .tier-rows > :nth-child(3) { animation-delay: 160ms; }
-.tier-in .tier-rows > :nth-child(4) { animation-delay: 180ms; }
-.tier-in .tier-rows > :nth-child(5) { animation-delay: 200ms; }
-.tier-in .tier-rows > :nth-child(6) { animation-delay: 220ms; }
-.tier-in .tier-rows > :nth-child(7) { animation-delay: 240ms; }
-.tier-in .tier-rows > :nth-child(n + 8) { animation-delay: 260ms; }
+.tier-in .tier-rows > :nth-child(2) { animation-delay: 95ms; }
+.tier-in .tier-rows > :nth-child(3) { animation-delay: 110ms; }
+.tier-in .tier-rows > :nth-child(4) { animation-delay: 125ms; }
+.tier-in .tier-rows > :nth-child(5) { animation-delay: 140ms; }
+.tier-in .tier-rows > :nth-child(6) { animation-delay: 155ms; }
+.tier-in .tier-rows > :nth-child(7) { animation-delay: 170ms; }
+.tier-in .tier-rows > :nth-child(n + 8) { animation-delay: 185ms; }
 .tier-in .tier-back {
-  animation: tier-back-in 220ms cubic-bezier(0.2, 0, 0, 1) 120ms both;
+  animation: tier-back-in 200ms cubic-bezier(0.2, 0, 0, 1) 80ms both;
 }
 /* The other cards: off at once when one is clicked, away from it; back in
    outwards from it when the list opens again. */
@@ -1153,4 +1153,5 @@ html:active-view-transition-type(tier-leave)::view-transition-group(.bench-in) {
     opacity: 0;
   }
 }
+
 

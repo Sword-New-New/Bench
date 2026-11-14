@@ -24,7 +24,7 @@ import type { Project, ProjectInfo } from "@/lib/types"
 // the 项目 tier changes nothing there until another project is clicked.
 //
 // Walking in (globals.css, 「Left column tiers」): the other cards fade off
-// away from the clicked one (`picking`, CSS, LEAD ms), then one transition
+// away from the clicked one (`picking`, one frame), then one transition
 // swaps the tiers: the card grows into the panel (`tier-pane`), its name
 // slides up into the title (`tier-title`), the seats on its bench fly to
 // their rows (seatFlight, staggered by `flightDelays`), and the rows fade in
@@ -37,8 +37,11 @@ export type Tier = "room" | "projects"
 // The tour switches tiers to show what it points at.
 export const LEFT_TIER = "bench-left-tier"
 
-// The other cards' fade before the tiers swap.
-const LEAD = 110
+// Before the tiers swap, one frame for the clicked card to be marked as the
+// one that grows into the panel (`picking`): the transition captures the
+// old tier with it. It was 110ms of the other cards fading first; with the
+// room's own render after it, the click felt late (2026-11-12).
+const LEAD = 16
 // How long the rows' entrance classes stay on.
 const SETTLE = 700
 
@@ -73,6 +76,7 @@ export function LeftPane({
   const [tier, setTier] = useState<Tier>("room")
   const [motion, setMotion] = useState<"in" | "out" | null>(null)
   const [picking, setPicking] = useState<string | null>(null)
+  const pickingRef = useRef<string | null>(null)
   const lead = useRef<ReturnType<typeof setTimeout> | null>(null)
   // Each swap's number: a late one (a room that arrived after the user moved
   // on) doesn't switch tiers.
@@ -88,6 +92,10 @@ export function LeftPane({
   useEffect(() => cancelLead, [])
 
   const enter = (id: string) => {
+    // The press already started it (project-rail.tsx starts on pointerdown);
+    // the click that follows is the same pick.
+    if (pickingRef.current === id) return
+    pickingRef.current = id
     skipRunning()
     cancelLead()
     const mine = ++turn.current
@@ -99,6 +107,7 @@ export function LeftPane({
       setTier("room")
       setMotion("in")
       setPicking(null)
+      pickingRef.current = null
     }
     if (id === current.id) {
       lead.current = setTimeout(() => startTransition(swap), LEAD)
@@ -112,6 +121,7 @@ export function LeftPane({
     skipRunning()
     cancelLead()
     turn.current++
+    pickingRef.current = null
     // A project still on its way is called off.
     onOpen(current.id)
     moved.current = true
@@ -153,6 +163,7 @@ export function LeftPane({
       cancelLead()
       turn.current++
       setPicking(null)
+      pickingRef.current = null
       startTransition(() => setTier(want))
     }
     window.addEventListener(LEFT_TIER, onTier)
@@ -170,7 +181,7 @@ export function LeftPane({
   const flightDelays = (anchor?.bench ?? [])
     .map(
       (seat, index) =>
-        `html:active-view-transition-type(tier-enter)::view-transition-group(${seatFlight(seat.id)}){animation-delay:${40 + index * 25}ms !important}`,
+        `html:active-view-transition-type(tier-enter)::view-transition-group(${seatFlight(seat.id)}){animation-delay:${20 + index * 18}ms !important}`,
     )
     .join("\n")
 

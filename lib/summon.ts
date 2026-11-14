@@ -26,10 +26,19 @@ import {
   markInterruptedResumed,
   markLimited,
   markReached,
+  markCalls,
+  openCalls,
+  callsOfRun,
+  saidInRun,
+  settleCalls,
+  ranUntilNow,
+  listProjects,
   postInterrupted,
   postLimited,
   projectOfSeat,
   endSummaryJob,
+  onCheckWanted,
+  setTaskCheck,
   isStandby,
   isWaiting,
   clearStandby,
@@ -49,10 +58,14 @@ import {
   END_MARK,
   askSettled,
   userName,
+  netRetry,
+  tasksOwedBy,
 } from "@/lib/store"
 import { withAttachments } from "@/lib/text"
-import type { Message, RoomSummary, Run } from "@/lib/types"
+import type { CallState, Message, RoomSummary, Run, Task } from "@/lib/types"
 import { flowsOf } from "@/lib/flow"
+import { isNetworkFailure, retryDelays } from "@/lib/netfail"
+import { stepOf } from "@/lib/owes"
 import { flowSummaryPrompt, flowsToSummarize } from "@/lib/flow-summary"
 
 const NOTE_GAP_MS = 30_000
@@ -110,6 +123,19 @@ type Lane = {
   project?: string
   log?: Run
   midHop?: number
+  // The messages the running reply answers (Message.calls follows them), and
+  // those of a reply that was cut short and comes back as `carry`.
+  calls?: string[]
+  carryIds?: string[]
+  // A wake that failed on the network is tried again by itself
+  // (lib/netfail.ts): how many tries so far, and when the next one goes.
+  // The messages wait as `carry` / `carryIds` meanwhile.
+  retries?: number
+  retryAt?: number
+  retryTimer?: NodeJS.Timeout
+  // Tasks this seat is to check before the user signs them off (checkTask),
+  // each as the request for review it was started for.
+  checks?: { taskId: string; at: number }[]
 }
 
 type SummonGlobal = typeof globalThis & {
@@ -119,6 +145,8 @@ type SummonGlobal = typeof globalThis & {
   // Runs the user asked to be woken again after a usage limit: when.
   __benchResumeTimers?: Map<string, NodeJS.Timeout>
   __benchSummonHandler?: (message: Message) => void
+  __benchCheckHandler?: (wanted: { project: string; taskId: string; at: number }) => void
+  __benchCheckBound?: boolean
   __benchCalledHop?: Map<string, number>
   __benchSummonAt?: Map<string, number>
   __benchLanes?: Map<string, Lane>
@@ -160,6 +188,7 @@ function lanesMap(): Map<string, Lane> {
           whisper: row.whisper,
           trigger: row.trigger,
           dropped: row.dropped,
+          carryIds: row.carryIds,
         }
         loaded.set(row.agentId, entry)
         if (paused && !row.paused && row.projectId) {
@@ -203,13 +232,31 @@ function syncLane(agentId: string, notify = true) {
 registerLaneReader((agentId) => {
   const q = lanesMap().get(agentId)
   if (!q) return undefined
-  if (!q.paused && q.pending.length === 0) return undefined
+  if (!q.paused && q.pending.length === 0 && !q.retryAt) return undefined
   return {
     paused: Boolean(q.paused),
     queuedCount: q.pending.length,
     queuedItems: q.pending,
+    retry: q.retryAt ? { at: q.retryAt, n: q.retries ?? 1, of: retryDelays().length } : undefined,
   }
 })
+
+// What became of these messages' call to this seat (Message.calls, lib/types.ts
+// CallState). Every place a call changes hands writes it here, so the page
+// reads it and never has to guess it.
+function note(
+  ids: string[] | undefined,
+  agentId: string,
+  state: CallState,
+  extra: { runId?: string; note?: string; from?: CallState[]; run?: string } = {},
+) {
+  if (!ids || ids.length === 0) return
+  try {
+    markCalls(ids, agentId, state, extra)
+  } catch (error) {
+    console.error(error)
+  }
+}
 
 function hops() {
   return (g().__benchHops ??= new Map())
@@ -247,12 +294,47 @@ function introduce(agent: NonNullable<ReturnType<typeof agentState>>) {
   return parts.length > 0 ? `${parts.join("\n\n")}\n\n` : ""
 }
 
+// What a seat still owes, said in a few lines at the end of its wake, so it
+// picks the work up by itself instead of waiting for the user to notice
+// (「停着 · 还欠」, lib/owes.ts, same test). To-dos already named in the
+// messages it is handed are left out. Kept under ~200 characters.
+const OWES_MAX = 3
+function owesLine(agentId: string, body: string) {
+  let owed: ReturnType<typeof tasksOwedBy>
+  try {
+    owed = tasksOwedBy(agentId)
+  } catch {
+    return ""
+  }
+  const cut = (text: string, max: number) => (text.length > max ? `${text.slice(0, max)}…` : text)
+  const list = owed
+    .filter((task) => !body.includes(task.id))
+    .sort((a, b) => Number(b.status === "doing") - Number(a.status === "doing") || b.updatedAt - a.updatedAt)
+    .slice(0, OWES_MAX)
+  if (list.length === 0) return ""
+  const lines = list.map((task) => {
+    const step = stepOf(task)
+    return `${task.id} ${cut(task.title, 20)}${step ? `（到「${cut(step, 14)}」）` : ""}`
+  })
+  return `【你名下还没做完的待办】\n${lines.join("\n")}\n接着做，或者把它标成卡住并写明在等什么。`
+}
+
+const CARRY_HEAD = "【刚才被打断、还没回的】\n"
+
+// Messages a cut-short wake was answering, put back in front of what came
+// since. A carry that already has the heading (a retry of a retry) keeps one.
+function withCarry(carried: string | undefined, fresh: string) {
+  if (!carried) return fresh
+  const back = carried.startsWith(CARRY_HEAD) ? carried.slice(CARRY_HEAD.length) : carried
+  return `${CARRY_HEAD}${back}${fresh ? `\n\n【之后的新消息】\n${fresh}` : ""}`
+}
+
 function envelope(
   body: string,
   skipped: number,
   summary: RoomSummary | undefined,
   replyByStdout: boolean,
-  claude = false,
+  kind = "",
   full = false,
   seat?: NonNullable<ReturnType<typeof agentState>>,
 ) {
@@ -271,11 +353,19 @@ function envelope(
   const end = replyByStdout
     ? `如果这一轮交接已经完成、不需要谁再接手，回答以「${END_MARK}」开头，写一句做完了什么，不要 @ 任何人。`
     : `如果这一轮交接已经完成、不需要谁再接手，用 bench_say 带 end: true 发一句做完了什么，不要 @ 任何人。`
-  // Claude Code's prompts reach the page (claude-code.sh, lib/permits.ts).
+  // Claude Code's and Codex's prompts reach the page (claude-code.sh,
+  // codex-app.mjs, lib/permits.ts). Codex asks the way it always does (its
+  // sandbox escalation); the room turns that into a card.
+  const claude = kind === "claude"
+  const codex = kind === "codex"
   const permit = claude && full
     ? `${userName()} 给了你这个席位默认的全部权限：命令和工具直接用，不用 bench_elevate 申请。改动、删除、对外发送这类事照样以他说的为准。sudo 密码只能他自己在终端输。`
     : claude
     ? `跑命令被权限拦住、需要确认或要用没放行的工具时，先用 bench_elevate 说明要做什么、为什么，请 ${userName()} 给这次唤起临时完整权限，别直接放弃或绕路；单条命令的确认也会弹到他的网页上等他点。sudo 密码只能他自己在终端输。`
+    : codex && full
+    ? `${userName()} 给了你这个席位默认的全部权限：这次唤起没有沙箱，命令直接跑，不用申请提权。改动、删除、对外发送这类事照样以他说的为准。sudo 密码只能他自己在终端输。`
+    : codex
+    ? `你在工作区里可以直接读写。要联网、改工作区外的文件或跑沙箱外的命令时，照 Codex 平常的方式申请提权并写明理由，申请会弹到 ${userName()} 的网页上等他点，别直接放弃或绕路。sudo 密码只能他自己在终端输。`
     : ""
   const stop = `${end}这条消息不会叫醒任何人。`
   // Woken, nobody watches the client: questions go to the page.
@@ -302,6 +392,7 @@ function envelope(
     `新功能先用 bench_task 建待办、bench_step 逐步推进，做完用 review 请 ${userName()} 验收，验收不要自己勾；`,
     `问 ${userName()} 用 bench_ask；附件用 ${replyByStdout ? "bench_attach" : "bench_say 的 attachments"}；`,
     claude && full ? "你有默认全部权限，不用 bench_elevate；" : claude ? "被权限拦住先用 bench_elevate 申请；" : "",
+    codex && full ? "你有默认全部权限，没有沙箱；" : codex ? "出工作区照常申请提权，会弹到网页上；" : "",
     replyByStdout ? `交接完成就以「${END_MARK}」开头、不 @ 任何人。` : "交接完成就用 bench_say 带 end: true、不 @ 任何人。",
     "这条消息不会叫醒任何人。",
   ].join("")
@@ -501,6 +592,8 @@ function launch(
   run: Run,
   live: (line: string) => void,
   done: (result: { out: string; failure?: string; stopped?: boolean; lost?: boolean }) => void,
+  // The client's first output: it has the wake.
+  first?: () => void,
 ) {
   const parser = createParser()
   const decoder = new StringDecoder("utf8")
@@ -617,6 +710,11 @@ function launch(
     }), WAIT_NOTE_MS)
   }
   child.stdout.on("data", bindProject((chunk: Buffer) => {
+    if (first) {
+      const tell = first
+      first = undefined
+      tell()
+    }
     if (quiet) {
       clearInterval(quiet)
       quiet = undefined
@@ -658,6 +756,10 @@ function busy(agentId: string, doing: string) {
       } catch {}
     },
     settle() {
+      // Whatever it said it was doing in this wake ended with it (lib/status.ts).
+      try {
+        ranUntilNow(agentId)
+      } catch {}
       const still = agentState(agentId)
       // A question still unanswered stays up after the run; an answered one gives way.
       if (still && (still.doing === shown || (askSettled(still.doing) && !still.doing.startsWith("问了")))) {
@@ -674,6 +776,8 @@ function run(agentId: string) {
   if (queue.running) return
   const agent = agentState(agentId)
   if (!agent || !agent.agentName || !agent.session) {
+    note(queue.pending.map((item) => item.id), agentId, "failed", { note: "这个席位没有会话，叫不醒" })
+    dropChecks(queue, "复验人没有会话，叫不醒")
     queue.pending = []
     queue.summary = false
     queue.compact = false
@@ -683,6 +787,8 @@ function run(agentId: string) {
   }
   const adapter = adapterFor(agent.agentName)
   if (!adapter) {
+    note(queue.pending.map((item) => item.id), agentId, "failed", { note: `没有 ${agent.agentName} 的唤起命令` })
+    dropChecks(queue, `没有 ${agent.agentName} 的唤起命令`)
     queue.pending = []
     queue.summary = false
     queue.compact = false
@@ -722,6 +828,12 @@ function run(agentId: string) {
     compactSession(agent)
     return
   }
+  const check = queue.checks?.shift()
+  if (check) {
+    syncLane(agentId)
+    checkTask(agent, check)
+    return
+  }
   if (queue.goal !== undefined) {
     const text = queue.goal
     queue.goal = undefined
@@ -730,6 +842,10 @@ function run(agentId: string) {
     return
   }
   if (queue.pending.length === 0 && !queue.carry) return
+  // Waiting to try a failed wake again: its timer runs it. A new message for
+  // the seat goes now and takes the waiting ones along.
+  if (queue.retryAt && queue.pending.length === 0 && Date.now() < queue.retryAt) return
+  clearRetry(queue)
 
   const seen = catchUp(agentId, CATCH_UP_CHARS, queue.dropped ? new Set(queue.dropped) : undefined)
   queue.dropped = undefined
@@ -737,10 +853,9 @@ function run(agentId: string) {
   const fresh = seen.text || queue.pending.map((item: { line: string }) => item.line).join("\n\n")
   const carried = queue.carry
   queue.carry = undefined
-  const body = carried
-    ? `【刚才被打断、还没回的】\n${carried}${fresh ? `\n\n【之后的新消息】\n${fresh}` : ""}`
-    : fresh
-  const wrapped = envelope(body, seen.skipped, seen.summary, adapter.reply === "stdout", agent.agentName === "claude", Boolean(agent.autoFull), agent)
+  const body = withCarry(carried, fresh)
+  const owes = owesLine(agentId, body)
+  const wrapped = envelope(owes ? `${body}\n\n${owes}` : body, seen.skipped, seen.summary, adapter.reply === "stdout", agent.agentName ?? "", Boolean(agent.autoFull), agent)
   const command = commandFor(
     agent.agentName,
     agent.session,
@@ -750,11 +865,16 @@ function run(agentId: string) {
   )
   const hop = queue.hops
   const trigger = queue.trigger
+  const answering = [...(queue.carryIds ?? []), ...queue.pending.map((item) => item.id)]
+  queue.carryIds = undefined
   queue.pending = []
   queue.hops = 0
   queue.trigger = undefined
   syncLane(agentId)
-  if (!command) return
+  if (!command) {
+    note(answering, agentId, "failed", { note: "拼不出它的唤起命令" })
+    return
+  }
 
   queue.running = true
   const startedLink = { agentName: agent.agentName, session: agent.session }
@@ -763,11 +883,16 @@ function run(agentId: string) {
   queue.project = currentProject()
   queue.log = log
   queue.midHop = undefined
+  queue.calls = answering
+  note(answering, agentId, "started", { runId: log.id })
   const seat = busy(agentId, "被点到了，正在回复")
   launch(agent, command, log, seat.live, ({ out, failure, stopped, lost }) => {
     queue.running = false
     queue.key = undefined
     queue.log = undefined
+    // Those it was handed in the middle of the run are answered with it.
+    const answered = queue.calls ?? answering
+    queue.calls = undefined
     const reach = Math.max(hop, queue.midHop ?? 0)
     queue.midHop = undefined
     const still = agentState(agentId)
@@ -776,18 +901,47 @@ function run(agentId: string) {
       postSystem(`${agent.name} 这次有一行输出太长（超过 8MB）没读，下面贴出的回答可能不完整，「查看过程」里能看到读到的部分`)
     }
     if (stopped) {
+      if (queue.whisper === undefined) queue.retries = undefined
       // Stopped for an interjection: pick these messages up again after it.
       if (queue.whisper !== undefined) {
         queue.carry = body
+        queue.carryIds = answered
         queue.trigger ??= trigger
         syncLane(agentId)
+        note(answered, agentId, "queued", { note: "被单独说打断，回完接着做" })
+      } else {
+        note(answered, agentId, "stopped")
       }
       endRun(log, "failed", queue.whisper !== undefined ? "被单独插话打断，回完接着做" : "被你停下了")
       seat.settle()
       run(agentId)
       return
     } else if (failure) {
-      reportFailure(agent, log, failure, out, `唤起 ${agent.name} `)
+      const tries = queue.retries ?? 0
+      const delays = retryDelays()
+      const network = !limitOf(log, out) && isNetworkFailure(failure, failedStep(log))
+      if (network && netRetry() && tries < delays.length && sameBinding) {
+        // The network dropped: the same messages go again by themselves after
+        // a while, as if the wake had been cut short. Nothing is said in the
+        // room unless the last try fails too.
+        const wait = delays[tries]
+        queue.retries = tries + 1
+        queue.carry = body
+        queue.carryIds = answered
+        queue.trigger ??= trigger
+        queue.hops = Math.max(queue.hops, hop)
+        queue.retryAt = Date.now() + wait
+        syncLane(agentId)
+        note(answered, agentId, "retrying", { note: `${tries + 1}/${delays.length}，${seconds(wait)}后再叫：${failure}` })
+        endRun(log, "failed", `网络断了，${seconds(wait)}后自动重试（${tries + 1}/${delays.length}）：${failure}`)
+        seat.settle()
+        armRetry(agentId, wait)
+        return
+      }
+      queue.retries = undefined
+      const tried = network && tries > 0 ? `（自动重试了 ${tries} 次）` : ""
+      note(answered, agentId, "failed", { note: `${failure}${tried}` })
+      reportFailure(agent, log, `${failure}${tried}`, out, `唤起 ${agent.name} `)
     } else if (adapter.reply === "stdout" && still && sameBinding && out) {
       try {
         // Posted while the run is still open, so the message links to it.
@@ -798,11 +952,53 @@ function run(agentId: string) {
         console.error(error)
       }
     }
-    if (!failure) markWoken(agentId, startedLink, wrapped.rules)
+    if (!failure) {
+      queue.retries = undefined
+      markWoken(agentId, startedLink, wrapped.rules)
+      // Ended well. Whether it spoke is a separate fact: a wake that ran to
+      // the end without a word in the room is not an answer.
+      const said = saidInRun(agentId, log.id)
+      note(answered, agentId, said ? "answered" : "silent")
+      // What it took by itself meanwhile (a wait loop inside this wake) too.
+      if (said) {
+        try {
+          settleCalls(agentId)
+        } catch {}
+      }
+    }
     endRun(log, failure ? "failed" : "done", failure ? `没成功：${failure}` : undefined)
     seat.settle()
     run(agentId)
-  })
+  }, () => note(queue.calls, agentId, "picked", { from: ["started"], run: log.id }))
+}
+
+// The error step the client's own stream ended on, if any (lib/events.ts).
+function failedStep(log: Run) {
+  return log.steps.find((step) => step.kind === "note" && step.state === "failed")?.title
+}
+
+function clearRetry(queue: Lane) {
+  clearTimeout(queue.retryTimer)
+  queue.retryTimer = undefined
+  queue.retryAt = undefined
+}
+
+function armRetry(agentId: string, wait: number) {
+  const queue = lane(agentId)
+  clearTimeout(queue.retryTimer)
+  queue.retryTimer = setTimeout(
+    bindProject(() => {
+      queue.retryTimer = undefined
+      queue.retryAt = undefined
+      // Stopped or taken out of the queue meanwhile: nothing left to try.
+      if (!queue.carry) {
+        queue.retries = undefined
+        return
+      }
+      run(agentId)
+    }),
+    wait,
+  )
 }
 
 function intoTerminal(agent: NonNullable<ReturnType<typeof agentState>>, queue: ReturnType<typeof lane>) {
@@ -820,7 +1016,13 @@ function intoTerminal(agent: NonNullable<ReturnType<typeof agentState>>, queue: 
   const fresh = seen.text || queue.pending.map((item: { line: string }) => item.line).join("\n\n")
   const carried = queue.carry
   queue.carry = undefined
-  const body = carried ? `【刚才被打断、还没回的】\n${carried}${fresh ? `\n\n【之后的新消息】\n${fresh}` : ""}` : fresh
+  const body = withCarry(carried, fresh)
+  clearRetry(queue)
+  queue.retries = undefined
+  // No wake to follow from here on: it counts as answered when the seat next
+  // speaks in the room (settleCalls).
+  note([...(queue.carryIds ?? []), ...queue.pending.map((item) => item.id)], agent.id, "picked", { note: "打进了它开着的终端" })
+  queue.carryIds = undefined
   queue.pending = []
   queue.hops = 0
   queue.trigger = undefined
@@ -828,7 +1030,8 @@ function intoTerminal(agent: NonNullable<ReturnType<typeof agentState>>, queue: 
   // Typed in, there is no answer to read off stdout: it replies with bench_say.
   // Its permission prompts show in the terminal itself, not on the page.
   const startedLink = { agentName: agent.agentName, session: agent.session }
-  const wrapped = envelope(body, seen.skipped, seen.summary, false, false, false, agent)
+  const owes = owesLine(agent.id, body)
+  const wrapped = envelope(owes ? `${body}\n\n${owes}` : body, seen.skipped, seen.summary, false, "", false, agent)
   deliver(agent.id, introduce(agent) + wrapped.text)
   markWoken(agent.id, startedLink, wrapped.rules)
 }
@@ -883,6 +1086,130 @@ function writeSummary(agent: NonNullable<ReturnType<typeof agentState>>, adapter
         postSystem(`${agent.name} 这一轮没交摘要`)
       }
     }
+    run(agent.id)
+  })
+}
+
+// 「请验收时先复验」: when an owner asks for review, the project's checker
+// (Agent.checker, set in the project settings) is woken on its own, like a
+// summary: nothing goes into the room. It gets the task and is told to look
+// without changing anything, and to answer with one verdict line; the room
+// reads that off its output (no bridge tool to add, so no client has to
+// restart its bridge). The verdict stays on the task (Task.check) for the
+// review card; a "failed" doesn't send the task back, the user decides.
+const VERDICT = /复验结论\s*[:：]\s*(通过|没过|没验到)/g
+const VERDICT_STATE = { 通过: "passed", 没过: "failed", 没验到: "unverified" } as const
+
+function requestCheck(taskId: string, at: number) {
+  const seat = snapshot().agents.find((item) => item.checker)
+  const skip = (note: string) => setTaskCheck(taskId, at, { state: "skipped", note })
+  if (!seat) return skip("复验人已经取消了，这次没复验")
+  const agent = agentState(seat.id)
+  if (!agent?.agentName || !agent.session || !adapterFor(agent.agentName)) {
+    return skip(`复验人 ${seat.name} 叫不醒（没有会话或唤起命令），这次跳过`)
+  }
+  if (isStandby(agent.id)) return skip(`复验人 ${seat.name} 正挂在 bench_wait 里自己守着房间，叫不醒，这次跳过`)
+  const queue = lane(agent.id)
+  queue.checks = [...(queue.checks ?? []).filter((item) => item.taskId !== taskId), { taskId, at }]
+  syncLane(agent.id)
+  run(agent.id)
+}
+
+// Checks a seat had queued, when it can't take them after all.
+function dropChecks(queue: Lane, why: string) {
+  for (const item of queue.checks ?? []) {
+    try {
+      setTaskCheck(item.taskId, item.at, { state: "error", note: `复验没跑成：${why}` })
+    } catch {}
+  }
+  queue.checks = undefined
+}
+
+// After a restart: checks that were queued or running never finish.
+function abandonChecks() {
+  for (const project of listProjects()) {
+    try {
+      inProject(project.id, () => {
+        for (const task of snapshot().tasks) {
+          if (task.check && (task.check.state === "queued" || task.check.state === "running")) {
+            setTaskCheck(task.id, task.check.at, { state: "error", note: "复验没跑成：服务器重启，打断了" })
+          }
+        }
+      })
+    } catch {}
+  }
+}
+
+function checkPrompt(task: Task) {
+  const dir = currentProjectInfo().dir
+  const steps = (task.steps ?? []).map((step, index) => `${index + 1}. [${step.state === "done" ? "做完" : step.state === "doing" ? "在做" : "待做"}] ${step.text}${step.note ? `\n   说明：${step.note}` : ""}`)
+  return [
+    `【并坐房间请你复验一条待办】${userName()} 验收之前，先由你照着验一遍。这一轮不进群聊，只有房间读你的回答，${userName()} 会在验收卡片上看到你的结论。`,
+    "",
+    `待办：「${task.title}」（${task.id}）`,
+    `负责人：${task.ownerName ?? "没有"}`,
+    dir ? `项目目录：${dir}` : "项目没设目录。",
+    task.detail ? `说明：\n${task.detail}` : "",
+    steps.length ? `步骤：\n${steps.join("\n")}` : "",
+    task.review?.note ? `负责人请验收时写的「怎么看效果」：\n${task.review.note}` : "",
+    "",
+    "要求：",
+    "- 只读：不改工作区的代码和数据，不提交，不重启服务，不在群里说话（不用 bench_say），也不改这条待办。",
+    "- 要跑起来看，就按项目目录里 MAINTENANCE.md 的做法起隔离副本，用副本自己的数据和口令，用完删掉。",
+    "- 只验你真的验到的；没法验的（比如要真机、要花额度、要人眼看）写进「没验到的」。",
+    "",
+    "回答直接输出，格式：",
+    "第一行只写一个结论：复验结论：通过 / 复验结论：没过 / 复验结论：没验到",
+    "接着写依据：做了什么、看到了什么。",
+    "最后一段以「没验到的：」开头，列出没验到的部分；全验到了就写「没验到的：无」。",
+  ]
+    .filter((line, index, all) => line || all[index - 1])
+    .join("\n")
+}
+
+function verdictOf(out: string): Pick<Task["check"] & object, "state" | "note"> {
+  const found = [...out.matchAll(VERDICT)].at(-1)
+  if (!found) {
+    const tail = out.trim().slice(-200)
+    return { state: "error", note: `复验没交结论${tail ? `，它最后说：${tail}` : ""}` }
+  }
+  const rest = out.slice((found.index ?? 0) + found[0].length).trim()
+  return { state: VERDICT_STATE[found[1] as keyof typeof VERDICT_STATE], note: rest.slice(0, 2000) || undefined }
+}
+
+function checkTask(agent: NonNullable<ReturnType<typeof agentState>>, item: { taskId: string; at: number }) {
+  const task = snapshot().tasks.find((one) => one.id === item.taskId)
+  // Sent back, signed off or asked again meanwhile: this check is moot.
+  if (!task || task.check?.at !== item.at || task.review?.state !== "waiting") {
+    run(agent.id)
+    return
+  }
+  const command = commandFor(agent.agentName ?? "", agent.session ?? "", checkPrompt(task), agent.modelPick, agent.effortPick)
+  if (!command) {
+    setTaskCheck(item.taskId, item.at, { state: "error", note: "复验没跑成：拼不出唤起命令" })
+    run(agent.id)
+    return
+  }
+  const queue = lane(agent.id)
+  queue.running = true
+  const log = startRun(agent.id, agent.name, "check", { project: currentProject(), ask: `复验「${task.title}」` })
+  setTaskCheck(item.taskId, item.at, { state: "running", runId: log.id })
+  const seat = busy(agent.id, `在复验「${task.title}」`)
+  launch(agent, command, log, seat.live, ({ out, failure, stopped }) => {
+    queue.running = false
+    const verdict = stopped ? null : failure ? null : verdictOf(out)
+    endRun(
+      log,
+      stopped || failure || verdict?.state === "error" ? "failed" : "done",
+      stopped ? "被停下了" : failure ? `没成功：${failure}` : verdict?.state === "error" ? "没交结论" : undefined,
+    )
+    if (!stopped && !failure) log.answer = out.slice(0, 4000)
+    seat.settle()
+    if (stopped) setTaskCheck(item.taskId, item.at, { state: "error", note: "复验没跑成：被停下了" })
+    else if (failure) {
+      setTaskCheck(item.taskId, item.at, { state: "error", note: `复验没跑成：${failure}` })
+      noteLimit(agent, log, out)
+    } else if (verdict) setTaskCheck(item.taskId, item.at, verdict)
     run(agent.id)
   })
 }
@@ -1094,6 +1421,21 @@ export function stopAgent(agentId: string) {
   const agent = agentState(agentId)
   if (!agent) throw new ApiError(404, "这个席位不在了")
   const queue = lane(agentId)
+  if (!queue.stop && queue.retryAt) {
+    // Waiting to try a wake again after the network dropped: no more tries.
+    clearRetry(queue)
+    queue.retries = undefined
+    const dropped = queue.pending.length
+    note(queue.carryIds, agentId, "stopped", { note: "等重试时被你停下了" })
+    note(queue.pending.map((item) => item.id), agentId, "dropped", { note: "停止时一起取消了" })
+    queue.carryIds = undefined
+    queue.carry = undefined
+    queue.pending = []
+    queue.trigger = undefined
+    queue.hops = 0
+    syncLane(agentId)
+    return { dropped, retryCancelled: true }
+  }
   if (!queue.stop) {
     // Marked running with no process to stop: a start that failed halfway
     // (spawn E2BIG once left a summary job behind). Clear the marks so the
@@ -1102,8 +1444,13 @@ export function stopAgent(agentId: string) {
     const stale = queue.running || summaryJob()?.agentId === agentId || activeRun(agentId)
     if (!stale) throw new ApiError(409, `${agent.name} 现在没在跑`)
     const dropped = queue.pending.length
+    note([...queue.pending.map((item) => item.id), ...(queue.carryIds ?? [])], agentId, "dropped", { note: "停止时一起取消了" })
+    note(queue.calls, agentId, "cut", { note: "进程已经不在了" })
+    queue.calls = undefined
+    queue.carryIds = undefined
     queue.pending = []
     queue.carry = undefined
+    dropChecks(queue, "复验人被停下了")
     queue.summary = false
     queue.compact = false
     queue.goal = undefined
@@ -1118,11 +1465,16 @@ export function stopAgent(agentId: string) {
     return { dropped, cleared: true }
   }
   const dropped = queue.pending.length
+  note([...queue.pending.map((item) => item.id), ...(queue.carryIds ?? [])], agentId, "dropped", { note: "停止时一起取消了" })
+  queue.carryIds = undefined
   queue.pending = []
   queue.carry = undefined
+  dropChecks(queue, "复验人被停下了")
   queue.summary = false
   queue.compact = false
   queue.goal = undefined
+  clearRetry(queue)
+  queue.retries = undefined
   syncLane(agentId)
   queue.stop()
   return { dropped }
@@ -1151,14 +1503,34 @@ export function dropQueuedMessage(agentId: string, messageId?: string) {
   if (!messageId || messageId === "*") {
     const ids = queue.pending.map((item) => item.id)
     if (ids.length > 0) queue.dropped = [...new Set([...(queue.dropped ?? []), ...ids])].slice(-200)
+    note([...ids, ...(queue.carryIds ?? [])], agentId, "dropped")
+    queue.carryIds = undefined
     queue.pending = []
     queue.carry = undefined
     queue.trigger = undefined
     queue.hops = 0
+    clearRetry(queue)
+    queue.retries = undefined
   } else {
     const had = queue.pending.some((item) => item.id === messageId)
     queue.pending = queue.pending.filter((item) => item.id !== messageId)
-    if (had) queue.dropped = [...new Set([...(queue.dropped ?? []), messageId])].slice(-200)
+    if (had) {
+      queue.dropped = [...new Set([...(queue.dropped ?? []), messageId])].slice(-200)
+      note([messageId], agentId, "dropped")
+    }
+    // One of the messages a failed wake will be tried again with: out of it;
+    // with none left, no more tries.
+    if (queue.carryIds?.includes(messageId)) {
+      queue.carryIds = queue.carryIds.filter((id) => id !== messageId)
+      queue.dropped = [...new Set([...(queue.dropped ?? []), messageId])].slice(-200)
+      note([messageId], agentId, "dropped")
+      if (queue.carryIds.length === 0 && queue.retryAt) {
+        queue.carryIds = undefined
+        queue.carry = undefined
+        clearRetry(queue)
+        queue.retries = undefined
+      }
+    }
     if (queue.trigger === messageId) queue.trigger = queue.pending.at(-1)?.id
   }
   syncLane(agentId)
@@ -1170,6 +1542,14 @@ export function dropQueuedMessage(agentId: string, messageId?: string) {
 // after every tool call (scripts/bench-hook.mjs, by BENCH_RUN_KEY), or any
 // seat's bench bridge after one of its tools (by seat). They are handed over
 // with what else came in since, marked on the page, and wake nobody later.
+// The seat whose current run holds this key (BENCH_RUN_KEY). A woken Codex
+// turn (scripts/codex-app.mjs) has no seat token, only this, and asks the
+// room's permission cards with it (app/api/v1/permit).
+export function seatOfRunKey(key: string) {
+  for (const [id, item] of lanesMap()) if (item.key === key && item.running) return id
+  return null
+}
+
 export function takeQueued(by: { key?: string; agentId?: string }) {
   let agentId = by.agentId
   if (by.key) {
@@ -1186,7 +1566,10 @@ export function takeQueued(by: { key?: string; agentId?: string }) {
   const droppedSet = queue.dropped ? new Set(queue.dropped) : undefined
   const text = inProject(queue.project, () => {
     const seen = catchUp(agentId, CATCH_UP_CHARS, droppedSet)
-    markReached(items.map((item: { id: string }) => item.id), agentId)
+    const ids = items.map((item: { id: string }) => item.id)
+    markReached(ids, agentId)
+    note(ids, agentId, "picked", { runId: log?.id, note: "干活中途送到" })
+    queue.calls = [...(queue.calls ?? []), ...ids]
     return seen.text || items.map((item: { line: string }) => item.line).join("\n\n")
   })
   queue.dropped = undefined
@@ -1249,6 +1632,15 @@ function hopOf(message: Message) {
 
 function wake(message: Message) {
   if (message.kind === "system") return
+  // Said outside any wake (its wait loop, its terminal, its own window): what
+  // it took there has its answer.
+  if (message.authorId !== "human" && !message.runId) {
+    try {
+      settleCalls(message.authorId)
+    } catch (error) {
+      console.error(error)
+    }
+  }
   const hop = hopOf(message)
   const fromHuman = message.authorId === "human"
   // 【本轮结束】 needs nothing here: that message mentions nobody, so it wakes
@@ -1274,7 +1666,10 @@ function wake(message: Message) {
         if (cooled(`${agent.id}:standby`, NOTE_GAP_MS)) {
           postSystem(`${agent.name} 正在守着房间（bench_wait），这会儿在处理上一条：消息排着等它来取。它要是不再守了，房间会改成直接叫醒它`)
         }
+        note([message.id], agent.id, "held")
         watchStandby(agent.id, message, hop)
+      } else {
+        note([message.id], agent.id, "picked", { note: "它守着房间，当场取走" })
       }
       continue
     }
@@ -1288,12 +1683,14 @@ function enqueue(agent: { id: string; name: string; agentName?: string; session?
     if (cooled(`${agent.id}:session`, NOTE_GAP_MS)) {
       postSystem(`${agent.name} 被点到了，但还没报 agent 和 uuid，叫不醒`)
     }
+    note([message.id], agent.id, "failed", { note: "还没报会话，叫不醒" })
     return
   }
   if (!adapterFor(agent.agentName)) {
     if (cooled(`${agent.id}:config`, NOTE_GAP_MS)) {
       postSystem(`${agent.name} 被点到了，还没有 ${agent.agentName} 的唤起命令`)
     }
+    note([message.id], agent.id, "failed", { note: `没有 ${agent.agentName} 的唤起命令` })
     return
   }
   const queue = lane(agent.id)
@@ -1303,6 +1700,8 @@ function enqueue(agent: { id: string; name: string; agentName?: string; session?
   queue.trigger = message.id
   syncLane(agent.id)
   run(agent.id)
+  // Still in the lane: behind the run it is in, or the lane is paused.
+  if (queue.pending.some((item) => item.id === message.id)) note([message.id], agent.id, "queued")
 }
 
 // A mention held for a seat between two of its waits. Once the seat has read
@@ -1313,6 +1712,7 @@ const STANDBY_CHECK_MS = 30_000
 function watchStandby(agentId: string, message: Message, hop: number) {
   const check = bindProject(() => {
     const agent = agentState(agentId)
+    if (agent && (agent.seenSeq ?? 0) >= message.seq) note([message.id], agentId, "picked", { from: ["held"], note: "它守着房间，自己取走了" })
     if (!agent || (agent.seenSeq ?? 0) >= message.seq) return
     if (isStandby(agentId)) {
       setTimeout(check, STANDBY_CHECK_MS)
@@ -1334,7 +1734,7 @@ function announceInterrupted() {
   for (const [project, list] of byProject) {
     try {
       inProject(project, () => {
-        const what = { reply: "回复", private: "单独回话", summary: "写摘要", compact: "压缩上下文", goal: "按目标干活" } as const
+        const what = { reply: "回复", private: "单独回话", summary: "写摘要", compact: "压缩上下文", goal: "按目标干活", check: "复验" } as const
         // Its seat still shows the reply it never finished.
         for (const item of list) {
           try {
@@ -1352,6 +1752,46 @@ function announceInterrupted() {
             replyTo: item.replyTo,
           })),
         )
+      })
+    } catch {
+      // The project is gone.
+    }
+  }
+}
+
+// After a restart: every call that was on its way is checked against what the
+// room still holds. Queued ones are in the lanes (they are saved); a running
+// wake is gone with the old process, and so is a wait loop's watch. What has
+// nothing behind it any more is marked cut, not left looking under way.
+function settleOpenCalls() {
+  for (const project of listProjects()) {
+    try {
+      inProject(project.id, () => {
+        for (const { messageId, seq, call } of openCalls()) {
+          const queue = lanesMap().get(call.id)
+          if (call.state === "queued") {
+            if (queue?.pending.some((item) => item.id === messageId) || queue?.carryIds?.includes(messageId)) continue
+          } else if (call.state === "retrying") {
+            // The timer went with the old process; the messages are still in
+            // the lane, which a restart pauses, so they go when it resumes.
+            if (queue?.carry !== undefined && queue.carryIds?.includes(messageId)) {
+              note([messageId], call.id, "queued", { note: "等重试时房间重启了，恢复自动唤起后接着叫" })
+              continue
+            }
+          } else if (call.state === "held") {
+            if (isStandby(call.id)) continue
+            if ((agentState(call.id)?.seenSeq ?? 0) >= seq) {
+              note([messageId], call.id, "picked", { note: "它守着房间，自己取走了" })
+              continue
+            }
+          } else if (call.runId) {
+            if (activeRun(call.id)?.id === call.runId) continue
+          } else {
+            // Taken in a wait loop or a terminal: no wake of the room's to lose.
+            continue
+          }
+          note([messageId], call.id, "cut", { note: "房间重启时断了" })
+        }
       })
     } catch {
       // The project is gone.
@@ -1385,6 +1825,9 @@ export function rewake(runId: string) {
       if (!item.body) throw new ApiError(400, "没记下当时在回哪些消息")
       queue.carry = queue.carry ? `${item.body}\n\n${queue.carry}` : item.body
       queue.trigger ??= item.replyTo
+      const back = callsOfRun(item.id)
+      queue.carryIds = [...new Set([...(queue.carryIds ?? []), ...back])]
+      note(back, agent.id, "queued", { note: "重新叫醒" })
     }
     markResumed(item)
     markInterruptedResumed(item.id, item.resumedAt ?? Date.now())
@@ -1419,6 +1862,9 @@ export function resumeLimitedAfterRebind(runId: string, reboundToLabel: string) 
     } else if (item.body) {
       queue.carry = queue.carry ? `${item.body}\n\n${queue.carry}` : item.body
       queue.trigger ??= item.replyTo
+      const back = callsOfRun(item.id)
+      queue.carryIds = [...new Set([...(queue.carryIds ?? []), ...back])]
+      note(back, agent.id, "queued", { note: "重新叫醒" })
     }
     setLimited(item, { resetsAt: item.limited?.resetsAt })
     markResumed(item)
@@ -1528,6 +1974,18 @@ export function forgetMessage(messageId: string) {
 
 export function ensureSummon() {
   g().__benchSummonHandler = wake
+  g().__benchCheckHandler = ({ project, taskId, at }) => {
+    try {
+      inProject(project, () => requestCheck(taskId, at))
+    } catch (error) {
+      console.error(error)
+    }
+  }
+  if (!g().__benchCheckBound) {
+    g().__benchCheckBound = true
+    // After the request for review is saved and answered.
+    onCheckWanted((wanted) => setImmediate(() => g().__benchCheckHandler?.(wanted)))
+  }
   lanesMap()
   if (!g().__benchTermBound) {
     g().__benchTermBound = true
@@ -1540,6 +1998,8 @@ export function ensureSummon() {
   }
   if (!g().__benchSummonAnnounced) {
     g().__benchSummonAnnounced = true
+    settleOpenCalls()
+    abandonChecks()
     announceInterrupted()
     rearmResumes()
   }

@@ -8,6 +8,7 @@ import {
   ChevronsUpDown,
   Cpu,
   Ellipsis,
+  Hourglass,
   Loader2,
   MessageCircle,
   Pause,
@@ -15,6 +16,7 @@ import {
   Play,
   Plug,
   Plus,
+  RotateCw,
   Shrink,
   Square,
   SquareTerminal,
@@ -37,14 +39,15 @@ import {
 } from "@/components/ui/dropdown-menu"
 import { Avatar, Lamp } from "@/components/room/bits"
 import { seatFlight } from "@/components/room/project-rail"
+import { goto } from "@/components/room/refs"
 import { CONTEXT_WARN, ContextHair, contextFacts, useContexts } from "@/components/room/context"
 import { QuotaLines, QuotaRing, useQuotas } from "@/components/room/quota"
 import { Reveal } from "@/components/room/reveal"
 import { BetaTag, openTerminalFor } from "@/components/room/terminal-dialog"
 import { SpeedLine, useSpeeds } from "@/components/room/speed-line"
 import type { AdapterInfo } from "@/components/room/api"
-import { KINDS, kindOf, type Kind } from "@/lib/kinds"
-import { ago, STATUS_LABEL } from "@/lib/status"
+import { asksOnPage, KINDS, kindOf, type Kind } from "@/lib/kinds"
+import { ago, PARKED_MS, STATUS_LABEL } from "@/lib/status"
 import type { SeatContext } from "@/lib/context"
 import type { Quota } from "@/lib/quota"
 import type { Speed } from "@/lib/speed"
@@ -390,6 +393,11 @@ function SeatRow({ agent, ...props }: Props & { agent: PublicAgent }) {
   // Same rule as the menu's 「压缩上下文」.
   const compactable = Boolean(context && agent.callable && !agent.demo && !agent.runId && !agent.standby)
   const busy = Boolean(agent.runId) || agent.status === "working" || agent.status === "blocked"
+  // It said it was working, long ago, and nothing since: the room can't tell.
+  const unsure = agent.unsure !== undefined && !agent.runId
+  // Quiet for a while with work still on it (lib/owes.ts).
+  const owes = agent.owes && props.now > 0 && props.now - agent.owes.since >= PARKED_MS ? agent.owes : null
+  const owed = owes ? owes.tasks.length + owes.calls.length : 0
   // What used to be lines under the name, now on hover.
   const tip = [
     `@${agent.name}`,
@@ -434,6 +442,25 @@ function SeatRow({ agent, ...props }: Props & { agent: PublicAgent }) {
       toast.success(messageId ? "已从队列剔除这条消息" : `已清空 ${agent.name} 的排队消息`)
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "没能剔除")
+    }
+  }
+
+  // One click instead of typing it: said in the room as the user, so it is
+  // an ordinary call, seen by everyone and answered where it was asked.
+  const nudge = async () => {
+    if (!owes) return
+    const tasks = owes.tasks.map((task) => `${task.id}「${task.title}」${task.step ? `（到「${task.step}」这一步）` : ""}`)
+    const parts = [
+      tasks.length > 0 ? `你名下还有没做完的待办：${tasks.join("；")}。接着做；要等别的事才能动，就把它标成卡住，写明在等什么` : "",
+      owes.calls.length > 0 ? `之前有 ${owes.calls.length} 条叫你的消息没送到，这次一起看` : "",
+    ].filter(Boolean)
+    try {
+      await api("/api/v1/say", {
+        method: "POST",
+        body: JSON.stringify({ as: "human", text: `@${agent.name} ${parts.join("。")}。` }),
+      })
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "没发出去")
     }
   }
 
@@ -496,6 +523,11 @@ function SeatRow({ agent, ...props }: Props & { agent: PublicAgent }) {
                 <Square />
                 停下这次唤起
               </DropdownMenuItem>
+            ) : agent.retry ? (
+              <DropdownMenuItem onClick={() => props.onStop(agent)}>
+                <Square />
+                不再自动重试
+              </DropdownMenuItem>
             ) : null}
             {compactable ? (
               <DropdownMenuItem onClick={() => props.onCompact(agent)}>
@@ -531,8 +563,8 @@ function SeatRow({ agent, ...props }: Props & { agent: PublicAgent }) {
                     {agent.queuePaused ? "恢复自动唤起" : "暂停自动唤起"}
                   </DropdownMenuItem>
                 ) : null}
-                {/* Only Claude Code's permission prompts come to the page (lib/permits.ts). */}
-                {agent.agentName === "claude" ? (
+                {/* Only Claude Code's and Codex's permission prompts come to the page (lib/kinds.ts PERMIT_KINDS). */}
+                {asksOnPage(agent.agentName) ? (
                   <DropdownMenuCheckboxItem
                     checked={Boolean(agent.autoFull)}
                     onCheckedChange={(on) => void toggleAutoFull(on)}
@@ -603,6 +635,25 @@ function SeatRow({ agent, ...props }: Props & { agent: PublicAgent }) {
       ) : null}
 
       {/* Tier 2: controllable wake queue bar — shown only when paused or holding queued mentions. */}
+      {/* Tier 2: its wake failed on the network and goes again by itself (lib/netfail.ts). */}
+      {agent.retry && !agent.runId ? (
+        <div data-retry className="flex items-center gap-1 pl-4 text-[11px] leading-5 text-amber-700 dark:text-amber-300">
+          <RotateCw className="size-3 shrink-0" />
+          <span className="truncate" title="唤起因为网络断了没成功，房间会带着同样的消息自己再叫一次">
+            网络断了 · {new Date(agent.retry.at).toLocaleTimeString("zh-CN", { hour12: false })} 再叫（{agent.retry.n}/{agent.retry.of}）
+          </span>
+          <button
+            type="button"
+            className="ml-auto grid size-5 shrink-0 place-items-center rounded-full text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
+            title="不再自动重试"
+            aria-label={`不再自动重试 ${agent.name}`}
+            onClick={() => props.onStop(agent)}
+          >
+            <X className="size-3" />
+          </button>
+        </div>
+      ) : null}
+
       {showQueueBar ? (
         <div className="flex items-center gap-1 pl-4 text-[11px] leading-5 text-amber-700 dark:text-amber-300">
           { queuedCount > 0 ? (
@@ -611,17 +662,20 @@ function SeatRow({ agent, ...props }: Props & { agent: PublicAgent }) {
                 {agent.queuePaused ? `已暂停 · 排队 ${queuedCount} 条` : `排队 ${queuedCount} 条`}
               </DropdownMenuTrigger>
               <DropdownMenuContent align="start" className="w-64">
-                <DropdownMenuLabel>等待唤起的消息（点 × 单独剔除）</DropdownMenuLabel>
-                {(agent.queuedItems ?? []).map((item) => (
-                  <DropdownMenuItem
-                    key={item.id}
-                    className="flex items-center justify-between gap-2 text-xs"
-                    onClick={() => void dropQueued(item.id)}
-                  >
-                    <span className="min-w-0 flex-1 truncate">{item.line}</span>
-                    <X className="size-3 shrink-0 text-muted-foreground" />
-                  </DropdownMenuItem>
-                ))}
+                {/* A label only works inside a group: Base UI throws without one. */}
+                <DropdownMenuGroup>
+                  <DropdownMenuLabel>等待唤起的消息（点 × 单独剔除）</DropdownMenuLabel>
+                  {(agent.queuedItems ?? []).map((item) => (
+                    <DropdownMenuItem
+                      key={item.id}
+                      className="flex items-center justify-between gap-2 text-xs"
+                      onClick={() => void dropQueued(item.id)}
+                    >
+                      <span className="min-w-0 flex-1 truncate">{item.line}</span>
+                      <X className="size-3 shrink-0 text-muted-foreground" />
+                    </DropdownMenuItem>
+                  ))}
+                </DropdownMenuGroup>
                 <DropdownMenuSeparator />
                 <DropdownMenuItem variant="destructive" onClick={() => void dropQueued("*")}>
                   清空全部排队
@@ -656,6 +710,13 @@ function SeatRow({ agent, ...props }: Props & { agent: PublicAgent }) {
               <Loader2 className="size-3 shrink-0 animate-spin" />
               <span className="truncate">{agent.doing || "正在回复"}</span>
             </button>
+          ) : unsure ? (
+            <span
+              className="min-w-0 flex-1 truncate pl-1 text-xs leading-5 text-muted-foreground"
+              title={`它 ${ago(agent.unsure ?? 0, props.now)}说在做「${agent.doing || "…"}」，之后没再报过。客户端还开着，是不是还在做，房间看不出来`}
+            >
+              不确定在不在做 · {ago(agent.unsure ?? 0, props.now)}说在做
+            </span>
           ) : (
             <span
               className={`min-w-0 flex-1 truncate pl-1 text-xs leading-5 ${agent.status === "blocked" ? WARN : "text-sky-700 dark:text-sky-300"}`}
@@ -685,6 +746,51 @@ function SeatRow({ agent, ...props }: Props & { agent: PublicAgent }) {
                 <Square className="size-2.5 fill-current" />
               </button>
             </>
+          ) : null}
+        </div>
+      ) : null}
+
+      {/* Tier 2: stopped with work still on it. Gone once it works, asks, or the work is done. */}
+      {owes ? (
+        <div data-owes className={`flex items-center gap-1 pl-4 text-[11px] leading-5 ${WARN}`}>
+          <DropdownMenu>
+            <DropdownMenuTrigger
+              className="flex min-w-0 items-center gap-1 truncate text-left hover:underline"
+              title="它停着，名下还有没着落的事。点开看是哪些"
+            >
+              <Hourglass className="size-3 shrink-0" />
+              <span className="truncate">停着 · 还欠 {owed} 件</span>
+            </DropdownMenuTrigger>
+            <DropdownMenuContent align="start" className="w-72">
+              <DropdownMenuGroup>
+                <DropdownMenuLabel>{agent.name} 停了 {ago(owes.since, props.now).replace("前", "")}，还欠着</DropdownMenuLabel>
+                {owes.tasks.map((task) => (
+                  <DropdownMenuItem key={task.id} className="flex-col items-start gap-0 text-xs" onClick={() => goto("task", task.id)}>
+                    <span className="w-full truncate">{task.title}</span>
+                    <span className="w-full truncate text-[11px] text-muted-foreground">
+                      待办 {task.id}
+                      {task.step ? ` · 到「${task.step}」` : ""}
+                    </span>
+                  </DropdownMenuItem>
+                ))}
+                {owes.calls.map((call) => (
+                  <DropdownMenuItem key={call.messageId} className="flex-col items-start gap-0 text-xs" onClick={() => goto("message", call.messageId)}>
+                    <span className="w-full truncate">{call.from} 叫过它，{call.state === "cut" ? "中途断了" : "没叫成"}</span>
+                    <span className="w-full truncate text-[11px] text-muted-foreground">消息 {call.messageId}</span>
+                  </DropdownMenuItem>
+                ))}
+              </DropdownMenuGroup>
+            </DropdownMenuContent>
+          </DropdownMenu>
+          {agent.callable ? (
+            <button
+              type="button"
+              className="ml-auto shrink-0 rounded-full bg-amber-500/15 px-1.5 text-[10px] font-medium leading-4 hover:bg-amber-500/25"
+              title="以你的名义在群里 @ 它，带上这几件事"
+              onClick={() => void nudge()}
+            >
+              叫它接着做
+            </button>
           ) : null}
         </div>
       ) : null}

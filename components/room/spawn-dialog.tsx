@@ -18,7 +18,7 @@ import {
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
 import { Textarea } from "@/components/ui/textarea"
-import { KINDS } from "@/lib/kinds"
+import { asksOnPage, KINDS } from "@/lib/kinds"
 import type { PublicAgent } from "@/lib/types"
 
 type Workspace = { label: string; path: string; git: boolean }
@@ -75,8 +75,8 @@ export function SpawnDialog({
       return false
     }
   })
-  // Only Claude Code's permission prompts come to the page (lib/permits.ts).
-  const asksOnPage = kind === "claude"
+  // Only Claude Code's and Codex's permission prompts come to the page (lib/kinds.ts).
+  const permitsOnPage = asksOnPage(kind)
 
   // Fresh fields each time it opens.
   const [shown, setShown] = useState<string | null>(null)
@@ -158,7 +158,7 @@ export function SpawnDialog({
           window: limits.window ? Number(limits.window) : null,
           compactPct: limits.pct,
           workspace: { mode, path: folder },
-          autoFull: asksOnPage && autoFull,
+          autoFull: permitsOnPage && autoFull,
         }),
       })
       toast.success(`${result.agent.name} 入座了`, {
@@ -289,7 +289,7 @@ export function SpawnDialog({
             />
           </div>
 
-          {asksOnPage ? (
+          {permitsOnPage ? (
             <label className="flex cursor-pointer items-start gap-2.5 rounded-xl bg-foreground/[0.04] px-3 py-2.5 ring-1 ring-foreground/[0.06]">
               <input
                 type="checkbox"

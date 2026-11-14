@@ -1,6 +1,6 @@
 "use client"
 
-import { useState } from "react"
+import { useEffect, useState } from "react"
 import { Check, ChevronsUpDown, FolderOpen, FolderSearch, Loader2, Plus, Settings2 } from "lucide-react"
 import { toast } from "sonner"
 
@@ -18,7 +18,8 @@ import {
 } from "@/components/ui/dropdown-menu"
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
-import type { Project, ProjectInfo } from "@/lib/types"
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
+import type { Project, ProjectInfo, PublicAgent, RoomSnapshot } from "@/lib/types"
 
 // Long folders read better with the home folder as ~ and the middle cut.
 export function shortDir(dir: string) {
@@ -109,6 +110,8 @@ export function ProjectPlace({ project }: { project: ProjectInfo | null }) {
 
 // New project, or the open one's name, folder and deletion. `editing` null is
 // a new project.
+const NO_CHECK = "none"
+
 export function ProjectDialog({
   open,
   editing,
@@ -129,6 +132,9 @@ export function ProjectDialog({
   const [sending, setSending] = useState(false)
   const [confirming, setConfirming] = useState(false)
   const [browsing, setBrowsing] = useState(false)
+  // 「请验收时先复验」: the seats to choose from, who checks now, and the pick.
+  const [seats, setSeats] = useState<PublicAgent[] | null>(null)
+  const [checker, setChecker] = useState(NO_CHECK)
 
   // Fresh fields each time it opens.
   const [shown, setShown] = useState<string | null>(null)
@@ -138,7 +144,25 @@ export function ProjectDialog({
     setName(editing?.name ?? "")
     setDir(editing?.dir ?? "")
     setConfirming(false)
+    setSeats(null)
+    setChecker(NO_CHECK)
   }
+  const editingId = open ? editing?.id : undefined
+  useEffect(() => {
+    if (!editingId) return
+    let live = true
+    api<RoomSnapshot>(`/api/v1/room?project=${encodeURIComponent(editingId)}`)
+      .then((room) => {
+        if (!live) return
+        setSeats(room.agents)
+        setChecker(room.agents.find((agent) => agent.checker)?.id ?? NO_CHECK)
+      })
+      .catch(() => live && setSeats([]))
+    return () => {
+      live = false
+    }
+  }, [editingId])
+  const checkerNow = seats?.find((agent) => agent.checker)?.id ?? NO_CHECK
 
   const save = async () => {
     if (!name.trim() || sending) return
@@ -151,6 +175,13 @@ export function ProjectDialog({
             body: JSON.stringify({ ...body, action: "update" }),
           })
         : await api<{ project: ProjectInfo }>("/api/v1/projects", { method: "POST", body: JSON.stringify(body) })
+      if (editing && seats && checker !== checkerNow) {
+        const seat = checker === NO_CHECK ? checkerNow : checker
+        await api(`/api/v1/agents/${seat}`, {
+          method: "POST",
+          body: JSON.stringify({ as: "human", action: "checker", on: checker !== NO_CHECK }),
+        })
+      }
       onSaved(result.project, !editing)
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "没存上")
@@ -240,6 +271,31 @@ export function ProjectDialog({
               在这个目录里干活的 AI 入座时没说项目名，会自动进这个项目；房间开新会话也默认开在这里。
             </p>
           </div>
+          {editing && seats?.length ? (
+            <div className="space-y-1.5">
+              <Label htmlFor="project-checker">请验收时先复验</Label>
+              <Select
+                items={[{ value: NO_CHECK, label: "不复验" }, ...seats.map((agent) => ({ value: agent.id, label: `${agent.name} · ${agent.model}` }))]}
+                value={checker}
+                onValueChange={(next) => setChecker(next ? String(next) : NO_CHECK)}
+              >
+                <SelectTrigger id="project-checker" className="w-full min-w-0 text-sm">
+                  <SelectValue className="truncate" />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value={NO_CHECK}>不复验</SelectItem>
+                  {seats.map((agent) => (
+                    <SelectItem key={agent.id} value={agent.id}>
+                      {agent.name} · {agent.model}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+              <p className="text-[11px] leading-4 text-muted-foreground">
+                席位请验收时，房间先叫醒这个席位照着验一遍（不进群聊），结论挂在右栏的验收卡片上；通过还是只有你能点。它自己的待办不复验。挑便宜的模型就行。
+              </p>
+            </div>
+          ) : null}
           <DialogFooter className="items-center">
             {editing && canDelete ? (
               confirming ? (

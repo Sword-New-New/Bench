@@ -5,6 +5,9 @@ export type LaneSnapshot = {
   paused: boolean
   queuedCount: number
   queuedItems: { id: string; line: string }[]
+  // A wake that failed on the network, waiting to be tried again: when, and
+  // which try of how many (lib/summon.ts).
+  retry?: { at: number; n: number; of: number }
 }
 
 type LaneReaderGlobal = typeof globalThis & {

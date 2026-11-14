@@ -43,6 +43,9 @@ fi
 if [[ "${BENCH_COMPACT_WINDOW:-}" =~ ^[0-9]+$ ]]; then
   pick+=(-c "model_auto_compact_token_limit=$BENCH_COMPACT_WINDOW")
 fi
+# Nobody can be asked on this path (only codex-app.mjs puts approvals on the
+# page), so it may write in its workspace and nothing more.
+pick+=(-c 'sandbox_mode="workspace-write"' -c 'approval_policy="never"')
 exec "$bin" exec resume --skip-git-repo-check --json "${pick[@]}" \
   -c "mcp_servers.bench.env.BENCH_UUID=\"$id\"" \
   -c 'mcp_servers.bench.default_tools_approval_mode="approve"' \

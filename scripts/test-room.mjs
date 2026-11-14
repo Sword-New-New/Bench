@@ -489,6 +489,14 @@ async function steps(stamp) {
   await request("/api/v1/permit", { method: "POST", body: { as: "human", agentId: seatA.agentId, full: false } })
   permitRoom = await request(`/api/v1/room?project=${project}`)
   assert(!permitRoom.data.agents.find((agent) => agent.id === seatA.agentId)?.fullAccess, "收回后不该还有完整权限")
+  // Auto-full permission and single-turn take-back (heldWake): turning auto_full
+  // on grants fullAccess by default; revoking it for the current wake pauses it.
+  const autoOn = await request(`/api/v1/agents/${seatA.agentId}`, { method: "POST", body: { as: "human", action: "auto_full", on: true } })
+  assert(autoOn.status === 200 && autoOn.data.autoFull === true && autoOn.data.fullAccess === true, "开启默认全部权限后席位应有 fullAccess")
+  await request("/api/v1/permit", { method: "POST", body: { as: "human", agentId: seatA.agentId, full: false } })
+  permitRoom = await request(`/api/v1/room?project=${project}`)
+  assert(!permitRoom.data.agents.find((agent) => agent.id === seatA.agentId)?.fullAccess, "本轮临时收回后默认全部权限应暂停")
+  await request(`/api/v1/agents/${seatA.agentId}`, { method: "POST", body: { as: "human", action: "auto_full", on: false } })
 
   // bench_ask: a question shows as a card; the user's reply is the answer,
   // handed straight back to an asker still waiting for it.
@@ -735,6 +743,52 @@ async function steps(stamp) {
   const mockLimitName = `mocklim_${stamp}`
   const mockReliefName = `mockrel_${stamp}`
   const mockSlowName = `mockslow_${stamp}`
+  const mockMuteName = `mockmute_${stamp}`
+  const mockBadName = `mockbad_${stamp}`
+  // Network failures (lib/netfail.ts): fails twice then answers, always fails,
+  // and one that says back the to-dos its prompt told it it still owes.
+  const mockFlakyName = `mockflaky_${stamp}`
+  const mockNetName = `mocknet_${stamp}`
+  const mockOwesName = `mockowes_${stamp}`
+  // The checker before the user's sign-off (lib/summon.ts checkTask): its
+  // verdict goes by a mark in the task's title.
+  const mockCheckName = `mockcheck_${stamp}`
+  // A woken Codex turn (scripts/codex-app.mjs) against a fake app-server: it
+  // says what sandbox and approvals it was given, asks for a command and a
+  // file change, and answers with what the room decided.
+  const mockCodexName = `mockcodex_${stamp}`
+  const fakeCodex = pathMod.join(osMod.tmpdir(), `bench-fake-codex-${stamp}.mjs`)
+  ;(await import("node:fs")).writeFileSync(
+    fakeCodex,
+    `#!/usr/bin/env node
+import { createInterface } from "node:readline"
+const send = (m) => process.stdout.write(JSON.stringify({ jsonrpc: "2.0", ...m }) + "\\n")
+const waiting = new Map()
+let next = 1000
+const ask = (method, params) => new Promise((resolve) => { const id = next++; waiting.set(id, resolve); send({ id, method, params }) })
+let resume = {}
+createInterface({ input: process.stdin }).on("line", async (line) => {
+  const m = JSON.parse(line)
+  if (waiting.has(m.id) && !m.method) { waiting.get(m.id)(m.result); waiting.delete(m.id); return }
+  if (m.method === "initialize") return send({ id: m.id, result: {} })
+  if (m.method === "thread/resume") { resume = m.params; return send({ id: m.id, result: {} }) }
+  if (m.method !== "turn/start") return m.id !== undefined && send({ id: m.id, result: {} })
+  send({ id: m.id, result: { turn: { id: "turn1" } } })
+  const p = m.params
+  const said = ["沙箱=" + resume.sandbox, "审批=" + resume.approvalPolicy, "本轮=" + p.sandboxPolicy?.type + "/" + p.approvalPolicy]
+  if (p.approvalPolicy === "on-request") {
+    const cmd = await ask("item/commandExecution/requestApproval", { threadId: "x", turnId: "turn1", itemId: "c1", startedAtMs: 0, command: "rm -rf build-${stamp}", reason: "清理旧产物" })
+    said.push("命令=" + cmd.decision)
+    send({ method: "item/started", params: { item: { id: "f1", type: "fileChange", changes: [{ path: "/elsewhere/a-${stamp}.ts", kind: "update" }] } } })
+    const file = await ask("item/fileChange/requestApproval", { threadId: "x", turnId: "turn1", itemId: "f1", startedAtMs: 0 })
+    said.push("文件=" + file.decision)
+  }
+  send({ method: "item/completed", params: { item: { id: "a1", type: "agentMessage", text: said.join(" ") } } })
+  send({ method: "turn/completed", params: { turn: { id: "turn1", status: "completed" } } })
+})
+`,
+    { mode: 0o755 },
+  )
   let baseList = null
   try {
     const curAdapters = await request("/api/v1/adapters")
@@ -759,6 +813,27 @@ async function steps(stamp) {
           {
             name: mockSlowName,
             command: `node -e "setTimeout(() => console.log('[慢轮完成]'), 1200)" {uuid} {text}`,
+            reply: "stdout",
+          },
+          // Ends well without a word, and ends in an error.
+          { name: mockMuteName, command: `node -e "setTimeout(() => {}, 200)" {uuid} {text}`, reply: "stdout" },
+          { name: mockBadName, command: `node -e "process.stderr.write('mock 故意出错'); process.exit(3)" {uuid} {text}`, reply: "stdout" },
+          {
+            name: mockFlakyName,
+            command: `node -e "const fs = require('fs'); const f = require('os').tmpdir() + '/bench-flaky-' + process.argv[1]; const n = fs.existsSync(f) ? Number(fs.readFileSync(f, 'utf8')) : 0; fs.writeFileSync(f, String(n + 1)); if (n < 2) { process.stderr.write('read ECONNRESET'); process.exit(1) } fs.rmSync(f); console.log('[重试后答了]' + ((process.argv[2] || '').includes('刚才被打断') ? '|带着原来的消息' : ''))" {uuid} {text}`,
+            reply: "stdout",
+          },
+          { name: mockNetName, command: `node -e "process.stderr.write('TRANSPORT: Connection error.'); process.exit(1)" {uuid} {text}`, reply: "stdout" },
+          {
+            name: mockCheckName,
+            command: `node -e "const t = process.argv[2] || ''; console.log(t.includes('【没过】') ? '想了想\\n复验结论：没过\\n按钮没反应\\n没验到的：无' : t.includes('【没验到】') ? '复验结论：没验到\\n要真机\\n没验到的：全部' : t.includes('【乱答】') ? '挺好的' : '复验结论：通过\\n看过了\\n没验到的：无')" {uuid} {text}`,
+            reply: "stdout",
+          },
+          // "--json": read as a streaming client, like codex-wake.sh.
+          { name: mockCodexName, command: `CODEX_BIN=${fakeCodex} node ./scripts/codex-app.mjs {uuid} {text} # --json`, reply: "stdout" },
+          {
+            name: mockOwesName,
+            command: `node -e "const t = process.argv[2] || ''; const head = '【你名下还没做完的待办】'; console.log(t.includes(head) ? '[欠]' + t.split(head)[1].split('接着做')[0].replace(/\\s+/g, ' ') : '[不欠]')" {uuid} {text}`,
             reply: "stdout",
           },
         ],
@@ -975,6 +1050,433 @@ async function steps(stamp) {
       restoreRes.status === 200 && restoreRes.data.agent.agentName === mockLimitName,
       `一键切回原客户端会话失败 ${restoreRes.data.error || restoreRes.status}`,
     )
+
+    // What became of each call (Message.calls): the room writes it where it
+    // happens (lib/summon.ts), one fact at a time: queued, started, picked up,
+    // answered are separate, and so are the ways it can fail to be answered.
+    const callOf = async (messageId, seatId) => {
+      const now = await request(`/api/v1/room?project=${project}`)
+      return now.data.messages.find((item) => item.id === messageId)?.calls?.find((item) => item.id === seatId)
+    }
+    const settled = async (messageId, seatId, ends = ["answered", "silent", "failed", "stopped", "dropped", "cut"]) => {
+      for (let i = 0; i < 80; i++) {
+        const call = await callOf(messageId, seatId)
+        if (call && ends.includes(call.state)) return call
+        await new Promise((resolve) => setTimeout(resolve, 150))
+      }
+      return callOf(messageId, seatId)
+    }
+    const seatIn = async (label, kind) => {
+      const made = await request("/api/v1/join", {
+        method: "POST",
+        body: { name: `${label}${stamp}`, model: "mock-1", role: "去向测试", agentName: kind, uuid: `sess-${kind}-${Math.random().toString(36).slice(2, 7)}` },
+      })
+      assert(made.status === 201, `${label}入座失败 ${made.data.error || made.status}`)
+      return { id: made.data.agent.id, name: made.data.agent.name, token: made.data.token }
+    }
+    const owesOf = async (seatId) => (await request(`/api/v1/room?project=${project}`)).data.agents.find((a) => a.id === seatId)?.owes
+
+    // Busy when called again: the first is being worked on, the second waits
+    // in the lane, and each ends answered.
+    const slowSeat = await seatIn("去向慢", mockSlowName)
+    const c1 = await request("/api/v1/say", { method: "POST", body: { as: "human", text: `@${slowSeat.name} 第一句` } })
+    await new Promise((resolve) => setTimeout(resolve, 300))
+    const c2 = await request("/api/v1/say", { method: "POST", body: { as: "human", text: `@${slowSeat.name} 第二句` } })
+    const during1 = await callOf(c1.data.message.id, slowSeat.id)
+    const during2 = await callOf(c2.data.message.id, slowSeat.id)
+    assert(
+      ["started", "picked"].includes(during1?.state) && during1.runId && during2?.state === "queued",
+      `忙的时候：前一条该是已叫到或在做，后一条该排着，实际 ${during1?.state} / ${during2?.state}`,
+    )
+    const end1 = await settled(c1.data.message.id, slowSeat.id)
+    const end2 = await settled(c2.data.message.id, slowSeat.id)
+    assert(end1?.state === "answered" && end2?.state === "answered", `两条最后都该是答了，实际 ${end1?.state} / ${end2?.state}`)
+    assert(end1.runId !== end2.runId, "排着的那条该由后一次唤起来答")
+
+    // Ended well without a word in the room: not an answer.
+    const muteSeat = await seatIn("去向哑", mockMuteName)
+    const c3 = await request("/api/v1/say", { method: "POST", body: { as: "human", text: `@${muteSeat.name} 你不会回答` } })
+    const end3 = await settled(c3.data.message.id, muteSeat.id)
+    assert(end3?.state === "silent", `跑完没说话该记成 silent，实际 ${end3?.state}`)
+
+    // Ended in an error: failed, with why; and the seat owes that call.
+    const badSeat = await seatIn("去向坏", mockBadName)
+    const c4 = await request("/api/v1/say", { method: "POST", body: { as: "human", text: `@${badSeat.name} 你会出错` } })
+    const end4 = await settled(c4.data.message.id, badSeat.id)
+    assert(end4?.state === "failed" && /故意出错|退出码/.test(end4.note || ""), `唤起出错该记成 failed 带原因，实际 ${end4?.state} ${end4?.note}`)
+    const badOwes = await owesOf(badSeat.id)
+    assert(
+      badOwes?.calls?.length === 1 && badOwes.calls[0].messageId === c4.data.message.id && badOwes.tasks.length === 0,
+      `没叫成的那条该算席位欠着的，实际 ${JSON.stringify(badOwes)}`,
+    )
+
+    // Stopped by the user: the run it was in is stopped, what waited behind
+    // it is dropped, and neither is owed (the user chose it).
+    const stopSeat = await seatIn("去向停", mockSlowName)
+    const c5 = await request("/api/v1/say", { method: "POST", body: { as: "human", text: `@${stopSeat.name} 这一轮会被停` } })
+    await new Promise((resolve) => setTimeout(resolve, 300))
+    const c6 = await request("/api/v1/say", { method: "POST", body: { as: "human", text: `@${stopSeat.name} 这条排在后面` } })
+    const stopRes = await request(`/api/v1/agents/${stopSeat.id}`, { method: "POST", body: { as: "human", action: "stop" } })
+    assert(stopRes.status === 200, `停止失败 ${stopRes.data.error || stopRes.status}`)
+    const end5 = await settled(c5.data.message.id, stopSeat.id)
+    const end6 = await settled(c6.data.message.id, stopSeat.id)
+    assert(end5?.state === "stopped" && end6?.state === "dropped", `停止后该是 stopped / dropped，实际 ${end5?.state} / ${end6?.state}`)
+    assert(!(await owesOf(stopSeat.id)), "用户自己停下的不算席位欠着")
+
+    // Stopped with work on it (agents[].owes): a quiet seat owes the to-dos it
+    // owns that wait on nobody else. Marked 卡住 with a reason, or sent for
+    // the user's sign-off, it no longer does.
+    assert(!(await owesOf(muteSeat.id)), "名下没有待办、点名也都有着落的席位不该算欠着")
+    const owed = await request("/api/v1/tasks", {
+      method: "POST",
+      body: { as: "human", title: `欠着的待办${stamp}`, owner: muteSeat.name, steps: ["第一步", "第二步", "用户验收"] },
+    })
+    const owing = await owesOf(muteSeat.id)
+    assert(
+      owing?.tasks?.length === 1 && owing.tasks[0].id === owed.data.task.id && owing.tasks[0].step === "第一步" && owing.since > 0,
+      `闲着的席位名下有没做完的待办该算欠着，实际 ${JSON.stringify(owing)}`,
+    )
+    const heldTask = await request(`/api/v1/tasks/${owed.data.task.id}`, {
+      method: "POST",
+      body: { agentId: muteSeat.id, token: muteSeat.token, action: "block", note: "等别人的接口" },
+    })
+    assert(heldTask.status === 200 && !(await owesOf(muteSeat.id)), "标成卡住并写了原因的待办不算欠着")
+    const forReview = await request("/api/v1/tasks", {
+      method: "POST",
+      body: { as: "human", title: `等验收的待办${stamp}`, owner: muteSeat.name, steps: ["做事", "用户验收"] },
+    })
+    assert((await owesOf(muteSeat.id))?.tasks?.[0]?.id === forReview.data.task.id, "新的待办该算欠着")
+    await request(`/api/v1/tasks/${forReview.data.task.id}`, {
+      method: "POST",
+      body: { agentId: muteSeat.id, token: muteSeat.token, action: "review", note: "做完了" },
+    })
+    assert(!(await owesOf(muteSeat.id)), "请了验收的待办轮到用户，不算席位欠着")
+
+    // Network failures are tried again by the room (lib/netfail.ts): at most
+    // twice, with the same messages; nothing in the room until the last try
+    // fails. Start the room with BENCH_RETRY_MS=400,800 or this waits 80 s.
+    const watch = async (messageId, seatId, ends, limit = 100_000) => {
+      const seen = []
+      const until = Date.now() + limit
+      while (Date.now() < until) {
+        const call = await callOf(messageId, seatId)
+        if (call && seen.at(-1) !== call.state) seen.push(call.state)
+        if (call && ends.includes(call.state)) return { call, seen }
+        await new Promise((resolve) => setTimeout(resolve, 60))
+      }
+      return { call: await callOf(messageId, seatId), seen }
+    }
+    const roomSays = async (afterSeq, name) =>
+      (await request(`/api/v1/room?project=${project}`)).data.messages.filter(
+        (item) => item.seq > afterSeq && item.authorId === "room" && item.text.includes(name) && item.text.includes("没成功"),
+      )
+    const retrySetting = await request("/api/v1/retry")
+    assert(retrySetting.status === 200 && retrySetting.data.on === true, `网络错误自动重试该默认开，实际 ${JSON.stringify(retrySetting.data)}`)
+
+    const flakySeat = await seatIn("去向断网", mockFlakyName)
+    const n1 = await request("/api/v1/say", { method: "POST", body: { as: "human", text: `@${flakySeat.name} 网会断两次` } })
+    const flaky = await watch(n1.data.message.id, flakySeat.id, ["answered", "failed", "silent"])
+    assert(
+      flaky.call?.state === "answered" && flaky.seen.includes("retrying"),
+      `前两次 ECONNRESET、第三次成功：该经过 retrying 再到 answered，实际经过 ${flaky.seen.join(" → ")}`,
+    )
+    assert((await roomSays(n1.data.message.seq, flakySeat.name)).length === 0, "重试成功了，群里不该有中间的报错")
+    const flakyAnswer = (await request(`/api/v1/room?project=${project}`)).data.messages.find(
+      (item) => item.authorId === flakySeat.id && item.replyTo === n1.data.message.id,
+    )
+    assert(flakyAnswer?.text.includes("带着原来的消息"), `重试要带着原来那批消息，实际回答 ${flakyAnswer?.text}`)
+
+    const netSeat = await seatIn("去向总断", mockNetName)
+    const n2 = await request("/api/v1/say", { method: "POST", body: { as: "human", text: `@${netSeat.name} 网一直不通` } })
+    const net = await watch(n2.data.message.id, netSeat.id, ["answered", "failed", "silent"])
+    assert(
+      net.call?.state === "failed" && /自动重试了 2 次/.test(net.call.note || "") && net.seen.includes("retrying"),
+      `一直失败：两次重试后该 failed 并写明重试过，实际 ${net.seen.join(" → ")} ${net.call?.note}`,
+    )
+    const netSaid = await roomSays(n2.data.message.seq, netSeat.name)
+    assert(netSaid.length === 1, `都失败了只在群里报一次错，实际 ${netSaid.length} 条`)
+
+    const badAgain = await request("/api/v1/say", { method: "POST", body: { as: "human", text: `@${badSeat.name} 不是网络的错` } })
+    const bad = await watch(badAgain.data.message.id, badSeat.id, ["answered", "failed", "silent"], 15_000)
+    assert(bad.call?.state === "failed" && !bad.seen.includes("retrying"), `非网络的错误不重试，实际 ${bad.seen.join(" → ")}`)
+
+    // Stopped while it waits for the next try: no more tries.
+    const n3 = await request("/api/v1/say", { method: "POST", body: { as: "human", text: `@${netSeat.name} 等重试时被停` } })
+    const waiting = await watch(n3.data.message.id, netSeat.id, ["retrying", "failed"], 15_000)
+    assert(waiting.call?.state === "retrying", `该先进入 retrying，实际 ${waiting.call?.state}`)
+    const waitSnap = (await request(`/api/v1/room?project=${project}`)).data.agents.find((a) => a.id === netSeat.id)
+    assert(waitSnap?.retry?.n === 1 && waitSnap.retry.of === 2 && waitSnap.retry.at > Date.now() - 1000, `等重试时席位该带 retry，实际 ${JSON.stringify(waitSnap?.retry)}`)
+    const stopWait = await request(`/api/v1/agents/${netSeat.id}`, { method: "POST", body: { as: "human", action: "stop" } })
+    assert(stopWait.status === 200 && stopWait.data.retryCancelled === true, `等重试时点停止该取消重试，实际 ${JSON.stringify(stopWait.data)}`)
+    await new Promise((resolve) => setTimeout(resolve, 2500))
+    const afterStop = await callOf(n3.data.message.id, netSeat.id)
+    assert(afterStop?.state === "stopped", `停下后不该再重试，实际 ${afterStop?.state}`)
+    assert(!(await owesOf(netSeat.id))?.calls?.some((item) => item.messageId === n3.data.message.id), "用户停下的重试不算席位欠着")
+
+    // Turned off in settings: a network failure fails at once.
+    const off = await request("/api/v1/retry", { method: "POST", body: { as: "human", on: false } })
+    assert(off.status === 200 && off.data.on === false, "关掉自动重试失败")
+    try {
+      const n4 = await request("/api/v1/say", { method: "POST", body: { as: "human", text: `@${netSeat.name} 关了重试` } })
+      const offRun = await watch(n4.data.message.id, netSeat.id, ["answered", "failed", "silent"], 15_000)
+      assert(offRun.call?.state === "failed" && !offRun.seen.includes("retrying"), `关掉后不该重试，实际 ${offRun.seen.join(" → ")}`)
+    } finally {
+      await request("/api/v1/retry", { method: "POST", body: { as: "human", on: true } })
+    }
+
+    // A woken seat is told the to-dos it still owes (at most 3), except one
+    // the messages it is handed already name.
+    const owesSeat = await seatIn("去向欠", mockOwesName)
+    const owedA = await request("/api/v1/tasks", {
+      method: "POST",
+      body: { as: "human", title: `还欠的甲${stamp}`, owner: owesSeat.name, steps: ["甲第一步", "用户验收"] },
+    })
+    const owedB = await request("/api/v1/tasks", {
+      method: "POST",
+      body: { as: "human", title: `还欠的乙${stamp}`, owner: owesSeat.name, steps: ["乙第一步", "用户验收"] },
+    })
+    const idA = owedA.data.task.id
+    const idB = owedB.data.task.id
+    const o1 = await request("/api/v1/say", { method: "POST", body: { as: "human", text: `@${owesSeat.name} 先看 ${idB}` } })
+    await settled(o1.data.message.id, owesSeat.id)
+    const owesAnswer = (await request(`/api/v1/room?project=${project}`)).data.messages.find(
+      (item) => item.authorId === owesSeat.id && item.replyTo === o1.data.message.id,
+    )
+    assert(
+      owesAnswer?.text.startsWith("[欠]") && owesAnswer.text.includes(idA) && owesAnswer.text.includes("甲第一步") && !owesAnswer.text.includes(idB),
+      `提示里该带上还欠的 ${idA}、不重复消息里提到的 ${idB}，实际 ${owesAnswer?.text}`,
+    )
+    for (const id of [idA, idB]) {
+      await request(`/api/v1/tasks/${id}`, { method: "POST", body: { agentId: owesSeat.id, token: owesSeat.token, action: "block", note: "测试收尾" } })
+    }
+    const o2 = await request("/api/v1/say", { method: "POST", body: { as: "human", text: `@${owesSeat.name} 现在不欠了` } })
+    await settled(o2.data.message.id, owesSeat.id)
+    const clearAnswer = (await request(`/api/v1/room?project=${project}`)).data.messages.find(
+      (item) => item.authorId === owesSeat.id && item.replyTo === o2.data.message.id,
+    )
+    assert(clearAnswer?.text === "[不欠]", `没有欠的就什么都不加，实际 ${clearAnswer?.text}`)
+
+    // 「请验收时先复验」: the project's checker is woken on its own when an owner
+    // asks for review; its verdict lands on the task (Task.check), not in the room.
+    const doer = await seatIn("复验做事", mockMuteName)
+    const checkSeat = await seatIn("复验人", mockCheckName)
+    const badChecker = await seatIn("复验坏", mockBadName)
+    const asChecker = (seat, on) => request(`/api/v1/agents/${seat.id}`, { method: "POST", body: { as: "human", action: "checker", on } })
+    const taskFor = async (seat, title) =>
+      (await request("/api/v1/tasks", { method: "POST", body: { agentId: seat.id, token: seat.token, title, owner: seat.name, steps: ["做", "验收"] } })).data.task.id
+    const askReview = (seat, id) => request(`/api/v1/tasks/${id}`, { method: "POST", body: { agentId: seat.id, token: seat.token, action: "review", note: "看右栏" } })
+    const checkOf = async (id) => (await request(`/api/v1/room?project=${project}`)).data.tasks.find((t) => t.id === id)?.check
+    const checked = async (id) => {
+      for (let i = 0; i < 80; i++) {
+        const check = await checkOf(id)
+        if (check && !["queued", "running"].includes(check.state)) return check
+        await new Promise((resolve) => setTimeout(resolve, 150))
+      }
+      return checkOf(id)
+    }
+    const offTask = await taskFor(doer, "没开复验")
+    await askReview(doer, offTask)
+    await new Promise((resolve) => setTimeout(resolve, 500))
+    assert(!(await checkOf(offTask)), "没设复验人时请验收不该有复验")
+    assert((await asChecker(checkSeat, true)).status === 200, "设复验人失败")
+    const passTask = await taskFor(doer, "要复验")
+    await askReview(doer, passTask)
+    const passed = await checked(passTask)
+    assert(passed?.state === "passed" && passed.note?.includes("看过了") && passed.runId, `复验该通过并记下依据，实际 ${JSON.stringify(passed)}`)
+    assert(
+      !(await request(`/api/v1/room?project=${project}`)).data.messages.some((m) => m.text?.includes("复验结论")),
+      "复验的回答不该进群聊",
+    )
+    await askReview(doer, passTask)
+    await new Promise((resolve) => setTimeout(resolve, 500))
+    assert((await checkOf(passTask))?.at === passed.at, "没打回就再请验收，不该再复验一次")
+    const failTask = await taskFor(doer, "【没过】的")
+    await askReview(doer, failTask)
+    const failed = await checked(failTask)
+    assert(failed?.state === "failed" && failed.note?.startsWith("按钮没反应"), `复验该是没过，实际 ${JSON.stringify(failed)}`)
+    const stillWaiting = (await request(`/api/v1/room?project=${project}`)).data.tasks.find((t) => t.id === failTask)
+    assert(stillWaiting.review?.state === "waiting", "复验没过不该自动打回")
+    await request(`/api/v1/tasks/${failTask}`, { method: "POST", body: { as: "human", action: "reject", note: "改" } })
+    await askReview(doer, failTask)
+    const again = await checked(failTask)
+    assert(again?.at !== failed.at && again?.state === "failed", "打回后再请验收该重新复验")
+    const unTask = await taskFor(doer, "【没验到】的")
+    await askReview(doer, unTask)
+    assert((await checked(unTask))?.state === "unverified", "复验该是没验到")
+    const junkTask = await taskFor(doer, "【乱答】的")
+    await askReview(doer, junkTask)
+    const junk = await checked(junkTask)
+    assert(junk?.state === "error" && junk.note?.includes("没交结论"), `没按格式交结论该记成没跑成，实际 ${JSON.stringify(junk)}`)
+    const ownTask = await taskFor(checkSeat, "复验人自己的")
+    await askReview(checkSeat, ownTask)
+    const own = await checkOf(ownTask)
+    assert(own?.state === "skipped" && own.note?.includes("负责人"), `复验人是负责人时该跳过，实际 ${JSON.stringify(own)}`)
+    await asChecker(badChecker, true)
+    const agentsNow = (await request(`/api/v1/room?project=${project}`)).data.agents
+    assert(agentsNow.filter((a) => a.checker).length === 1, "同一时间只该有一个复验人")
+    const badTask = await taskFor(doer, "复验人出错")
+    await askReview(doer, badTask)
+    const badCheck = await checked(badTask)
+    assert(badCheck?.state === "error" && badCheck.note?.startsWith("复验没跑成"), `复验唤起失败该写没跑成，实际 ${JSON.stringify(badCheck)}`)
+    await asChecker(badChecker, false)
+    const afterOff = await taskFor(doer, "关掉复验以后")
+    await askReview(doer, afterOff)
+    await new Promise((resolve) => setTimeout(resolve, 500))
+    assert(!(await checkOf(afterOff)), "关掉复验后不该再复验")
+
+    // Codex seats under the room's permissions (scripts/codex-app.mjs): it
+    // may write in its workspace and asks on the page for more; with full
+    // permission it runs without a sandbox and asks nothing.
+    const codexSeat = await seatIn("Codex权限", mockCodexName)
+    const cx1 = await request("/api/v1/say", { method: "POST", body: { as: "human", text: `@${codexSeat.name} 干活` } })
+    const cardFor = async (needle) => {
+      for (let i = 0; i < 100; i++) {
+        const card = (await request(`/api/v1/room?project=${project}`)).data.permits?.find((item) => item.agentId === codexSeat.id && String(item.input).includes(needle))
+        if (card) return card
+        await new Promise((resolve) => setTimeout(resolve, 150))
+      }
+      return null
+    }
+    const cmdCard = await cardFor(`rm -rf build-${stamp}`)
+    assert(cmdCard?.tool === "终端" && String(cmdCard.input).includes("清理旧产物"), `Codex 要跑命令时该出权限卡片，实际 ${JSON.stringify(cmdCard)}`)
+    await request("/api/v1/permit", { method: "POST", body: { as: "human", id: cmdCard.id, decision: "once" } })
+    const fileCard = await cardFor(`a-${stamp}.ts`)
+    assert(fileCard?.tool === "文件编辑", `Codex 要改工作区外的文件时该出权限卡片，实际 ${JSON.stringify(fileCard)}`)
+    await request("/api/v1/permit", { method: "POST", body: { as: "human", id: fileCard.id, decision: "deny" } })
+    await settled(cx1.data.message.id, codexSeat.id)
+    const cxAnswer = (await request(`/api/v1/room?project=${project}`)).data.messages.find((m) => m.authorId === codexSeat.id && m.replyTo === cx1.data.message.id)
+    assert(
+      cxAnswer?.text === "沙箱=workspace-write 审批=on-request 本轮=workspaceWrite/on-request 命令=accept 文件=decline",
+      `Codex 平时该是可写工作区、要时再问，点了允许和拒绝该传回去，实际 ${cxAnswer?.text}`,
+    )
+    assert((await request("/api/v1/permit", { method: "POST", body: { key: "no-such-run", action: "mode" } })).status === 404, "不在跑的唤起 key 不该能问权限")
+    await request(`/api/v1/agents/${codexSeat.id}`, { method: "POST", body: { as: "human", action: "auto_full", on: true } })
+    const cx2 = await request("/api/v1/say", { method: "POST", body: { as: "human", text: `@${codexSeat.name} 再干` } })
+    await settled(cx2.data.message.id, codexSeat.id)
+    const cxFull = (await request(`/api/v1/room?project=${project}`)).data.messages.find((m) => m.authorId === codexSeat.id && m.replyTo === cx2.data.message.id)
+    assert(
+      cxFull?.text === "沙箱=danger-full-access 审批=never 本轮=dangerFullAccess/never",
+      `Codex 有全部权限时该不设沙箱、不再问，实际 ${cxFull?.text}`,
+    )
+    await request(`/api/v1/agents/${codexSeat.id}`, { method: "POST", body: { as: "human", action: "auto_full", on: false } })
+    // 「这次唤起全部允许」 on the first card: the rest of the wake goes through unasked.
+    const cx3 = await request("/api/v1/say", { method: "POST", body: { as: "human", text: `@${codexSeat.name} 第三轮` } })
+    const fullCard = await cardFor(`rm -rf build-${stamp}`)
+    assert(fullCard, "第三轮该先问命令")
+    await request("/api/v1/permit", { method: "POST", body: { as: "human", id: fullCard.id, decision: "full" } })
+    await settled(cx3.data.message.id, codexSeat.id)
+    const cxGranted = (await request(`/api/v1/room?project=${project}`)).data.messages.find((m) => m.authorId === codexSeat.id && m.replyTo === cx3.data.message.id)
+    assert(
+      cxGranted?.text === "沙箱=workspace-write 审批=on-request 本轮=workspaceWrite/on-request 命令=acceptForSession 文件=acceptForSession",
+      `点了这次唤起全部允许，后面的该不再问直接过，实际 ${cxGranted?.text}`,
+    )
+
+    // After a server restart (cold boot): lanes that held pending work start
+    // paused so queued messages never storm-spawn on boot; open calls whose
+    // process is gone settle to "cut" while queued ones stay "queued"; and
+    // runs that were still "running" become interrupted and are announced once.
+    const { execFileSync } = await import("node:child_process")
+    const { mkdtempSync } = await import("node:fs")
+    const restartDir = mkdtempSync(pathMod.join(osMod.tmpdir(), "bench-restart-"))
+    try {
+      const loaderCode = `
+        import { registerHooks } from "node:module";
+        import { existsSync } from "node:fs";
+        import path from "node:path";
+        const root = process.cwd();
+        registerHooks({
+          resolve(specifier, context, nextResolve) {
+            if (specifier.startsWith("@/")) {
+              const target = path.join(root, specifier.slice(2));
+              const file = existsSync(target + ".ts") ? target + ".ts" : target;
+              return nextResolve("file://" + file, context);
+            }
+            return nextResolve(specifier, context);
+          }
+        });
+      `
+      const beforeCrashOut = execFileSync(
+        process.execPath,
+        [
+          "--no-warnings",
+          "--input-type=module",
+          "-e",
+          `${loaderCode}
+          const { join, say, markCalls, listProjects, inProject } = await import("./lib/store.ts");
+          const { dbSaveLane } = await import("./lib/db.ts");
+          const { startRun } = await import("./lib/runs.ts");
+          const projId = listProjects()[0].id;
+          inProject(projId, () => {
+            const qJoined = join({ name: "重启排队席", model: "mock-1", role: "测试", agentName: "claude", uuid: "sess-restart-q" });
+            const rJoined = join({ name: "重启打断席", model: "mock-1", role: "测试", agentName: "claude", uuid: "sess-restart-r" });
+            const qId = qJoined.agent.id;
+            const rId = rJoined.agent.id;
+            const mQ = say({ as: "human", text: "@重启排队席 排队等重启" }).message;
+            const mR = say({ as: "human", text: "@重启打断席 跑一半重启" }).message;
+            markCalls([mQ.id], qId, "queued");
+            dbSaveLane(qId, projId, {
+              paused: undefined,
+              pending: [{ id: mQ.id, line: "用户：@重启排队席 排队等重启" }],
+              hops: 0,
+            });
+            const deadRun = startRun(rId, "重启打断席", "reply", {
+              project: projId,
+              body: "用户：@重启打断席 跑一半重启",
+              replyTo: mR.id,
+            });
+            markCalls([mR.id], rId, "started", { runId: deadRun.id });
+            console.log(JSON.stringify({ projId, qId, rId, mQId: mQ.id, mRId: mR.id, deadRunId: deadRun.id }));
+          });
+          process.exit(0);
+          `,
+        ],
+        { env: { ...process.env, BENCH_DATA_DIR: restartDir }, encoding: "utf8" },
+      )
+      const pre = JSON.parse(beforeCrashOut.trim().split("\n").at(-1))
+
+      const afterBootOut = execFileSync(
+        process.execPath,
+        [
+          "--no-warnings",
+          "--input-type=module",
+          "-e",
+          `${loaderCode}
+          const { ensureSummon } = await import("./lib/summon.ts");
+          const { snapshot, inProject } = await import("./lib/store.ts");
+          const { getRun } = await import("./lib/runs.ts");
+          ensureSummon();
+          const snap = inProject(${JSON.stringify(pre.projId)}, () => snapshot());
+          const dead = getRun(${JSON.stringify(pre.deadRunId)});
+          console.log(JSON.stringify({ snap, dead }));
+          process.exit(0);
+          `,
+        ],
+        { env: { ...process.env, BENCH_DATA_DIR: restartDir }, encoding: "utf8" },
+      )
+      const post = JSON.parse(afterBootOut.trim().split("\n").at(-1))
+      const qAgent = post.snap.agents.find((a) => a.id === pre.qId)
+      assert(
+        qAgent?.queuedCount === 1 && qAgent?.queuePaused === true,
+        `重启后有积压消息的席位队列应自动暂停，实际 queuedCount=${qAgent?.queuedCount} queuePaused=${qAgent?.queuePaused}`,
+      )
+      const postMQ = post.snap.messages.find((m) => m.id === pre.mQId)
+      const postMR = post.snap.messages.find((m) => m.id === pre.mRId)
+      const callQ = postMQ?.calls?.find((c) => c.id === pre.qId)
+      const callR = postMR?.calls?.find((c) => c.id === pre.rId)
+      assert(callQ?.state === "queued", `重启后仍在队列里的点名去向应保持 queued，实际 ${callQ?.state}`)
+      assert(callR?.state === "cut", `重启后失去进程的 running 点名去向应标为 cut，实际 ${callR?.state}`)
+      assert(
+        post.dead?.state === "failed" && post.dead?.interrupted === true,
+        `重启前正在跑的唤起应标为 interrupted，实际 ${JSON.stringify(post.dead)}`,
+      )
+      const interruptedMsg = post.snap.messages.find((m) => Array.isArray(m.interrupted))
+      assert(
+        interruptedMsg?.interrupted?.some((item) => item.runId === pre.deadRunId),
+        `重启后房间应发出包含被打断 runId 的 interrupted 通知消息`,
+      )
+    } finally {
+      rmSync(restartDir, { recursive: true, force: true })
+    }
   } finally {
     if (baseList) {
       await request("/api/v1/adapters", { method: "POST", body: { as: "human", agents: baseList } }).catch(() => {})
@@ -989,7 +1491,7 @@ async function steps(stamp) {
       pathMod.resolve(pathMod.dirname(keyFile), "../state/bench-mcp"),
       pathMod.join(process.env.XDG_STATE_HOME || pathMod.join(osMod.homedir(), ".local", "state"), "bench-mcp"),
     ])
-    const prefixes = [`${mockLimitName}-`, `${mockReliefName}-`, `${mockSlowName}-`]
+    const prefixes = [`${mockLimitName}-`, `${mockReliefName}-`, `${mockSlowName}-`, `${mockCheckName}-`, `${mockCodexName}-`]
     for (const dir of stateDirs) {
       try {
         for (const f of readdirSync(dir)) {
@@ -998,6 +1500,361 @@ async function steps(stamp) {
           }
         }
       } catch {}
+    }
+    rmSync(fakeCodex, { force: true })
+  }
+
+  // ---- Mobile / webhook push (lib/push.ts, /api/v1/push): local-only mock receiver ----
+  // Start the room with BENCH_PUSH_MERGE_MS=600 BENCH_PUSH_PERMIT_MS=1200 for fast runs,
+  // or leave unset to exercise the real 20s merge window and 30s permit wait.
+  {
+    const httpMod = await import("node:http")
+    const cryptoMod = await import("node:crypto")
+    const fsMod = await import("node:fs")
+    const keyFileForPush = process.env.BENCH_KEY_FILE || `${process.cwd()}/data/human-key`
+    const pushDataDir = pathMod.dirname(keyFileForPush)
+    const pushConfigFile = pathMod.join(pushDataDir, "push.json")
+    const hadPushFile = fsMod.existsSync(pushConfigFile)
+    const originalPushFile = hadPushFile ? fsMod.readFileSync(pushConfigFile, "utf8") : null
+
+    const mergeMs = Number(process.env.BENCH_PUSH_MERGE_MS) >= 50 ? Number(process.env.BENCH_PUSH_MERGE_MS) : 20_000
+    const permitMs = Number(process.env.BENCH_PUSH_PERMIT_MS) >= 50 ? Number(process.env.BENCH_PUSH_PERMIT_MS) : 30_000
+    const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
+    const decodeRfc2047 = (raw) =>
+      String(raw || "").replace(/=\?UTF-8\?B\?([A-Za-z0-9+/=]+)\?=/gi, (_, b64) =>
+        Buffer.from(b64, "base64").toString("utf8"),
+      )
+
+    const pushReceived = []
+    let pushFailHits = 0
+    const mockPushServer = httpMod.createServer((req, res) => {
+      const chunks = []
+      req.on("data", (c) => chunks.push(c))
+      req.on("end", () => {
+        const rawBody = Buffer.concat(chunks).toString("utf8")
+        let jsonBody = null
+        try {
+          jsonBody = JSON.parse(rawBody)
+        } catch {}
+        pushReceived.push({ method: req.method, url: req.url, headers: req.headers, rawBody, jsonBody })
+        if (req.url?.startsWith("/always-500")) {
+          pushFailHits += 1
+          res.writeHead(500, { "content-type": "text/plain" })
+          res.end("mock failure")
+          return
+        }
+        if (req.url?.startsWith("/bark_")) {
+          res.writeHead(200, { "content-type": "application/json" })
+          res.end(JSON.stringify({ code: 200, message: "success" }))
+          return
+        }
+        res.writeHead(200, { "content-type": "application/json" })
+        res.end(JSON.stringify({ ok: true, code: 0, errcode: 0 }))
+      })
+    })
+    await new Promise((r) => mockPushServer.listen(0, "127.0.0.1", r))
+    const mockBase = `http://127.0.0.1:${mockPushServer.address().port}`
+    const extraProjects = []
+    const pendingPermits = []
+
+    const pushReq = async (pathname, { method = "GET", body, proj = project, key = humanKey } = {}) => {
+      const url = method === "GET" && proj ? `${origin}${pathname}?project=${encodeURIComponent(proj)}` : `${origin}${pathname}`
+      const headers = {}
+      if (body !== undefined) headers["content-type"] = "application/json"
+      if (key) headers["x-bench-human"] = key
+      const payload = body !== undefined && proj ? { project: proj, ...body } : body
+      const res = await fetch(url, {
+        method,
+        headers,
+        body: payload !== undefined ? JSON.stringify(payload) : undefined,
+      })
+      const raw = await res.text()
+      let data = {}
+      try {
+        data = JSON.parse(raw)
+      } catch {}
+      return { status: res.status, data, raw }
+    }
+
+    try {
+      // Human key required on both GET and POST
+      assert((await pushReq("/api/v1/push", { key: "" })).status === 403, "无口令读 /api/v1/push 应 403")
+      assert((await pushReq("/api/v1/push", { key: "0".repeat(64) })).status === 403, "错口令读 /api/v1/push 应 403")
+      assert(
+        (await pushReq("/api/v1/push", { method: "POST", key: "", body: { as: "human", enabled: true } })).status === 403,
+        "无口令改 /api/v1/push 应 403",
+      )
+
+      const secretMarks = [
+        `ntfy_sec_${stamp}`,
+        `tk_sec_${stamp}`,
+        `bark_sec_${stamp}`,
+        `wecom_sec_${stamp}`,
+        `feishu_sec_${stamp}`,
+        `fs_sign_${stamp}`,
+        `9988:AAH_tg_${stamp}`,
+        `-1009988${stamp}`,
+        `wh_sec_${stamp}`,
+        `wh_tok_${stamp}`,
+        `fail_sec_${stamp}`,
+      ]
+      const checkNoSecretLeak = async (where) => {
+        const s1 = await pushReq("/api/v1/push")
+        const s2 = await pushReq("/api/v1/room")
+        const s3 = await pushReq("/api/v1/projects", { proj: "" })
+        const hay = `${s1.raw}\n${s2.raw}\n${s3.raw}`
+        for (const m of secretMarks) assert(!hay.includes(m), `推送密钥在 ${where} 泄露到了接口响应或快照中`)
+        assert(!("push" in s2.data), "房间快照不应包含 push 配置字段")
+      }
+
+      // 1) All 6 channel formats + 0600 file permission + zero secret echo
+      pushReceived.length = 0
+      let pr = await pushReq("/api/v1/push", {
+        method: "POST",
+        body: { as: "human", action: "test", enabled: true, channel: "ntfy", target: `${mockBase}/${secretMarks[0]}`, token: secretMarks[1] },
+      })
+      assert(pr.status === 200 && pr.data.ok === true && pushReceived.length === 1, "ntfy 测试发送失败")
+      assert(
+        pushReceived[0].url === `/${secretMarks[0]}` &&
+          pushReceived[0].headers.authorization === `Bearer ${secretMarks[1]}` &&
+          decodeRfc2047(pushReceived[0].headers.title).includes(`自测${stamp}`),
+        "ntfy 请求头或路径不对",
+      )
+      const pushMode = fsMod.statSync(pushConfigFile).mode & 0o777
+      assert(pushMode === 0o600, `data/push.json 权限必须是 0600，实际 0${pushMode.toString(8)}`)
+      await checkNoSecretLeak("ntfy")
+
+      pushReceived.length = 0
+      pr = await pushReq("/api/v1/push", {
+        method: "POST",
+        body: { as: "human", action: "test", enabled: true, channel: "bark", target: `${mockBase}/bark_${secretMarks[2]}` },
+      })
+      assert(
+        pr.status === 200 && pr.data.ok === true && pushReceived[0]?.jsonBody?.group === "并坐" && pushReceived[0]?.jsonBody?.title,
+        "Bark 格式不对",
+      )
+
+      pushReceived.length = 0
+      pr = await pushReq("/api/v1/push", {
+        method: "POST",
+        body: { as: "human", action: "test", enabled: true, channel: "wecom", target: `${mockBase}/cgi-bin/webhook/send?key=${secretMarks[3]}` },
+      })
+      assert(
+        pr.status === 200 && pr.data.ok === true && pushReceived[0]?.jsonBody?.msgtype === "text" && pushReceived[0]?.jsonBody?.text?.content,
+        "企业微信机器人格式不对",
+      )
+
+      pushReceived.length = 0
+      pr = await pushReq("/api/v1/push", {
+        method: "POST",
+        body: {
+          as: "human",
+          action: "test",
+          enabled: true,
+          channel: "feishu",
+          target: `${mockBase}/open-apis/bot/v2/hook/${secretMarks[4]}`,
+          token: secretMarks[5],
+        },
+      })
+      const fsSign = cryptoMod
+        .createHmac("sha256", `${pushReceived[0]?.jsonBody?.timestamp}\n${secretMarks[5]}`)
+        .update("")
+        .digest("base64")
+      assert(
+        pr.status === 200 && pr.data.ok === true && pushReceived[0]?.jsonBody?.msg_type === "text" && pushReceived[0]?.jsonBody?.sign === fsSign,
+        "飞书机器人格式或签名不对",
+      )
+
+      pushReceived.length = 0
+      pr = await pushReq("/api/v1/push", {
+        method: "POST",
+        body: {
+          as: "human",
+          action: "test",
+          enabled: true,
+          channel: "telegram",
+          target: mockBase,
+          token: secretMarks[6],
+          extra: secretMarks[7],
+        },
+      })
+      assert(
+        pr.status === 200 &&
+          pr.data.ok === true &&
+          pushReceived[0]?.url === `/bot${secretMarks[6]}/sendMessage` &&
+          pushReceived[0]?.jsonBody?.chat_id === secretMarks[7],
+        "Telegram 机器人格式不对",
+      )
+
+      pushReceived.length = 0
+      pr = await pushReq("/api/v1/push", {
+        method: "POST",
+        body: {
+          as: "human",
+          action: "test",
+          enabled: true,
+          channel: "webhook",
+          target: `${mockBase}/${secretMarks[8]}`,
+          token: secretMarks[9],
+          titleOnly: true,
+        },
+      })
+      assert(
+        pr.status === 200 &&
+          pr.data.ok === true &&
+          pushReceived[0]?.headers.authorization === `Bearer ${secretMarks[9]}` &&
+          pushReceived[0]?.jsonBody?.source === "bench" &&
+          pushReceived[0]?.jsonBody?.body === "" &&
+          pushReceived[0]?.jsonBody?.items?.[0]?.snippet === undefined,
+        "自定义 Webhook 或只推标题（不带正文）格式不对",
+      )
+      await checkNoSecretLeak("all-6-channels")
+
+      // 2) Retry at most once (2 total attempts) + sanitized lastError
+      pushFailHits = 0
+      pr = await pushReq("/api/v1/push", {
+        method: "POST",
+        body: { as: "human", action: "test", enabled: true, channel: "webhook", target: `${mockBase}/always-500?k=${secretMarks[10]}` },
+      })
+      assert(pr.data.ok === false && pushFailHits === 2 && pr.data.state?.lastError?.message?.includes("HTTP 500"), "失败重试次数应最多 1 次（共 2 次）且记录错误")
+      await checkNoSecretLeak("retry-error")
+
+      // 3) Foreground suppression, 20s merge, settled ask/review skip, and 30s permit wait
+      const mkProj = async (title) => {
+        const res = await pushReq("/api/v1/projects", { method: "POST", proj: "", body: { as: "human", name: `${title}${stamp}` } })
+        assert(res.status === 201, `建推送测试项目失败 ${res.raw}`)
+        extraProjects.push(res.data.project.id)
+        return { id: res.data.project.id, name: res.data.project.name }
+      }
+      const mkSeat = async (projId, name) => {
+        const res = await pushReq("/api/v1/join", { method: "POST", proj: projId, key: "", body: { name, model: "m", role: "测" } })
+        assert(res.status === 201, `入座失败 ${res.raw}`)
+        return { id: res.data.agent.id, name: res.data.agent.name, token: res.data.token }
+      }
+
+      const pFront = await mkProj("推前台")
+      const pMerge = await mkProj("推合并")
+      const pSettle = await mkProj("推已答")
+      const pPerm = await mkProj("推权限")
+
+      const sFront = await mkSeat(pFront.id, "前席")
+      const sMerge1 = await mkSeat(pMerge.id, "合甲")
+      const sMerge2 = await mkSeat(pMerge.id, "合乙")
+      const sSet = await mkSeat(pSettle.id, "答席")
+      const sPermFast = await mkSeat(pPerm.id, "快权")
+      const sPermSlow = await mkSeat(pPerm.id, "慢权")
+
+      pushReceived.length = 0
+      await pushReq("/api/v1/push", {
+        method: "POST",
+        body: { as: "human", enabled: true, channel: "webhook", target: `${mockBase}/live`, token: "", onEnd: true, titleOnly: false },
+      })
+
+      // Page in foreground -> suppressed
+      await pushReq("/api/v1/push", { method: "POST", body: { as: "human", action: "presence", front: true } })
+      await pushReq("/api/v1/ask", {
+        method: "POST",
+        proj: pFront.id,
+        key: "",
+        body: { agentId: sFront.id, token: sFront.token, action: "ask", text: "页面在前台时不该推" },
+      })
+      await pushReq("/api/v1/push", { method: "POST", body: { as: "human", action: "presence", front: false } })
+
+      const tStart = Date.now()
+      // Same project within merge window -> coalesce into ONE push
+      const ask65 = "验证超长正文截断：" + "一二三四五六七八九十".repeat(7)
+      await pushReq("/api/v1/ask", {
+        method: "POST",
+        proj: pMerge.id,
+        key: "",
+        body: { agentId: sMerge1.id, token: sMerge1.token, action: "ask", text: ask65 },
+      })
+      const tMerge = await pushReq("/api/v1/tasks", {
+        method: "POST",
+        proj: pMerge.id,
+        body: { as: "human", title: "待验项", owner: sMerge2.name, steps: ["做", "用户验收"] },
+      })
+      await pushReq(`/api/v1/tasks/${tMerge.data.task.id}`, {
+        method: "POST",
+        proj: pMerge.id,
+        key: "",
+        body: { agentId: sMerge2.id, token: sMerge2.token, action: "review", note: "请验收" },
+      })
+
+      // Answered ask before merge fires -> NOT pushed
+      const openQ = await pushReq("/api/v1/ask", {
+        method: "POST",
+        proj: pSettle.id,
+        key: "",
+        body: { agentId: sSet.id, token: sSet.token, action: "ask", text: "马上回答的问题" },
+      })
+      await pushReq("/api/v1/say", {
+        method: "POST",
+        proj: pSettle.id,
+        body: { as: "human", text: "已答", replyTo: openQ.data.message.id },
+      })
+
+      // Permits: one decided early (< permitMs), one unanswered (>= permitMs)
+      pendingPermits.push(
+        pushReq("/api/v1/permit", {
+          method: "POST",
+          proj: pPerm.id,
+          key: "",
+          body: { agentId: sPermFast.id, token: sPermFast.token, action: "tool", tool: "Bash", input: { command: "echo decided-early" } },
+        }),
+        pushReq("/api/v1/permit", {
+          method: "POST",
+          proj: pPerm.id,
+          key: "",
+          body: { agentId: sPermSlow.id, token: sPermSlow.token, action: "tool", tool: "Bash", input: { command: "echo waited-full" } },
+        }),
+      )
+      await sleep(250)
+      const permSnap = await pushReq("/api/v1/room", { proj: pPerm.id })
+      const fastPerm = permSnap.data.permits.find((p) => p.agentId === sPermFast.id)
+      const slowPerm = permSnap.data.permits.find((p) => p.agentId === sPermSlow.id)
+      assert(fastPerm && slowPerm, "应有两条待批权限")
+      await pushReq("/api/v1/permit", { method: "POST", proj: pPerm.id, body: { as: "human", id: fastPerm.id, decision: "once" } })
+
+      // Wait past mergeMs (but before permitMs if permitMs > mergeMs + 1500)
+      await sleep(Math.max(0, tStart + mergeMs + 1_200 - Date.now()))
+      assert(pushReceived.filter((x) => x.jsonBody?.project === pFront.name).length === 0, "页面在前台时不该推")
+      assert(pushReceived.filter((x) => x.jsonBody?.project === pSettle.name).length === 0, "已回答的提问不该补推")
+      const mergedList = pushReceived.filter((x) => x.jsonBody?.project === pMerge.name)
+      assert(
+        mergedList.length === 1 && mergedList[0].jsonBody.count === 2 && [...mergedList[0].jsonBody.items[0].snippet].length === 61,
+        `同一项目合并窗口内两件事应合成 1 条且正文截断 60 字，实际 ${JSON.stringify(mergedList)}`,
+      )
+      if (permitMs - mergeMs > 2_500) {
+        assert(pushReceived.filter((x) => x.jsonBody?.project === pPerm.name).length === 0, "权限未满 30 秒前不该推")
+      }
+
+      await sleep(Math.max(0, tStart + permitMs + 1_500 - Date.now()))
+      const permList = pushReceived.filter((x) => x.jsonBody?.project === pPerm.name)
+      assert(
+        permList.length === 1 &&
+          permList[0].jsonBody.text.includes("waited-full") &&
+          !permList[0].jsonBody.text.includes("decided-early"),
+        `权限应只推等满 30 秒未处理的那条，实际 ${JSON.stringify(permList)}`,
+      )
+      await pushReq("/api/v1/permit", { method: "POST", proj: pPerm.id, body: { as: "human", id: slowPerm.id, decision: "deny", note: "测完" } })
+      await Promise.allSettled(pendingPermits)
+    } finally {
+      for (const pid of extraProjects) {
+        await pushReq(`/api/v1/projects/${pid}`, {
+          method: "POST",
+          proj: "",
+          body: { as: "human", action: "delete", confirm: "删除" },
+        }).catch(() => {})
+      }
+      await pushReq("/api/v1/push", { method: "POST", proj: "", body: { as: "human", action: "clear" } }).catch(() => {})
+      if (hadPushFile && originalPushFile !== null) {
+        fsMod.writeFileSync(pushConfigFile, originalPushFile, { mode: 0o600 })
+        fsMod.chmodSync(pushConfigFile, 0o600)
+      } else {
+        fsMod.rmSync(pushConfigFile, { force: true })
+      }
+      mockPushServer.close()
     }
   }
 

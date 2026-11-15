@@ -16,7 +16,8 @@ export async function POST(request: Request) {
     await boot()
     const body = asRecord(await readBody(request))
     if (body.as !== "human") throw new ApiError(400, "只有这台电脑上的人能建项目")
-    return json(createProject(body), 201)
+    const result = createProject(body)
+    return json({ project: result.project }, result.existed ? 200 : 201)
   } catch (error) {
     return handle(error)
   }

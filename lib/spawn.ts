@@ -126,6 +126,10 @@ export async function workspaces() {
   }
   const room = process.cwd()
   if (!seen.has(room)) seen.set(room, { label: "房间所在目录", path: room, git: false })
+  if (project.front) {
+    const home = os.homedir()
+    if (isDir(home) && !seen.has(home)) seen.set(home, { label: "用户家目录", path: home, git: false })
+  }
   const list = [...seen.values()]
   await Promise.all(list.map(async (item) => (item.git = (await gitTop(item.path)) !== null)))
   return list

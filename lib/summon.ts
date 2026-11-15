@@ -58,10 +58,12 @@ import {
   END_MARK,
   askSettled,
   userName,
+  gisterSeat,
+  setMessageGist,
   netRetry,
   tasksOwedBy,
 } from "@/lib/store"
-import { withAttachments } from "@/lib/text"
+import { GIST_MAX, withAttachments } from "@/lib/text"
 import type { CallState, Message, RoomSummary, Run, Task } from "@/lib/types"
 import { flowsOf } from "@/lib/flow"
 import { isNetworkFailure, retryDelays } from "@/lib/netfail"
@@ -136,6 +138,9 @@ type Lane = {
   // Tasks this seat is to check before the user signs them off (checkTask),
   // each as the request for review it was started for.
   checks?: { taskId: string; at: number }[]
+  // Messages this seat is to write a one-line gist for (「谁来补摘要句」,
+  // writeGists). Not saved: after a restart the page shows the rules' cut.
+  gists?: string[]
 }
 
 type SummonGlobal = typeof globalThis & {
@@ -146,6 +151,12 @@ type SummonGlobal = typeof globalThis & {
   __benchResumeTimers?: Map<string, NodeJS.Timeout>
   __benchSummonHandler?: (message: Message) => void
   __benchCheckHandler?: (wanted: { project: string; taskId: string; at: number }) => void
+  __benchGistHandler?: (message: Message) => void
+  __benchGistBound?: boolean
+  // Long replies with no gist, gathered a few seconds per project before the
+  // summary seat is woken with them; and how many batches each seat wrote.
+  __benchGistGather?: Map<string, { ids: string[]; timer?: NodeJS.Timeout }>
+  __benchGistBatches?: Map<string, number>
   __benchCheckBound?: boolean
   __benchCalledHop?: Map<string, number>
   __benchSummonAt?: Map<string, number>
@@ -367,6 +378,8 @@ function envelope(
     : codex
     ? `你在工作区里可以直接读写。要联网、改工作区外的文件或跑沙箱外的命令时，照 Codex 平常的方式申请提权并写明理由，申请会弹到 ${userName()} 的网页上等他点，别直接放弃或绕路。sudo 密码只能他自己在终端输。`
     : ""
+  // The first line is what the room shows folded (Message.gist, lib/text.ts).
+  const gist = `回答和发言的第一行写一句 60 字以内的结论：做完了什么、结果怎样、要 ${userName()} 做什么；群里默认只显示这一行，细节放后面。`
   const stop = `${end}这条消息不会叫醒任何人。`
   // Woken, nobody watches the client: questions go to the page.
   const ask =
@@ -384,11 +397,19 @@ function envelope(
         ? `你上次之后的消息太多，更早的 ${skipped} 条没列；先附上房间摘要（${summary.by} 写于 ${stamp(summary.at)}，概括了那之前的对话），再列最近的原文。需要原文用 bench_inbox 查。`
         : `下面是你上次之后房间里的消息，太长只列了最近这些；更早还有 ${skipped} 条没列，需要的话用 bench_inbox 查。`
   const digest = skipped > 0 && summary ? `【房间摘要】\n${summary.text}\n\n【最近的原文】\n` : ""
-  const whole = `${how}${thread}${todo}${ask}${attach}${permit}${stop}`
+  const isFront = Boolean(currentProjectInfo().front)
+  const frontDuty = isFront
+    ? `你是前台，${userName()} 只跟你对接：用 bench_overview 看全部项目概况、bench_peek 看单个项目详情；回答里提到的每件事都要带上项目名和待办（t_…）或消息（m_…）的 id；现在是只读阶段，不能替他验收、批权限或以他的名义说话，需要他去哪个房间处理什么就说清楚。`
+    : ""
+  const whole = `${frontDuty}${how}${gist}${thread}${todo}${ask}${attach}${permit}${stop}`
   // The same rules in a line, for a session that has them whole further up.
   const brief = [
     "守则同前，要点：",
+    isFront
+      ? `你是前台（只读），用 bench_overview / bench_peek 看各项目，每件事带项目名和 t_…/m_… id，要 ${userName()} 去哪个房间处理说清楚；`
+      : "",
     replyByStdout ? "最后的回答直接输出，会挂成回复；" : "回复用 bench_say；",
+    "第一行写一句 60 字以内的结论，群里默认只显示这一行；",
     `新功能先用 bench_task 建待办、bench_step 逐步推进，做完用 review 请 ${userName()} 验收，验收不要自己勾；`,
     `问 ${userName()} 用 bench_ask；附件用 ${replyByStdout ? "bench_attach" : "bench_say 的 attachments"}；`,
     claude && full ? "你有默认全部权限，不用 bench_elevate；" : claude ? "被权限拦住先用 bench_elevate 申请；" : "",
@@ -537,6 +558,18 @@ function explain(agentName: string | undefined, failure: string) {
   return failure
 }
 
+// A launcher that runs the client in its own network (bwrap plus socat
+// bridging the room's port and the proxy) writes socat's complaints to the
+// same stderr, like "2026/11/14 22:24:33 socat[52] E write(5, …): Broken
+// pipe" when one side of a bridged connection hung up first. They are about
+// the bridge, not the client: taken as its error, a compaction that had
+// worked was reported as failed (2026-11-14).
+const BRIDGE_NOISE = /^\d{4}\/\d\d\/\d\d \d\d:\d\d:\d\d socat\[\d+\] [EWNI] .*$/gm
+
+function withoutBridgeNoise(text: string) {
+  return text.replace(BRIDGE_NOISE, "").replace(/\n{2,}/g, "\n")
+}
+
 function tail(text: string, max: number) {
   const clean = text.trim().replace(/\s+/g, " ")
   return clean.length > max ? `…${clean.slice(-max)}` : clean
@@ -561,12 +594,30 @@ function limitOf(log: Run, out: string) {
 
 // Say in the room that a seat ran out of allowance, with the card that lets
 // the user have it carry on once it resets. Returns whether it was one.
+const SYSTEM_MAX = 30
+function shortSys(text: string) {
+  return text.length > SYSTEM_MAX ? `${text.slice(0, SYSTEM_MAX - 1)}…` : text
+}
+
+function shortExplain(agentName: string | undefined, failure: string) {
+  if (agentName === "antigravity" && /trajectory .*not found/.test(failure)) return "找不到会话，需重入座"
+  if (agentName === "antigravity" && /stream was interrupted/i.test(failure)) return "中途中断，查权限或重叫"
+  if (agentName === "workbuddy" && /Authentication required|\/login/i.test(failure)) return "未登录（看过程）"
+  if (agentName === "cursor" && /Model unavailable on Free/i.test(failure)) return "免费版不支持该模型"
+  if (agentName === "codex" && /This chat uses (\S+), but your current provider is (\S+?)\./.test(failure)) {
+    return "提供方不匹配，需开新会话"
+  }
+  if (agentName === "dsh" && /cannot compose presets/.test(failure)) return "网页预设会话无法后台叫醒"
+  const first = failure.trim().split("\n")[0]?.trim() ?? "出错"
+  return first.length > 9 ? `${first.slice(0, 8)}…（看过程）` : `${first}（看过程）`
+}
+
 function noteLimit(agent: NonNullable<ReturnType<typeof agentState>>, log: Run, out: string) {
   const hit = limitOf(log, out)
   if (!hit) return false
   setLimited(log, { resetsAt: hit.resetsAt })
-  const when = hit.resetsAt ? `${whenText(hit.resetsAt)} 重置` : "没写几点重置"
-  postLimited(`${agent.name} 撞到了「${hit.label}」，${when}。这次没做完，可以让它重置后自动接着做`, {
+  const when = hit.resetsAt ? `${whenText(hit.resetsAt)}重置` : "未写重置时间"
+  postLimited(shortSys(`${agent.name} 撞上${hit.label}（${when}）`), {
     runId: log.id,
     agentId: agent.id,
     agentName: agent.name,
@@ -579,7 +630,16 @@ function noteLimit(agent: NonNullable<ReturnType<typeof agentState>>, log: Run, 
 
 function reportFailure(agent: NonNullable<ReturnType<typeof agentState>>, log: Run, failure: string, out: string, what: string) {
   if (noteLimit(agent, log, out)) return
-  postSystem(`${what}没成功：${explain(agent.agentName, failure)}`)
+  const detail = explain(agent.agentName, failure)
+  putStep(log, {
+    id: "explain",
+    at: Date.now(),
+    kind: "note",
+    state: "failed",
+    title: "失败原因说明",
+    output: detail !== failure ? `${detail}\n\n原始报错：\n${failure}` : failure,
+  })
+  postSystem(shortSys(`${what}没成功：${shortExplain(agent.agentName, failure)}`))
 }
 
 // Runs one command on a seat's session and reports how it went. Its output
@@ -641,8 +701,9 @@ function launch(
     const out = parser.answer()
     // Some CLIs print their error to stderr and still exit 0 (WorkBuddy's when
     // signed out); with no answer at all, that error is the outcome.
-    const silent = code === 0 && !out.trim() && run.steps.length === 0 && err.trim()
-    const why = failure ?? (code !== 0 ? tail(err, 160) || `退出码 ${code}` : silent ? tail(err, 160) : undefined)
+    const said = withoutBridgeNoise(err)
+    const silent = code === 0 && !out.trim() && run.steps.length === 0 && said.trim()
+    const why = failure ?? (code !== 0 ? tail(said, 160) || `退出码 ${code}` : silent ? tail(said, 160) : undefined)
     done(stopped ? { out: "", stopped } : { out, failure: why, lost })
   })
 
@@ -834,6 +895,12 @@ function run(agentId: string) {
     checkTask(agent, check)
     return
   }
+  if (queue.gists?.length) {
+    const ids = queue.gists.splice(0, GIST_BATCH)
+    if (queue.gists.length === 0) queue.gists = undefined
+    writeGists(agent, ids)
+    return
+  }
   if (queue.goal !== undefined) {
     const text = queue.goal
     queue.goal = undefined
@@ -898,7 +965,7 @@ function run(agentId: string) {
     const still = agentState(agentId)
     const sameBinding = still?.agentName === startedLink.agentName && still?.session === startedLink.session
     if (lost && !stopped) {
-      postSystem(`${agent.name} 这次有一行输出太长（超过 8MB）没读，下面贴出的回答可能不完整，「查看过程」里能看到读到的部分`)
+      postSystem(shortSys(`${agent.name} 单行超 8MB 已略过（看过程）`))
     }
     if (stopped) {
       if (queue.whisper === undefined) queue.retries = undefined
@@ -941,7 +1008,7 @@ function run(agentId: string) {
       queue.retries = undefined
       const tried = network && tries > 0 ? `（自动重试了 ${tries} 次）` : ""
       note(answered, agentId, "failed", { note: `${failure}${tried}` })
-      reportFailure(agent, log, `${failure}${tried}`, out, `唤起 ${agent.name} `)
+      reportFailure(agent, log, `${failure}${tried}`, out, `${agent.name} 叫醒`)
     } else if (adapter.reply === "stdout" && still && sameBinding && out) {
       try {
         // Posted while the run is still open, so the message links to it.
@@ -1069,12 +1136,12 @@ function writeSummary(agent: NonNullable<ReturnType<typeof agentState>>, adapter
       // An interjection asks for the summary again afterwards; a plain stop drops it.
       if (queue.whisper !== undefined) queue.summary = true
     } else if (failure) {
-      reportFailure(agent, log, failure, out, `请 ${agent.name} 写摘要`)
+      reportFailure(agent, log, failure, out, `${agent.name} 写摘要`)
     } else if (byStdout) {
       try {
         saveSummary(out, agent.name, prompt.upToSeq, prompt.flowsAt)
       } catch {
-        postSystem(`${agent.name} 没写出摘要`)
+        postSystem(shortSys(`${agent.name} 未写出房间摘要`))
       }
     } else if ((snapshot().summary?.at ?? 0) < asked) {
       // Some models write the summary as their answer instead of calling
@@ -1083,7 +1150,7 @@ function writeSummary(agent: NonNullable<ReturnType<typeof agentState>>, adapter
       if (out.includes("## 结论") && written.includes("## 进行中") && written.includes("## 待定")) {
         saveSummary(written, agent.name, prompt.upToSeq, prompt.flowsAt)
       } else {
-        postSystem(`${agent.name} 这一轮没交摘要`)
+        postSystem(shortSys(`${agent.name} 本轮未交房间摘要`))
       }
     }
     run(agent.id)
@@ -1214,6 +1281,143 @@ function checkTask(agent: NonNullable<ReturnType<typeof agentState>>, item: { ta
   })
 }
 
+// 「谁来补摘要句」: a long reply whose first line the rules could not use as
+// its gist (lib/text.ts gistOf) waits a few seconds for others, then the
+// project's summary seat (Agent.gister) is woken with the batch on its own,
+// like a check: nothing goes into the room. It answers one line per message;
+// the room writes those back as Message.gist (by its name). A failed batch
+// is let go: no retry, no note in the room, the page shows the rules' cut.
+// Its session grows by a batch at a time, so every GIST_COMPACT_EVERY
+// batches the room compacts it (Claude Code and Codex; others compact by
+// themselves or not at all).
+const GIST_LONG = 200
+const GIST_BATCH = 12
+const GIST_GATHER_MS = Number(process.env.BENCH_GIST_MS) || 5_000
+const GIST_COMPACT_EVERY = 20
+// The prompt rides in one command-line argument (see SUMMARY_PROMPT_BYTES).
+const GIST_PROMPT_BYTES = 80_000
+const GIST_EACH_CHARS = 2_000
+
+function noteGistless(message: Message) {
+  if (message.kind !== "chat" || message.authorId === "human" || message.authorId === "room") return
+  if (message.gist || message.ask || message.recalled || message.text.length <= GIST_LONG) return
+  if (!gisterSeat()) return
+  const project = currentProject()
+  const gather = (g().__benchGistGather ??= new Map())
+  const batch = gather.get(project) ?? { ids: [] }
+  gather.set(project, batch)
+  batch.ids.push(message.id)
+  if (batch.ids.length >= GIST_BATCH) flushGists(project)
+  else batch.timer ??= setTimeout(() => flushGists(project), GIST_GATHER_MS)
+}
+
+function flushGists(project: string) {
+  const batch = g().__benchGistGather?.get(project)
+  if (!batch) return
+  g().__benchGistGather?.delete(project)
+  clearTimeout(batch.timer)
+  try {
+    inProject(project, () => {
+      const seat = gisterSeat()
+      if (!seat) return
+      const agent = agentState(seat.id)
+      if (!agent?.agentName || !agent.session || !adapterFor(agent.agentName) || isStandby(agent.id)) return
+      const queue = lane(agent.id)
+      queue.gists = [...new Set([...(queue.gists ?? []), ...batch.ids])].slice(-GIST_BATCH * 4)
+      run(agent.id)
+    })
+  } catch (error) {
+    console.error(error)
+  }
+}
+
+function gistPrompt(list: Message[]) {
+  const parts: string[] = []
+  let bytes = 0
+  const taken: Message[] = []
+  for (const message of list) {
+    const text = message.text.length > GIST_EACH_CHARS ? `${message.text.slice(0, GIST_EACH_CHARS)}…（后面略）` : message.text
+    const part = `【${message.id}】${message.authorName} · ${stamp(message.createdAt)}\n${text}`
+    if (taken.length > 0 && bytes + Buffer.byteLength(part) > GIST_PROMPT_BYTES) break
+    bytes += Buffer.byteLength(part)
+    parts.push(part)
+    taken.push(message)
+  }
+  const text = [
+    `【并坐房间请你给下面 ${taken.length} 条回复各写一句摘要】这一轮不进群聊，只有房间读你的回答。群里会在那条回复的位置只显示你写的这一句，点开才看全文。`,
+    `每条写一句 60 字以内的结论：做完了什么、结果怎样、要 ${userName()} 做什么。只照原文写，不评价，不添原文没有的事，不要用 @。`,
+    "不要调用工具，不要改文件，不要在群里说话。",
+    "回答直接输出，一条一行，格式是「[消息 id] 摘要句」，例如：",
+    "[m_1234abcd] 网络重试做完了，等你验收，重启 4399 后生效。",
+    "",
+    parts.join("\n\n"),
+  ].join("\n")
+  return { text, taken }
+}
+
+// One line a summary seat wrote for a message: no @ (it calls nobody, but
+// shown on the page it would look like a call), no wrapping quotes, short.
+function cleanGist(line: string) {
+  const text = line
+    .replace(/[@＠]/g, "")
+    .replace(/^[\s"'“”「」]+|[\s"'“”「」]+$/g, "")
+    .replace(/\s+/g, " ")
+  return text.length > GIST_MAX ? `${text.slice(0, GIST_MAX - 1)}…` : text
+}
+
+function writeGists(agent: NonNullable<ReturnType<typeof agentState>>, ids: string[]) {
+  const messages = snapshot().messages
+  const wanted = ids
+    .map((id) => messages.find((message) => message.id === id))
+    .filter((message): message is Message => Boolean(message && !message.recalled && !message.gist))
+  if (wanted.length === 0) {
+    run(agent.id)
+    return
+  }
+  const { text, taken } = gistPrompt(wanted)
+  const command = commandFor(agent.agentName ?? "", agent.session ?? "", text, agent.modelPick, agent.effortPick)
+  if (!command) {
+    run(agent.id)
+    return
+  }
+  const queue = lane(agent.id)
+  queue.running = true
+  const log = startRun(agent.id, agent.name, "gist", { project: currentProject(), ask: `补 ${taken.length} 条回复的摘要句` })
+  const seat = busy(agent.id, `在补 ${taken.length} 条回复的摘要句`)
+  launch(agent, command, log, seat.live, ({ out, failure, stopped }) => {
+    queue.running = false
+    let wrote = 0
+    if (!stopped && !failure) {
+      const mine = new Set(taken.map((message) => message.id))
+      for (const line of out.split("\n")) {
+        const found = /^\s*[\[【(（]?\s*(m_[0-9a-z]+)\s*[\]】)）]?\s*[:：-]?\s*(.+)$/i.exec(line)
+        if (!found || !mine.has(found[1])) continue
+        const gist = cleanGist(found[2])
+        if (!gist) continue
+        mine.delete(found[1])
+        try {
+          if (setMessageGist(found[1], { text: gist, by: agent.name, at: Date.now() })) wrote++
+        } catch (error) {
+          console.error(error)
+        }
+      }
+      log.answer = out.slice(0, 4000)
+    }
+    endRun(
+      log,
+      stopped || failure || wrote === 0 ? "failed" : "done",
+      stopped ? "被停下了" : failure ? `没成功：${failure}` : wrote === 0 ? "没交出摘要句" : `补了 ${wrote}/${taken.length} 条`,
+    )
+    seat.settle()
+    // Every so many batches, compact its session so it doesn't grow forever.
+    const batches = (g().__benchGistBatches ??= new Map())
+    const done = (batches.get(agent.id) ?? 0) + 1
+    batches.set(agent.id, done)
+    if (done % GIST_COMPACT_EVERY === 0 && CONTEXT_KINDS.includes(agent.agentName ?? "")) queue.compact = true
+    run(agent.id)
+  })
+}
+
 // The user asked to compact a seat's context: one turn of /compact on its
 // session (Claude Code runs it headless; scripts/codex-app.mjs turns it into
 // thread/compact/start). Nothing goes into its conversation besides the
@@ -1231,24 +1435,31 @@ function compactSession(agent: NonNullable<ReturnType<typeof agentState>>) {
   const before = seatContext(agent.agentName, agent.session, agent)
   const log = startRun(agent.id, agent.name, "compact", { project: currentProject() })
   const seat = busy(agent.id, "在压缩上下文")
-  launch(agent, command, log, seat.live, ({ out, failure, stopped }) => {
+  launch(agent, command, log, seat.live, ({ out, failure: said, stopped }) => {
     queue.running = false
+    const after = stopped ? null : seatContext(agent.agentName, agent.session, agent)
+    // Only a new compaction in its record counts: a short conversation
+    // gets "Not enough messages to compact." and stays as it was. And one
+    // that is there has worked, whatever the process said on the way out.
+    const done = (after?.compacted?.at ?? 0) > (before?.compacted?.at ?? 0)
+    const failure = done ? undefined : said
     endRun(log, failure || stopped ? "failed" : "done", stopped ? "被停下了" : failure ? `没成功：${failure}` : undefined)
     seat.settle()
-    if (failure && !stopped) reportFailure(agent, log, failure, out, `压缩 ${agent.name} 的上下文`)
+    if (failure && !stopped) reportFailure(agent, log, failure, out, `${agent.name} 压缩`)
     else if (!stopped) {
-      const after = seatContext(agent.agentName, agent.session, agent)
-      // Only a new compaction in its record counts: a short conversation
-      // gets "Not enough messages to compact." and stays as it was.
-      const done = (after?.compacted?.at ?? 0) > (before?.compacted?.at ?? 0)
+      if (!done && out.trim()) {
+        putStep(log, { id: "compact-note", at: Date.now(), kind: "note", state: "done", title: "未压缩原因", output: out.trim() })
+      }
       const was = tokensText(before)
       const now = tokensText(after)
       postSystem(
-        !done
-          ? `${agent.name} 这次没压缩${out.trim() ? `：${out.trim().slice(0, 200)}` : ""}`
-          : now
-            ? `${agent.name} 的上下文压缩好了${was ? `：${was} → ${now}` : `，现在 ${now}`}`
-            : `${agent.name} 的上下文压缩好了，现在多大要等它下一轮才知道`,
+        shortSys(
+          !done
+            ? `${agent.name} 本次未压缩${out.trim() ? "（看过程）" : ""}`
+            : now
+              ? `${agent.name} 已压缩${was ? `：${was}→${now}` : `（现 ${now}）`}`
+              : `${agent.name} 已压缩上下文`,
+        ),
       )
     }
     run(agent.id)
@@ -1303,8 +1514,8 @@ function setGoal(agent: NonNullable<ReturnType<typeof agentState>>, adapter: Ada
     queue.midHop = undefined
     const still = agentState(agent.id)
     const sameBinding = still?.agentName === startedLink.agentName && still?.session === startedLink.session
-    if (failure && !stopped) reportFailure(agent, log, failure, out, clearing ? `清掉 ${agent.name} 的目标` : `让 ${agent.name} 按目标干活`)
-    else if (!stopped && clearing) postSystem(`${agent.name} 的目标清掉了`)
+    if (failure && !stopped) reportFailure(agent, log, failure, out, clearing ? `${agent.name} 清目标` : `${agent.name} 设目标`)
+    else if (!stopped && clearing) postSystem(shortSys(`${agent.name} 已清除目标`))
     else if (!stopped && adapter.reply === "stdout" && still && sameBinding && out) {
       try {
         sayAs({ type: "agent", id: still.id, name: still.name }, { text: out.slice(0, 4000) })
@@ -1333,9 +1544,11 @@ export function requestGoal(agentId: string, input: unknown) {
   syncLane(agent.id)
   const clearing = CLEAR_GOAL.test(text)
   postSystem(
-    clearing
-      ? `${userName()} 让 ${agent.name} 清掉目标`
-      : `${userName()} 给 ${agent.name} 定了目标：${text}\n它会一直做到达成为止；要停就 /stop，要撤掉目标就 /goal clear`,
+    shortSys(
+      clearing
+        ? `正在清除 ${agent.name} 的目标`
+        : `已给 ${agent.name} 设目标（/stop 可停）`,
+    ),
   )
   const waiting = queue.running || terminalOpen(agent.id) || Boolean(queue.paused)
   run(agent.id)
@@ -1451,6 +1664,7 @@ export function stopAgent(agentId: string) {
     queue.pending = []
     queue.carry = undefined
     dropChecks(queue, "复验人被停下了")
+    queue.gists = undefined
     queue.summary = false
     queue.compact = false
     queue.goal = undefined
@@ -1470,6 +1684,7 @@ export function stopAgent(agentId: string) {
   queue.pending = []
   queue.carry = undefined
   dropChecks(queue, "复验人被停下了")
+  queue.gists = undefined
   queue.summary = false
   queue.compact = false
   queue.goal = undefined
@@ -1664,7 +1879,7 @@ function wake(message: Message) {
       // the loop turns out to be gone without taking it, wake it after all.
       if (!isWaiting(agent.id)) {
         if (cooled(`${agent.id}:standby`, NOTE_GAP_MS)) {
-          postSystem(`${agent.name} 正在守着房间（bench_wait），这会儿在处理上一条：消息排着等它来取。它要是不再守了，房间会改成直接叫醒它`)
+          postSystem(shortSys(`${agent.name} 正忙，消息排队等它取`))
         }
         note([message.id], agent.id, "held")
         watchStandby(agent.id, message, hop)
@@ -1681,14 +1896,14 @@ function wake(message: Message) {
 function enqueue(agent: { id: string; name: string; agentName?: string; session?: string }, message: Message, hop: number) {
   if (!agent.agentName || !agent.session) {
     if (cooled(`${agent.id}:session`, NOTE_GAP_MS)) {
-      postSystem(`${agent.name} 被点到了，但还没报 agent 和 uuid，叫不醒`)
+      postSystem(shortSys(`${agent.name} 未报会话 id，叫不醒`))
     }
     note([message.id], agent.id, "failed", { note: "还没报会话，叫不醒" })
     return
   }
   if (!adapterFor(agent.agentName)) {
     if (cooled(`${agent.id}:config`, NOTE_GAP_MS)) {
-      postSystem(`${agent.name} 被点到了，还没有 ${agent.agentName} 的唤起命令`)
+      postSystem(shortSys(`${agent.name} 缺少 ${agent.agentName} 唤起命令`))
     }
     note([message.id], agent.id, "failed", { note: `没有 ${agent.agentName} 的唤起命令` })
     return
@@ -1734,16 +1949,14 @@ function announceInterrupted() {
   for (const [project, list] of byProject) {
     try {
       inProject(project, () => {
-        const what = { reply: "回复", private: "单独回话", summary: "写摘要", compact: "压缩上下文", goal: "按目标干活", check: "复验" } as const
-        // Its seat still shows the reply it never finished.
         for (const item of list) {
           try {
             pulseAgent(item.agentId, "idle", "被服务器重启打断了")
           } catch {}
         }
-        const names = list.map((item) => `${item.agentName}（${what[item.purpose]}）`).join("、")
+        const shown = list.length === 1 ? list[0].agentName : `${list[0].agentName} 等 ${list.length} 个席位`
         postInterrupted(
-          `服务器重启，打断了 ${names}。没回完的话没发出来，点下面重新叫醒，会带着原来那些消息接着做`,
+          shortSys(`重启打断了 ${shown}，点下方重新叫醒`),
           list.map((item) => ({
             runId: item.id,
             agentId: item.agentId,
@@ -1909,7 +2122,7 @@ function fireResume(runId: string) {
       const why = error instanceof Error ? error.message : String(error)
       setLimited(item, { ...item.limited, resumeAt: undefined })
       markLimited(runId, { state: "failed", at: Date.now(), note: why })
-      postSystem(`额度重置了，想叫醒 ${item.agentName} 接着做，没成功：${why}`)
+      postSystem(shortSys(`${item.agentName} 到点自动叫醒没成功`))
     }
   })
 }
@@ -2002,6 +2215,17 @@ export function ensureSummon() {
     abandonChecks()
     announceInterrupted()
     rearmResumes()
+  }
+  g().__benchGistHandler = (message) => {
+    try {
+      noteGistless(message)
+    } catch (error) {
+      console.error(error)
+    }
+  }
+  if (!g().__benchGistBound) {
+    g().__benchGistBound = true
+    onMessage((message) => setImmediate(() => g().__benchGistHandler?.(message)))
   }
   if (g().__benchSummonBound) return
   g().__benchSummonBound = true

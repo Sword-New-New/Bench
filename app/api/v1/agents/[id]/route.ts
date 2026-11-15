@@ -12,6 +12,7 @@ import {
   renameAgent,
   setAutoFull,
   setChecker,
+  setGister,
   setSeatModel,
   setSeatProfile,
 } from "@/lib/store"
@@ -55,6 +56,7 @@ export async function POST(request: Request, ctx: RouteContext<"/api/v1/agents/[
     if (body.action === "auto_full") return json(inSeat(id, () => setAutoFull(id, body.on === true)))
     // 「请验收时先复验」 in the project settings: this seat checks, or not.
     if (body.action === "checker") return json(inSeat(id, () => setChecker(id, body.on === true)))
+    if (body.action === "gister") return json(inSeat(id, () => setGister(id, body.on === true)))
     if (body.action === "queue_resume") return json(inSeat(id, () => pauseQueue(id, false)))
     if (body.action === "queue_drop") {
       const messageId = typeof body.messageId === "string" ? body.messageId : undefined

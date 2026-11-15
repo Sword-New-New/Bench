@@ -8,7 +8,7 @@
     },
     {
       "name": "dsh",
-      "command": "dsh-agent resume {uuid} {text}",
+      "command": "dsh-agent resume --json --timeout 0 {uuid} {text}",
       "reply": "none"
     },
     {
@@ -18,12 +18,82 @@
     },
     {
       "name": "cursor",
-      "command": "cursor-agent --resume {uuid} --model grok-4.7-low-fast --approve-mcps --trust -p {text}",
+      "command": "cursor-agent --resume {uuid} --model grok-4.7-medium --workspace \"${BENCH_NEW_DIR:-$PWD}\" --approve-mcps --trust --output-format stream-json -p {text}",
       "reply": "stdout"
     },
     {
       "name": "antigravity",
-      "command": "agy --conversation {uuid} --model gemini-3.8-flash-low --settings '{\"permissions\":{\"allow\":[\"mcp(bench/*)\"]}}' -p {text}",
+      "command": "./scripts/agy-wake.sh {uuid} --model gemini-3.8-flash-low --settings '{\"permissions\":{\"allow\":[\"mcp(bench/*)\"]}}' --output-format stream-json -p {text}",
+      "reply": "stdout"
+    },
+    {
+      "name": "qoder",
+      "command": "./scripts/resume-here.sh {uuid} ~/.qoder:~/.qoder-cn -- qodercli -p {text} --resume {uuid} --allowed-tools 'mcp__bench__*' -m efficient",
+      "reply": "stdout"
+    },
+    {
+      "name": "codebuddy",
+      "command": "./scripts/resume-here.sh {uuid} ~/.codebuddy -- codebuddy -p {text} -r {uuid} --allowedTools mcp__bench --output-format text",
+      "reply": "stdout"
+    },
+    {
+      "name": "workbuddy",
+      "command": "./scripts/workbuddy-wake.sh {uuid} {text}",
+      "reply": "stdout"
+    },
+    {
+      "name": "qwen",
+      "command": "qwen --resume {uuid} --allowed-tools mcp__bench -p {text}",
+      "reply": "stdout"
+    },
+    {
+      "name": "kimi",
+      "command": "kimi -p {text} --session {uuid}",
+      "reply": "stdout"
+    },
+    {
+      "name": "gemini",
+      "command": "gemini -r {uuid} -m flash -o text -p {text}",
+      "reply": "stdout"
+    },
+    {
+      "name": "copilot",
+      "command": "copilot --session-id {uuid} -s --allow-tool=bench --no-ask-user -p {text}",
+      "reply": "stdout"
+    },
+    {
+      "name": "opencode",
+      "command": "opencode run -s {uuid} {text}",
+      "reply": "stdout"
+    },
+    {
+      "name": "kilo",
+      "command": "kilo run -s {uuid} {text}",
+      "reply": "stdout"
+    },
+    {
+      "name": "crush",
+      "command": "crush run -q -s {uuid} {text}",
+      "reply": "stdout"
+    },
+    {
+      "name": "goose",
+      "command": "goose run -r --session-id {uuid} -q -t {text}",
+      "reply": "stdout"
+    },
+    {
+      "name": "droid",
+      "command": "droid exec -s {uuid} {text}",
+      "reply": "stdout"
+    },
+    {
+      "name": "devin",
+      "command": "devin -p {text} --resume {uuid} --respect-workspace-trust false",
+      "reply": "stdout"
+    },
+    {
+      "name": "kiro",
+      "command": "kiro-cli chat --no-interactive --resume-id {uuid} --trust-tools=@bench {text}",
       "reply": "stdout"
     }
   ]

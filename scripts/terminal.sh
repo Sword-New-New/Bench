@@ -14,11 +14,17 @@ session="${2:?缺少 session id}"
 model=()
 case "$kind" in
   claude)
-    bin="$(command -v claude || true)"
-    if [[ -z "$bin" ]]; then
-      bin="$(ls -d "$HOME"/.config/Claude/claude-code/*/*/claude 2>/dev/null | sort -V | tail -1 || true)"
+    bin=/usr/local/libexec/claude-us-guard/launch
+    entry=()
+    if [[ -x "$bin" ]]; then
+      entry=(bench)
+    else
+      bin="$(command -v claude || true)"
+      if [[ -z "$bin" ]]; then
+        bin="$(ls -d "$HOME"/.config/Claude/claude-code/*/*/claude 2>/dev/null | sort -V | tail -1 || true)"
+      fi
+      [[ -n "$bin" && -x "$bin" ]] || { echo "找不到 claude 可执行文件" >&2; exit 127; }
     fi
-    [[ -n "$bin" && -x "$bin" ]] || { echo "找不到 claude 可执行文件" >&2; exit 127; }
     [[ -n "${BENCH_MODEL:-}" ]] && model=(--model "$BENCH_MODEL")
     [[ -n "${BENCH_EFFORT:-}" ]] && model+=(--effort "$BENCH_EFFORT")
     # Where its context compacts by itself, if the user set one; beats settings files.
@@ -28,13 +34,13 @@ case "$kind" in
       # A session the room created and never woke: start it under that id.
       [[ -n "${BENCH_NEW_DIR:-}" ]] || { echo "找不到 Claude Code 会话 $session" >&2; exit 2; }
       cd "$BENCH_NEW_DIR"
-      exec "$bin" --session-id "$session" "${model[@]}"
+      exec "$bin" "${entry[@]}" --session-id "$session" "${model[@]}"
     fi
     dir="$(grep -m1 -o '"cwd":"[^"]*"' "$file" | head -1 | sed 's/^"cwd":"//; s/"$//' || true)"
     [[ -n "$dir" && -d "$dir" ]] && cd "$dir"
     # Its own window's permission prompts show up right here, so nothing is
     # routed to the page the way woken turns do.
-    exec "$bin" --resume "$session" "${model[@]}"
+    exec "$bin" "${entry[@]}" --resume "$session" "${model[@]}"
     ;;
   codex)
     bin="$(command -v codex || echo /usr/lib/chatgpt/resources/codex)"

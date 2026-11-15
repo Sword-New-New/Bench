@@ -8,15 +8,17 @@ set -euo pipefail
 session="${1:?缺少 session id}"
 shift
 
-bin="$(command -v claude || true)"
-if [[ -z "$bin" ]]; then
-  bin="$(ls -d "$HOME"/.config/Claude/claude-code/*/*/claude 2>/dev/null | sort -V | tail -1 || true)"
+bin=/usr/local/libexec/claude-us-guard/launch
+entry=()
+if [[ -x "$bin" ]]; then
+  entry=(bench)
+else
+  bin="$(command -v claude || true)"
+  if [[ -z "$bin" ]]; then
+    bin="$(ls -d "$HOME"/.config/Claude/claude-code/*/*/claude 2>/dev/null | sort -V | tail -1 || true)"
+  fi
+  [[ -n "$bin" && -x "$bin" ]] || { echo "找不到 claude 可执行文件" >&2; exit 127; }
 fi
-if [[ -z "$bin" || ! -x "$bin" ]]; then
-  echo "找不到 claude 可执行文件" >&2
-  exit 127
-fi
-
 # The model the user picked for this seat in the room, if any.
 model=()
 if [[ -n "${BENCH_MODEL:-}" ]]; then
@@ -46,7 +48,7 @@ file="$(ls "$HOME"/.claude/projects/*/"$session".jsonl 2>/dev/null | head -1 || 
 # first turn: start it under that id, in the folder the room picked for it.
 if [[ -z "$file" && -n "${BENCH_NEW_DIR:-}" ]]; then
   cd "$BENCH_NEW_DIR"
-  exec "$bin" --session-id "$session" "${model[@]}" "${hook[@]}" --allowedTools mcp__bench --disallowedTools AskUserQuestion --permission-prompt-tool mcp__bench__bench_permit --output-format stream-json --verbose -p "$@"
+  exec "$bin" "${entry[@]}" --session-id "$session" "${model[@]}" "${hook[@]}" --allowedTools mcp__bench --disallowedTools AskUserQuestion --permission-prompt-tool mcp__bench__bench_permit --output-format stream-json --verbose -p "$@"
 fi
 if [[ -z "$file" ]]; then
   echo "找不到 Claude Code 会话 $session" >&2
@@ -102,4 +104,4 @@ esac
 # Permission prompts go the same way: bench_permit puts each on the page and
 # waits for the user's allow or deny (lib/permits.ts).
 # stream-json: one event per line, which the room turns into the 「过程」 panel.
-exec "$bin" --resume "$session" "${perm[@]}" "${model[@]}" "${hook[@]}" --allowedTools mcp__bench --disallowedTools AskUserQuestion --permission-prompt-tool mcp__bench__bench_permit --output-format stream-json --verbose -p "$@"
+exec "$bin" "${entry[@]}" --resume "$session" "${perm[@]}" "${model[@]}" "${hook[@]}" --allowedTools mcp__bench --disallowedTools AskUserQuestion --permission-prompt-tool mcp__bench__bench_permit --output-format stream-json --verbose -p "$@"

@@ -48,6 +48,7 @@ CREATE TABLE IF NOT EXISTS projects (
   id TEXT PRIMARY KEY,
   name TEXT NOT NULL,
   dir TEXT,
+  front INTEGER NOT NULL DEFAULT 0,
   created_at INTEGER NOT NULL,
   sort_order INTEGER NOT NULL DEFAULT 0,
   rev INTEGER NOT NULL DEFAULT 0,
@@ -198,11 +199,19 @@ function bundle(): DbBundle {
   db.exec("PRAGMA foreign_keys = ON;")
   db.exec("PRAGMA busy_timeout = 5000;")
   db.exec(SCHEMA_SQL)
+  ensureSchemaColumns(db)
   const created: DbBundle = { file: target, db, stmts: new Map() }
   g.__benchSqlite = created
   migrateLegacyJsonIfNeeded(created)
   cleanFtsResidue(db)
   return created
+}
+
+function ensureSchemaColumns(db: DatabaseSync) {
+  const cols = db.prepare("PRAGMA table_info(projects)").all()
+  if (!cols.some((c) => c.name === "front")) {
+    db.exec("ALTER TABLE projects ADD COLUMN front INTEGER NOT NULL DEFAULT 0")
+  }
 }
 
 function cleanFtsResidue(db: DatabaseSync) {
@@ -481,6 +490,7 @@ export type StoredProjectRow = {
   id: string
   name: string
   dir?: string
+  front?: true
   createdAt: number
   rev: number
   seq: number
@@ -491,12 +501,13 @@ export type StoredProjectRow = {
 
 export function dbLoadProjects(): StoredProjectRow[] {
   const rows = stmt(
-    "SELECT id, name, dir, created_at, rev, seq, summary_json, summary_skip_seq, relay_closed FROM projects ORDER BY sort_order ASC, created_at ASC",
+    "SELECT id, name, dir, front, created_at, rev, seq, summary_json, summary_skip_seq, relay_closed FROM projects ORDER BY front DESC, sort_order ASC, created_at ASC",
   ).all()
   return rows.map((r) => ({
     id: String(r.id),
     name: String(r.name),
     dir: typeof r.dir === "string" ? r.dir : undefined,
+    ...(Number(r.front) === 1 ? { front: true as const } : {}),
     createdAt: Number(r.created_at),
     rev: Number(r.rev),
     seq: Number(r.seq),
@@ -507,16 +518,17 @@ export function dbLoadProjects(): StoredProjectRow[] {
 }
 
 export function dbSaveProject(
-  p: { id: string; name: string; dir?: string; createdAt: number },
+  p: { id: string; name: string; dir?: string; front?: true; createdAt: number },
   sortOrder: number,
   state: { rev: number; seq: number; summary?: unknown; summarySkipSeq?: number; relayClosed?: boolean },
 ) {
   stmt(
-    `INSERT INTO projects (id, name, dir, created_at, sort_order, rev, seq, summary_json, summary_skip_seq, relay_closed)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `INSERT INTO projects (id, name, dir, front, created_at, sort_order, rev, seq, summary_json, summary_skip_seq, relay_closed)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
      ON CONFLICT(id) DO UPDATE SET
        name = excluded.name,
        dir = excluded.dir,
+       front = excluded.front,
        sort_order = excluded.sort_order,
        rev = excluded.rev,
        seq = excluded.seq,
@@ -527,6 +539,7 @@ export function dbSaveProject(
     p.id,
     p.name,
     p.dir ?? null,
+    p.front ? 1 : 0,
     p.createdAt,
     sortOrder,
     state.rev,
@@ -767,6 +780,28 @@ export function dbLoadTalkAfter(projectId: string, afterSeq: number): Message[] 
     "SELECT data_json FROM messages WHERE project_id = ? AND seq > ? AND kind != 'system' AND recalled_at IS NULL ORDER BY seq ASC",
   ).all(projectId, afterSeq)
   return rows.map(rowToMessage).filter((m): m is Message => m !== null)
+}
+
+export function dbLoadTalkPage(
+  projectId: string,
+  beforeSeq?: number,
+  limit = 30,
+): { messages: Message[]; hasMore: boolean } {
+  const rows =
+    beforeSeq !== undefined && beforeSeq > 0
+      ? stmt(
+          "SELECT data_json FROM messages WHERE project_id = ? AND kind != 'system' AND recalled_at IS NULL AND seq < ? ORDER BY seq DESC LIMIT ?",
+        ).all(projectId, beforeSeq, limit + 1)
+      : stmt(
+          "SELECT data_json FROM messages WHERE project_id = ? AND kind != 'system' AND recalled_at IS NULL ORDER BY seq DESC LIMIT ?",
+        ).all(projectId, limit + 1)
+  const hasMore = rows.length > limit
+  const slice = hasMore ? rows.slice(0, limit) : rows
+  const messages = slice
+    .map(rowToMessage)
+    .filter((m): m is Message => m !== null && !m.recalled)
+    .reverse()
+  return { messages, hasMore }
 }
 
 export function dbFindMessageByRunField(

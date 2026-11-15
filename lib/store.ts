@@ -45,7 +45,7 @@ import { seatState } from "@/lib/status"
 import { owedTasks, owesOf } from "@/lib/owes"
 import { terminalOpen } from "@/lib/terminal-state"
 import { awaitingReview, isReviewStep } from "@/lib/review"
-import { mentionedAgentIds, mentionPattern, namedAgentIds, withAttachments } from "@/lib/text"
+import { gistOf, mentionedAgentIds, mentionPattern, namedAgentIds, withAttachments } from "@/lib/text"
 import type {
   Ask,
   AskOption,
@@ -57,6 +57,7 @@ import type {
   LimitedRun,
   AgentStatus,
   Message,
+  MessageGist,
   Project,
   ProjectEnd,
   ProjectInfo,
@@ -141,6 +142,10 @@ type Agent = Omit<
   // This project's checker (「请验收时先复验」, the project settings): woken
   // to check a task when its owner asks for review. One per project.
   checker?: boolean
+  // This project's summary seat (「谁来补摘要句」, the project settings):
+  // woken with batches of long replies the rules found no gist in, to write
+  // one line for each (lib/summon.ts). One per project.
+  gister?: boolean
   // Names it had before, newest first: an @ to one still reaches it, unless
   // another seat has taken that name since.
   formerNames?: string[]
@@ -186,7 +191,11 @@ type Room = {
   summaryJob?: { agentId: string; upToSeq: number; flowsAt?: Record<string, number> }
 }
 
-type ProjectRecord = { id: string; name: string; dir?: string; createdAt: number }
+type ProjectRecord = { id: string; name: string; dir?: string; front?: true; createdAt: number }
+
+function orderProjects(list: ProjectRecord[]): ProjectRecord[] {
+  return [...list.filter((item) => item.front), ...list.filter((item) => !item.front)]
+}
 
 type Runtime = {
   dbBacked?: boolean
@@ -246,12 +255,20 @@ function runtime(): Runtime {
       dbSaveProject(first, 0, emptyState())
       rows = dbLoadProjects()
     }
-    const projects: ProjectRecord[] = rows.map((r) => ({
-      id: r.id,
-      name: r.name,
-      dir: r.dir,
-      createdAt: r.createdAt,
-    }))
+    let seenFront = false
+    const projects: ProjectRecord[] = orderProjects(
+      rows.map((r) => {
+        const isFront = Boolean(r.front && !seenFront)
+        if (isFront) seenFront = true
+        return {
+          id: r.id,
+          name: r.name,
+          dir: r.dir,
+          ...(isFront ? { front: true as const } : {}),
+          createdAt: r.createdAt,
+        }
+      }),
+    )
     const rooms = new Map(rows.map((r) => [r.id, loadRoomFromDb(r, prev?.rooms.get(r.id))]))
     const next: Runtime = { dbBacked: true, dataPath: currentDataPath, projects, rooms, bus, scope }
     globalStore.__benchRooms = next
@@ -322,6 +339,38 @@ export function setChecker(agentId: string, on: boolean) {
   return present(agent, Date.now())
 }
 
+// The project settings' 「谁来补摘要句」: this seat writes the one-line gist
+// of long replies the rules could not take one from, or nobody does. One per
+// project, like the checker.
+export function setGister(agentId: string, on: boolean) {
+  const agent = findAgent(agentId)
+  if (!agent) throw new ApiError(404, "这个席位不在了")
+  for (const other of room().state.agents) if (other.id !== agent.id) delete other.gister
+  if (on) agent.gister = true
+  else delete agent.gister
+  commit()
+  return present(agent, Date.now())
+}
+
+// The seat that writes gists here, if any.
+export function gisterSeat() {
+  return room().state.agents.find((agent) => agent.gister) ?? null
+}
+
+// A gist written for a message after it was posted (by the summary seat).
+// Not over one the author's own first line gave, nor on a recalled message.
+export function setMessageGist(messageId: string, gist: MessageGist) {
+  const current = room()
+  const hot = current.state.messages.find((item) => item.id === messageId)
+  const target = hot ?? dbGetMessage(current.id, messageId)
+  if (!target || target.recalled || target.gist?.by === "author") return false
+  target.gist = gist
+  dbPutMessage(current.id, target)
+  bumpRev()
+  commit()
+  return true
+}
+
 // The seat that checks tasks here, if any.
 export function checkerSeat() {
   return room().state.agents.find((agent) => agent.checker) ?? null
@@ -366,6 +415,8 @@ export function inRequest<T>(input: { agentId?: unknown; project?: unknown }, fn
   if (named) return inProject(findProject(named).id, fn)
   const all = runtime().projects
   if (all.length === 1) return inProject(all[0].id, fn)
+  const regular = all.filter((item) => !item.front)
+  if (regular.length === 1) return inProject(regular[0].id, fn)
   throw new ApiError(400, `没指明是哪个项目（有：${all.map((item) => item.name).join("、")}）`)
 }
 
@@ -377,10 +428,20 @@ function findProject(ref: string) {
   return found
 }
 
+export function resolveProjectInfo(ref: string): ProjectInfo {
+  return projectInfo(findProject(ref).id)
+}
+
 function projectInfo(id: string): ProjectInfo {
   const found = runtime().projects.find((item) => item.id === id)
   if (!found) throw new ApiError(404, "没有这个项目")
-  return { id: found.id, name: found.name, dir: found.dir, createdAt: found.createdAt }
+  return {
+    id: found.id,
+    name: found.name,
+    dir: found.dir,
+    ...(found.front ? { front: true as const } : {}),
+    createdAt: found.createdAt,
+  }
 }
 
 export function projectNameOf(id: string): string | null {
@@ -410,6 +471,7 @@ function isTaskStillWaitingReviewInProject(projectId: string, taskId: string): b
 
 function saveProjects() {
   const rt = runtime()
+  rt.projects = orderProjects(rt.projects)
   inTransaction(() => {
     for (let i = 0; i < rt.projects.length; i++) {
       const p = rt.projects[i]
@@ -527,7 +589,7 @@ export function setUserName(input: unknown) {
 
 export function listProjects(): Project[] {
   const now = Date.now()
-  return runtime().projects.map((item) =>
+  return orderProjects(runtime().projects).map((item) =>
     inProject(item.id, () => {
       const state = room().state
       const seats = state.agents.map((agent) => present(agent, now))
@@ -582,30 +644,55 @@ function lastEndOf(messages: Message[]): ProjectEnd | undefined {
   return { id: found.id, at: found.createdAt, name: found.authorName, color: found.authorColor, text: text.length > 140 ? `${text.slice(0, 139)}…` : text }
 }
 
+function resolveProjectDir(rawInput: unknown, fallback?: string): string | undefined {
+  if (rawInput === undefined) return fallback
+  const raw = (asString(rawInput) ?? "").replace(/^~(?=\/|$)/, homedir())
+  if (!raw) return undefined
+  if (!path.isAbsolute(raw)) throw new ApiError(400, "目录要填完整路径，比如 /home/you/project 或 C:\\work\\project")
+  const resolved = path.resolve(raw)
+  if (!existsSync(resolved)) throw new ApiError(400, `${resolved} 不存在`)
+  return resolved
+}
+
 function projectFields(body: Record<string, unknown>, current?: ProjectRecord) {
+  const isFront = Boolean(current?.front)
   const name = body.name === undefined && current ? current.name : clip(asString(body.name) ?? "", 24)
   if (!name) throw new ApiError(400, "给项目起个名字")
   if (/[「」"\n]/.test(name)) throw new ApiError(400, "项目名里不要有引号、「」或换行")
+  if (isFront && name !== "前台") throw new ApiError(400, "前台项目的名字固定为「前台」")
+  if (!isFront && name === "前台") throw new ApiError(400, "「前台」是保留名字；开启前台请传 front: true")
   const taken = runtime().projects.find((item) => item.name.toLowerCase() === name.toLowerCase() && item.id !== current?.id)
   if (taken) throw new ApiError(409, `已经有叫「${name}」的项目了`)
-  let dir = current?.dir
-  if (body.dir !== undefined) {
-    const raw = (asString(body.dir) ?? "").replace(/^~(?=\/|$)/, homedir())
-    if (!raw) dir = undefined
-    else {
-      if (!path.isAbsolute(raw)) throw new ApiError(400, "目录要填完整路径，比如 /home/you/project 或 C:\\work\\project")
-      const resolved = path.resolve(raw)
-      if (!existsSync(resolved)) throw new ApiError(400, `${resolved} 不存在`)
-      dir = resolved
-    }
-  }
+  const dir = resolveProjectDir(body.dir, current?.dir)
   return { name, dir }
 }
 
-export function createProject(input: unknown) {
-  const fields = projectFields(asRecord(input))
-  const record: ProjectRecord = { id: uid("p"), ...fields, createdAt: Date.now() }
+export function createProject(input: unknown): { project: ProjectInfo; existed?: true } {
+  const body = asRecord(input)
   const rt = runtime()
+  if (body.front === true) {
+    const existing = rt.projects.find((item) => item.front)
+    if (existing) return { project: projectInfo(existing.id), existed: true }
+    const nameTaken = rt.projects.find((item) => item.name === "前台")
+    if (nameTaken) throw new ApiError(409, "已经有叫「前台」的普通项目了，先给它改个名再开启前台")
+    const dir = resolveProjectDir(body.dir)
+    const record: ProjectRecord = {
+      id: uid("p"),
+      name: "前台",
+      ...(dir ? { dir } : {}),
+      front: true,
+      createdAt: Date.now(),
+    }
+    rt.projects.unshift(record)
+    rt.rooms.set(record.id, { id: record.id, state: emptyState() })
+    saveProjects()
+    return { project: projectInfo(record.id) }
+  }
+  if (body.front !== undefined && body.front !== false) {
+    throw new ApiError(400, "front 只能填 true")
+  }
+  const fields = projectFields(body)
+  const record: ProjectRecord = { id: uid("p"), ...fields, createdAt: Date.now() }
   rt.projects.push(record)
   rt.rooms.set(record.id, { id: record.id, state: emptyState() })
   saveProjects()
@@ -615,7 +702,10 @@ export function createProject(input: unknown) {
 export function updateProject(id: string, input: unknown) {
   const record = runtime().projects.find((item) => item.id === id)
   if (!record) throw new ApiError(404, "没有这个项目")
-  Object.assign(record, projectFields(asRecord(input), record))
+  const body = asRecord(input)
+  if (!record.front && body.front === true) throw new ApiError(400, "普通项目不能改成前台")
+  if (record.front && body.front === false) throw new ApiError(400, "前台标记不能去掉")
+  Object.assign(record, projectFields(body, record))
   saveProjects()
   inProject(id, () => {
     bumpRev()
@@ -628,8 +718,12 @@ export function updateProject(id: string, input: unknown) {
 // alone; they can join another project.
 export function deleteProject(id: string) {
   const rt = runtime()
-  if (!rt.rooms.has(id)) throw new ApiError(404, "没有这个项目")
+  const target = rt.projects.find((item) => item.id === id)
+  if (!target || !rt.rooms.has(id)) throw new ApiError(404, "没有这个项目")
   if (rt.projects.length === 1) throw new ApiError(400, "至少要留一个项目")
+  if (!target.front && rt.projects.filter((item) => !item.front && item.id !== id).length === 0) {
+    throw new ApiError(400, "至少要留一个项目")
+  }
   rt.projects = rt.projects.filter((item) => item.id !== id)
   rt.rooms.delete(id)
   dbDeleteProject(id)
@@ -661,6 +755,8 @@ export function pickProject(input: unknown): ProjectInfo {
   }
   const all = runtime().projects
   if (all.length === 1) return projectInfo(all[0].id)
+  const regular = all.filter((item) => !item.front)
+  if (regular.length === 1) return projectInfo(regular[0].id)
   const list = all.map((item) => `「${item.name}」${item.dir ? `（${item.dir}）` : ""}`).join("、")
   // Not 409: bridges from before projects read any 409 on join as "name taken".
   throw new ApiError(
@@ -761,6 +857,7 @@ function present(agent: Agent, now = Date.now()): PublicAgent {
     fullAccess: hasFull(agent.id) || undefined,
     autoFull: agent.autoFull || undefined,
     checker: agent.checker || undefined,
+    gister: agent.gister || undefined,
     terminal: terminalOpen(agent.id) || undefined,
     queuedCount: laneView?.queuedCount || undefined,
     queuePaused: laneView?.paused || undefined,
@@ -852,7 +949,7 @@ function talkSince(after: number) {
 // A message as an agent reads it: its id, so it can answer that one, and
 // what it was answering. The summary writer gets them without ids.
 // `viewer`: the seat the line is for, which a verdict on its own task names as 你.
-function talkLine(message: Message, ids = true, viewer?: string) {
+export function talkLine(message: Message, ids = true, viewer?: string) {
   const time = new Date(message.createdAt).toTimeString().slice(0, 5)
   const head = ids ? `${time} [${message.id}] ${message.authorName}` : `${time} ${message.authorName}`
   const answer = replyOf(message)
@@ -1127,6 +1224,18 @@ function checkName(name: string | undefined): asserts name is string {
 // Mentions are kept as seat ids; the name is only how they read. A message
 // is said in current names: an @ to a seat's former name becomes its name
 // now, so who it reaches is settled when it is sent.
+// The AI that last said something in this room and still has a seat here.
+function lastSpeaker() {
+  const { agents, messages } = room().state
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const message = messages[i]
+    if (message.kind === "system" || message.authorId === "human") continue
+    const agent = agents.find((item) => item.id === message.authorId)
+    if (agent && !agent.demo) return agent
+  }
+  return undefined
+}
+
 function lockMentions(text: string) {
   const agents = room().state.agents
   const current = new Set(agents.map((agent) => agent.name))
@@ -1185,7 +1294,7 @@ export function renameAgent(id: string, input: unknown) {
     }
   })
   if (agent.profile) writeSeatMarkdown(agent.id, agent.name, agent.role, agent.profile)
-  postSystem(`${old} 改名为 ${name}，之后 @${name}；@${old} 也还能找到它`)
+  postSystem(clip(`${old} 改名为 ${name}（@${old} 仍有效）`, 30))
   return { agent: present(agent) }
 }
 
@@ -1385,9 +1494,7 @@ export function rebindAgent(
   agent.lastSeenAt = Date.now()
   if (agent.status === "offline") agent.status = "idle"
   standbyOf().delete(agent.id)
-  postSystem(
-    `${agent.name} 切换客户端：${prevClient}（${prevModel}）→ ${input.agentName}（${agent.model}），席位身份、待办与长期记忆已接续`,
-  )
+  postSystem(clip(`${agent.name} 切到 ${input.agentName}（${clip(agent.model, 12)}）`, 30))
   leaveOtherProjects({ agentName: input.agentName, uuid: input.session }, agent.id)
   return { agent: present(agent), token: agent.token }
 }
@@ -1428,7 +1535,7 @@ export function restoreAgentBinding(id: string, index: number) {
   agent.lastSeenAt = Date.now()
   if (agent.status === "offline") agent.status = "idle"
   standbyOf().delete(agent.id)
-  postSystem(`${agent.name} 切回原客户端会话：${target.agentName}（${target.model}）`)
+  postSystem(clip(`${agent.name} 切回 ${target.agentName}（${clip(target.model, 12)}）`, 30))
   leaveOtherProjects({ agentName: target.agentName, uuid: target.session }, agent.id)
   return { agent: present(agent), restored: target, token: agent.token }
 }
@@ -1462,12 +1569,13 @@ export function setSeatModel(
   else if (pct === null) delete agent.compactPct
   agent.model = shown
   const said = [
-    sameModel ? "" : pick ? `改用 ${pick}` : "改回默认模型",
-    sameEffort ? "" : effort ? `思考强度 ${effort}` : "思考强度改回默认",
-    sameWindow ? "" : window ? `最大上下文 ${window / 10_000} 万` : "最大上下文改回模型自带的",
-    samePct ? "" : pct ? `用到 ${pct}% 时自动压缩` : "自动压缩改回客户端自己的设置",
+    sameModel ? "" : pick ? `用 ${clip(pick, 14)}` : "默认模型",
+    sameEffort ? "" : effort ? `强度 ${effort}` : "默认强度",
+    sameWindow ? "" : window ? `窗口 ${window / 10_000}万` : "默认窗口",
+    samePct ? "" : pct ? `${pct}%压缩` : "默认压缩",
   ].filter(Boolean)
-  postSystem(`${agent.name} 之后${said.join("，")}，下次被叫醒时生效`)
+  const fullModelMsg = `${agent.name} 设：${said.join("、")}（下次生效）`
+  postSystem(fullModelMsg.length <= 30 ? fullModelMsg : clip(`${agent.name} 已更新模型设置（下次生效）`, 30))
   return { agent: present(agent) }
 }
 
@@ -1513,6 +1621,63 @@ export function requireAgent(id: string, token: string) {
     throw new ApiError(401, "席位凭证不对，重新入座或检查 token")
   }
   return agent
+}
+
+// Guard for cross-project read-only tools (bench_overview / bench_peek): only a
+// seat sitting in the room's single reception project (front === true) may call
+// them. Seats in ordinary projects get 403; missing/bad credentials get 401.
+// Strictly read-only: updates no seenSeq, rev, or database state.
+export function requireFrontSeat(input: unknown): { seatId: string; seatName: string; frontProjectId: string } {
+  const body = asRecord(input)
+  const agentId = asString(body.agentId)
+  const token = asString(body.token)
+  if (!agentId || !token) throw new ApiError(401, "要带 agentId 和 token")
+  const projId = projectOfSeat(agentId)
+  if (!projId) throw new ApiError(401, "席位凭证不对，重新入座或检查 token")
+  const agent = inProject(projId, () => requireAgent(agentId, token))
+  const info = projectInfo(projId)
+  if (!info.front) {
+    throw new ApiError(403, "这两件跨项目工具只给「前台」房间里的席位用")
+  }
+  return { seatId: agent.id, seatName: agent.name, frontProjectId: projId }
+}
+
+// Calls in the current project that failed, were cut short on restart, or are
+// retrying right now, excluding failed/cut calls already superseded by a later
+// successful wake of that seat. Read-only.
+export function brokenCallsInRoom() {
+  const current = room()
+  const wokeBySeat = new Map(current.state.agents.map((a) => [a.id, a.wokeAt ?? 0]))
+  const out: {
+    messageId: string
+    seq: number
+    from: string
+    gist: string
+    seatId: string
+    seatName: string
+    state: CallState
+    at: number
+    note?: string
+  }[] = []
+  for (const message of current.state.messages) {
+    if (message.recalled) continue
+    for (const call of message.calls ?? []) {
+      if (call.state !== "failed" && call.state !== "cut" && call.state !== "retrying") continue
+      if (call.state !== "retrying" && call.at <= (wokeBySeat.get(call.id) ?? 0)) continue
+      out.push({
+        messageId: message.id,
+        seq: message.seq,
+        from: message.authorName,
+        gist: gist(message),
+        seatId: call.id,
+        seatName: call.name,
+        state: call.state,
+        at: call.at,
+        note: call.note,
+      })
+    }
+  }
+  return out
 }
 
 function actorFrom(input: unknown): Actor {
@@ -1658,7 +1823,7 @@ export function join(input: unknown) {
     authorName: "并坐",
     authorColor: "#8a8175",
     authorDemo: false,
-    text: `${name} 入座 · ${model} · ${role}${link ? ` · ${link.agentName}` : ""}`,
+    text: clip(`${name} 入座 · ${link ? link.agentName : model}${role ? ` · ${role}` : ""}`, 30),
     mentions: [],
   })
   bumpRev()
@@ -1788,7 +1953,7 @@ export function registerSession(input: unknown) {
   agent.agentName = link.agentName
   agent.session = link.uuid
   agent.lastSeenAt = Date.now()
-  if (changed) postSystem(`${agent.name} 报了 ${link.agentName}`)
+  if (changed) postSystem(clip(`${agent.name} 接入 ${link.agentName}`, 30))
   else {
     bumpRev()
     commit()
@@ -1920,7 +2085,14 @@ export function say(input: unknown, { final = false }: { final?: boolean } = {})
   // Ending the round is said in the open, starts with the marker, and calls
   // nobody; from then on agents' messages wake no one until the user speaks.
   const end = Boolean(agent) && (body.end === true || text.startsWith(END_MARK))
-  const said = end ? { text: clip(text.startsWith(END_MARK) ? text : `${END_MARK}${text}`, 4000), mentions: [] } : lockMentions(clip(text, 4000))
+  let said = end ? { text: clip(text.startsWith(END_MARK) ? text : `${END_MARK}${text}`, 4000), mentions: [] } : lockMentions(clip(text, 4000))
+  // The user's call (2026-11-15, t_bd01d3c1): said by the user to nobody and
+  // answering nothing, it goes to the last AI that spoke here. The @ is
+  // written into the text so the room and the seat both see who it reached.
+  if (actor.type === "human" && !replyTo && !said.mentions.length) {
+    const last = lastSpeaker()
+    if (last) said = lockMentions(clip(`@${last.name} ${text}`, 4000))
+  }
   if (end) room().state.relayClosed = true
   else if (actor.type === "human") room().state.relayClosed = undefined
   const message = appendMessage({
@@ -1937,6 +2109,7 @@ export function say(input: unknown, { final = false }: { final?: boolean } = {})
     // Said during a wake, by stdout or by its own bench_say: tie it to the steps.
     runId: agent ? activeRun(agent.id)?.id : undefined,
     runEnd: (final && Boolean(agent && activeRun(agent.id))) || undefined,
+    gist: agent ? gistFor(said.text) : undefined,
   })
   if (agent) agent.lastSeenAt = Date.now()
   if (actor.type === "human" && replyTo) answerAsk(replyTo, message)
@@ -1955,6 +2128,14 @@ export function say(input: unknown, { final = false }: { final?: boolean } = {})
     })
   }
   return { message }
+}
+
+// The gist a reply gets as it is posted: its own first line, when the
+// rules can take one out (lib/text.ts). Otherwise none, for now: a long one
+// may get one from the summary seat (lib/summon.ts noteGistless).
+function gistFor(text: string): MessageGist | undefined {
+  const line = gistOf(text)
+  return line ? { text: line, by: "author", at: Date.now() } : undefined
 }
 
 // ---- questions to the user (bench_ask) ----
@@ -2126,6 +2307,7 @@ export function recall(input: unknown) {
   message.mentions = []
   message.attachments = undefined
   message.ask = undefined
+  message.gist = undefined
   dbPutMessage(current.id, message)
   bumpRev()
   commit()

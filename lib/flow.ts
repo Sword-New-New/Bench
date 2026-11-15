@@ -75,13 +75,11 @@ const byTime = (a: Dated, b: Dated) => a.at - b.at
 // flow work adds it); read here so the picture shows it as soon as it is.
 type Waiting = Task & { after?: string[] }
 
-export function flowsOf(messages: Message[], tasks: Task[], seats: { id: string; name: string }[], userName: string): Flow[] {
-  const talk = messages.filter((message) => message.kind !== "system" && !message.recalled)
+// Reply chains: each message's chain is named by its first message (one that
+// answers nothing in the list). `talk` in time order; also used by
+// lib/digest.ts.
+export function chainsOf(talk: Message[]) {
   const byId = new Map(talk.map((message) => [message.id, message]))
-  const nameOf = new Map(seats.map((seat) => [seat.id, seat.name]))
-  for (const message of talk) if (!nameOf.has(message.authorId)) nameOf.set(message.authorId, message.authorName)
-  nameOf.set("human", userName)
-
   const rootOf = (message: Message) => {
     let at = message
     const seen = new Set<string>()
@@ -100,15 +98,38 @@ export function flowsOf(messages: Message[], tasks: Task[], seats: { id: string;
     if (list) list.push(message)
     else chains.set(root, [message])
   }
+  return { rootOf, chains }
+}
+
+// The ids of to-dos a message names (t_…).
+export function namedTasks(text: string) {
+  return text.match(TASK_ID) ?? []
+}
+
+// The message that first names each todo: the todo belongs to its chain.
+export function firstNamed(talk: Message[], tasks: Task[]) {
+  const known = new Set(tasks.map((task) => task.id))
+  const born = new Map<string, Message>()
+  for (const message of talk) {
+    for (const id of namedTasks(message.text)) {
+      if (known.has(id) && !born.has(id)) born.set(id, message)
+    }
+  }
+  return born
+}
+
+export function flowsOf(messages: Message[], tasks: Task[], seats: { id: string; name: string }[], userName: string): Flow[] {
+  const talk = messages.filter((message) => message.kind !== "system" && !message.recalled)
+  const byId = new Map(talk.map((message) => [message.id, message]))
+  const nameOf = new Map(seats.map((seat) => [seat.id, seat.name]))
+  for (const message of talk) if (!nameOf.has(message.authorId)) nameOf.set(message.authorId, message.authorName)
+  nameOf.set("human", userName)
+
+  const { rootOf, chains } = chainsOf(talk)
 
   // The message that first names each todo.
   const taskById = new Map(tasks.map((task) => [task.id, task]))
-  const born = new Map<string, Message>()
-  for (const message of talk) {
-    for (const id of message.text.match(TASK_ID) ?? []) {
-      if (taskById.has(id) && !born.has(id)) born.set(id, message)
-    }
-  }
+  const born = firstNamed(talk, tasks)
 
   const flows: Flow[] = []
   for (const [rootId, chain] of chains) {

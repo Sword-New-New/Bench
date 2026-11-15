@@ -40,6 +40,9 @@ export type PublicAgent = {
   // This project's checker: woken to check a task before the user signs it
   // off (「请验收时先复验」). One seat per project at most.
   checker?: boolean
+  // This project's summary seat: writes the one-line gist of long replies
+  // the rules found none in (「谁来补摘要句」). One seat per project at most.
+  gister?: boolean
   // Its session is open in a terminal the room holds (lib/terminal.ts).
   terminal?: boolean
   // Messages queued in its wake lane, and whether its lane is paused.
@@ -175,6 +178,8 @@ export type Ask = {
   handed?: boolean
 }
 
+export type MessageGist = { text: string; by: string; at: number }
+
 export type Message = {
   id: string
   seq: number
@@ -195,6 +200,13 @@ export type Message = {
   // bench_say in the middle of the run has the runId but not this. The page
   // keeps the 「正在做」 bubble until it sees one.
   runEnd?: boolean
+  // The one line it shows folded in the room (t_83c6fcc9). Only on an
+  // agent's chat messages: taken from its first line by fixed rules when it
+  // is posted (lib/text.ts gistOf, by "author"), or written later by the
+  // project's summary seat (by its name). Display only: agents get the full
+  // text, search and to-dos don't use it, and @ in it calls nobody. Without
+  // one the page works it out with the same gistOf.
+  gist?: MessageGist
   attachments?: Attachment[]
   ask?: Ask
   // The user took it back: text and attachments are gone, the line stays.
@@ -325,6 +337,8 @@ export type ProjectInfo = {
   id: string
   name: string
   dir?: string
+  // The room's single reception project (「前台」), pinned at the top of the rail.
+  front?: true
   createdAt: number
 }
 
@@ -433,7 +447,7 @@ export type Run = {
   agentName: string
   // compact: the user had the room compact its context (lib/summon.ts compactSession).
   // goal: the user typed /goal for it (lib/summon.ts setGoal); `ask` is what came after.
-  purpose: "reply" | "summary" | "private" | "compact" | "goal" | "check"
+  purpose: "reply" | "summary" | "private" | "compact" | "goal" | "check" | "gist"
   // A private run: what the user said and what it answered.
   ask?: string
   answer?: string

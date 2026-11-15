@@ -131,3 +131,44 @@ export function copyText(part: { text: string; lang: string }) {
   if (prompted.length === 0) return part.text
   return prompted.map((line) => line.replace(/^\s*[$>]\s/, "")).join("\n")
 }
+
+// The one line a reply shows folded in the room: its conclusion
+// (Message.gist; t_83c6fcc9). The rules say the author's first line is that
+// conclusion; this takes it out by fixed rules, and the page uses the same
+// function for messages that have no gist stored (old ones). No model call.
+//
+//   - 【本轮结束】 at the start is dropped;
+//   - the first paragraph, if it is short (GIST_MAX) and is not a heading,
+//     table, list, quote or code block;
+//   - otherwise its first sentence (to 。？！), if that is short;
+//   - otherwise nothing: the reply opens with structure or a long run-on, and
+//     a summary seat may fill one in later (lib/summon.ts).
+export const GIST_MAX = 120
+const GIST_END = "【本轮结束】"
+// Lines that open structure, not a sentence: # heading, | table, - * + list,
+// 1. 1、 1) list, > quote, ``` code, and a line that is only **bold** (used as
+// a heading).
+const STRUCTURE = /^(?:#{1,6}\s|\||[-*+]\s|\d+[.、)）]\s?|>|```|~~~|\*\*[^*\n]+\*\*[:：]?\s*$)/
+
+export function gistOf(text: string | undefined): string | undefined {
+  if (!text) return undefined
+  let body = text.trim()
+  if (body.startsWith(GIST_END)) body = body.slice(GIST_END.length).trim()
+  if (!body) return undefined
+  const first = body.split(/\n\s*\n/)[0].trim()
+  const opening = first.split("\n")[0].trim()
+  if (STRUCTURE.test(opening)) return undefined
+  const flat = (part: string) => part.replace(/\s*\n\s*/g, " ").trim()
+  // A paragraph whose later lines turn into a list or table is cut there.
+  const lines = first.split("\n")
+  const prose: string[] = []
+  for (const line of lines) {
+    if (prose.length > 0 && STRUCTURE.test(line.trim())) break
+    prose.push(line)
+  }
+  const paragraph = flat(prose.join("\n"))
+  if (paragraph && paragraph.length <= GIST_MAX) return paragraph
+  const sentence = paragraph.match(/^.+?[。？！?!](?=\s|$|[^。？！?!])/u)?.[0]?.trim()
+  if (sentence && sentence.length <= GIST_MAX) return sentence
+  return undefined
+}

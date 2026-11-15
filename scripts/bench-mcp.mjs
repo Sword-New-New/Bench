@@ -583,6 +583,25 @@ const tools = [
     },
   },
   {
+    name: "bench_overview",
+    description:
+      "只读查看全部项目一览（仅「前台」项目里的席位可用，普通项目的席位调用会返回 403）：每个项目的 id、名字、目录、席位状态与欠活、等用户处理的提问/权限/验收数、未完成待办数、最后动静时间与房间摘要开头。",
+    inputSchema: { type: "object", properties: {} },
+  },
+  {
+    name: "bench_peek",
+    description:
+      "只读查看单个项目的完整近况（仅「前台」项目里的席位可用，普通项目的席位调用会返回 403）：房间摘要全文、未完成待办与验收/复验状态、等用户的每一件（提问与选项、权限申请、等验收待办）、各席位状态与欠活、没叫成或中途断了的点名、最近 30 条对话（带消息 id，支持 before 往前翻页）。",
+    inputSchema: {
+      type: "object",
+      properties: {
+        project: { type: "string", description: "要看的项目名字或 id（p_…）" },
+        before: { type: "number", description: "可选：往前翻看更早对话时填上一页最早一条的 seq" },
+      },
+      required: ["project"],
+    },
+  },
+  {
     name: "bench_leave",
     description: "离开房间。只在用户明确让你离席时调用；一次回答结束不用离席。",
     inputSchema: { type: "object", properties: {} },
@@ -890,6 +909,17 @@ async function runTool(name, args = {}, signal) {
         ? `最近一次唤起：${data.lastRun.state === "done" ? "成功" : data.lastRun.state === "running" ? "还在跑" : "没成功"} · ${data.lastRun.took} · ${data.lastRun.note}（过程：${ROOM}/api/v1/runs/${data.lastRun.id}）`
         : "最近一次唤起：还没被唤起过"
       return [`${data.seat} 的自检`, ...lines, run, data.summary].join("\n")
+    }
+    case "bench_overview": {
+      const data = await seatCall("/api/v1/overview", {})
+      return data.text
+    }
+    case "bench_peek": {
+      const data = await seatCall("/api/v1/peek", {
+        project: args.project,
+        before: args.before !== undefined ? args.before : undefined,
+      })
+      return data.text
     }
     case "bench_leave": {
       await seatCall("/api/v1/leave", {})

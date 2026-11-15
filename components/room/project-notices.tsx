@@ -124,9 +124,9 @@ function NoticeRow({ item }: { item: (typeof notices)[number] }) {
             <span className="pn-core size-2.5 rounded-full" />
           </span>
           <span className="pn-words flex min-w-0 items-baseline gap-2">
-            <span className="max-w-[9rem] shrink-0 truncate text-[11px] font-medium text-muted-foreground">{item.project}</span>
-            <span className="shrink-0 text-[13px] font-semibold text-foreground">{item.title}</span>
-            <span className="min-w-0 truncate text-[13px] text-muted-foreground">{item.body}</span>
+            <span className="max-w-[9rem] shrink-0 truncate text-[0.6875rem] font-medium text-muted-foreground">{item.project}</span>
+            <span className="shrink-0 text-[0.8125rem] font-semibold text-foreground">{item.title}</span>
+            <span className="min-w-0 truncate text-[0.8125rem] text-muted-foreground">{item.body}</span>
           </span>
         </div>
       </div>

@@ -500,7 +500,7 @@ export function Thread({
                       ? "一件事一行：谁在做、做到哪、哪里在等你"
                       : "按时间排的群聊"
                 }
-                className={`rounded-full px-2.5 py-0.5 text-[11px] transition-colors ${
+                className={`rounded-full px-2.5 py-0.5 text-[0.6875rem] transition-colors ${
                   view === value ? "bg-foreground text-background" : "text-muted-foreground hover:text-foreground"
                 }`}
                 onClick={() => onView(value)}
@@ -523,7 +523,7 @@ export function Thread({
               role="radio"
               aria-checked={detail === value}
               title={value ? "把每个模型做了什么也展开在群聊里，只有你看得到" : "群聊里只放回答"}
-              className={`rounded-full px-2.5 py-0.5 text-[11px] transition-colors ${
+              className={`rounded-full px-2.5 py-0.5 text-[0.6875rem] transition-colors ${
                 detail === value ? "bg-foreground text-background" : "text-muted-foreground hover:text-foreground"
               }`}
               onClick={() => onDetail(value)}
@@ -587,7 +587,7 @@ export function Thread({
                   >
                     <div className="flex items-center justify-between gap-2">
                       <span className="font-medium">{hit.authorName}</span>
-                      <span className="text-[10px] text-muted-foreground">{clock(hit.createdAt)}</span>
+                      <span className="text-[0.625rem] text-muted-foreground">{clock(hit.createdAt)}</span>
                     </div>
                     <p className="line-clamp-2 text-muted-foreground">{previewText(hit)}</p>
                   </button>
@@ -785,7 +785,7 @@ function ReplyChain({
       ref={top}
       className="my-5 overflow-clip rounded-2xl border border-l-[3px] border-foreground/15 border-l-primary/60 bg-card shadow-[0_1px_2px_rgb(0_0_0/0.06),0_18px_36px_-20px_rgb(0_0_0/0.28)]"
     >
-      <header className="flex items-center gap-2 border-b border-foreground/10 bg-muted/60 px-4 py-2 text-[11px] text-muted-foreground">
+      <header className="flex items-center gap-2 border-b border-foreground/10 bg-muted/60 px-4 py-2 text-[0.6875rem] text-muted-foreground">
         <Reply className="size-3 shrink-0" />
         <span className="min-w-0 flex-1 truncate">
           <span className="font-medium text-foreground">回复链</span> · {chain.length} 条 · {people.join("、")} · 最新{" "}
@@ -809,7 +809,7 @@ function ReplyChain({
           <Reveal open={!open}>
             <button
               type="button"
-              className="flex w-full items-center gap-2 border-t border-foreground/8 px-4 py-1.5 text-[11px] text-muted-foreground hover:bg-muted/60 hover:text-foreground"
+              className="flex w-full items-center gap-2 border-t border-foreground/8 px-4 py-1.5 text-[0.6875rem] text-muted-foreground hover:bg-muted/60 hover:text-foreground"
               onClick={toggle}
             >
               <span className="h-px flex-1 border-t border-dashed border-current/40" />
@@ -917,7 +917,7 @@ function ChainLine({
           {message.runId && !detail ? (
             <button
               type="button"
-              className="flex items-center gap-1 rounded-md px-1 text-[11px] text-muted-foreground hover:bg-muted hover:text-foreground"
+              className="flex items-center gap-1 rounded-md px-1 text-[0.6875rem] text-muted-foreground hover:bg-muted hover:text-foreground"
               onClick={() => message.runId && onOpenRun(message.runId)}
             >
               <ListTree className="size-3" />
@@ -926,7 +926,7 @@ function ChainLine({
           ) : null}
           <button
             type="button"
-            className="flex items-center gap-1 rounded-md px-1 text-[11px] text-muted-foreground hover:bg-muted hover:text-foreground"
+            className="flex items-center gap-1 rounded-md px-1 text-[0.6875rem] text-muted-foreground hover:bg-muted hover:text-foreground"
             onClick={() => onReply(message)}
             aria-label="回复这条"
           >
@@ -1095,7 +1095,7 @@ function MessageRow({
   const replyButton = (
     <button
       type="button"
-      className="flex items-center gap-1 rounded-md px-1 text-[11px] text-muted-foreground hover:bg-muted hover:text-foreground"
+      className="flex items-center gap-1 rounded-md px-1 text-[0.6875rem] text-muted-foreground hover:bg-muted hover:text-foreground"
       onClick={() => onReply(message)}
       aria-label="回复这条"
     >
@@ -1117,7 +1117,7 @@ function MessageRow({
           {message.attachments?.length ? <MessageFiles files={message.attachments} align="end" folded={folded(fold)} /> : null}
           <Reached message={message} align="end" />
           <Calls message={message} align="end" />
-          <div className="mt-1 flex items-center justify-end gap-2 text-[11px] text-muted-foreground">
+          <div className="mt-1 flex items-center justify-end gap-2 text-[0.6875rem] text-muted-foreground">
             <FoldButton fold={fold} />
             <RecallButton message={message} />
             {replyButton}
@@ -1193,7 +1193,7 @@ function MessageRow({
             // How it got there: the tool calls of the wake that wrote this.
             <button
               type="button"
-              className="flex items-center gap-1 rounded-md px-1 text-[11px] text-muted-foreground hover:bg-muted hover:text-foreground"
+              className="flex items-center gap-1 rounded-md px-1 text-[0.6875rem] text-muted-foreground hover:bg-muted hover:text-foreground"
               onClick={() => message.runId && onOpenRun(message.runId)}
             >
               <ListTree className="size-3" />
@@ -1269,7 +1269,7 @@ function RecallButton({ message }: { message: Message }) {
   return (
     <button
       type="button"
-      className="flex items-center gap-1 rounded-md px-1 text-[11px] text-muted-foreground hover:bg-muted hover:text-foreground"
+      className="flex items-center gap-1 rounded-md px-1 text-[0.6875rem] text-muted-foreground hover:bg-muted hover:text-foreground"
       onClick={() => void recallMessage(message)}
       aria-label="撤回这条"
     >
@@ -1313,7 +1313,7 @@ function Reached({ message, align = "start" }: { message: Message; align?: "star
   const names = list.map((item) => item.name).join("、")
   return (
     <p
-      className={`mt-1 flex animate-in items-center gap-1 text-[11px] text-emerald-700 duration-300 fade-in dark:text-emerald-400 ${
+      className={`mt-1 flex animate-in items-center gap-1 text-[0.6875rem] text-emerald-700 duration-300 fade-in dark:text-emerald-400 ${
         align === "end" ? "justify-end" : ""
       }`}
       title={`${names} 正在干活，这条在它这一轮中途就送进去了，不用等它做完`}
@@ -1360,7 +1360,7 @@ function Calls({ message, align = "start" }: { message: Message; align?: "start"
   return (
     <p
       data-calls
-      className={`mt-1 flex flex-wrap items-center gap-x-2.5 gap-y-0.5 text-[11px] leading-4 ${align === "end" ? "justify-end" : ""}`}
+      className={`mt-1 flex flex-wrap items-center gap-x-2.5 gap-y-0.5 text-[0.6875rem] leading-4 ${align === "end" ? "justify-end" : ""}`}
     >
       {list.map((call) => {
         const look = CALL_LOOK[call.state]

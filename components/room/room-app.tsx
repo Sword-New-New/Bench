@@ -1,7 +1,7 @@
 "use client"
 
 import { type ComponentProps, startTransition, useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react"
-import { Gauge, ListTodo, MessageSquare, Monitor, Moon, Plug, Settings, Smartphone, Sparkles, Sun, TerminalSquare, Users } from "lucide-react"
+import { Gauge, ListTodo, MessageSquare, Monitor, Moon, Plug, Settings, Smartphone, Sparkles, Sun, TerminalSquare, Type, Users } from "lucide-react"
 import { useTheme } from "next-themes"
 import { toast } from "sonner"
 
@@ -9,6 +9,7 @@ import { AdaptersDialog } from "@/components/room/adapters-dialog"
 import { Composer } from "@/components/room/composer"
 import { draft, useDraft } from "@/components/room/draft"
 import { Ambient, FLOW_EVENT, flowOn, setFlow } from "@/components/room/ambient"
+import { FONT_SIZES, setFontSize, useFontSize, type FontSizeId } from "@/components/room/font-size"
 import { ProjectNotices } from "@/components/room/project-notices"
 import { notifyOn, notifySupported, onNotifyChange, setNotify, useProjectNotices } from "@/components/room/notify"
 import { JoinDialog } from "@/components/room/join-dialog"
@@ -238,6 +239,7 @@ export function RoomApp() {
   const [highlight, setHighlight] = useState<string | null>(null)
   const [adapters, setAdapters] = useState<AdapterInfo[] | null>(null)
   const { theme, setTheme } = useTheme()
+  const fontSize = useFontSize()
   const composerRef = useRef<HTMLTextAreaElement>(null)
   const pullRef = useRef<() => void>(() => {})
 
@@ -751,6 +753,21 @@ export function RoomApp() {
                 ) : null}
               </DropdownMenuGroup>
               <DropdownMenuSeparator />
+              <DropdownMenuGroup>
+                <DropdownMenuLabel className="flex items-center gap-1.5">
+                  <Type className="size-3.5" />
+                  字号
+                </DropdownMenuLabel>
+                {/* Stays open: the page resizes behind it as you pick. */}
+                <DropdownMenuRadioGroup value={fontSize} onValueChange={(value) => setFontSize(value as FontSizeId)}>
+                  {FONT_SIZES.map((size) => (
+                    <DropdownMenuRadioItem key={size.id} value={size.id}>
+                      {size.label}
+                    </DropdownMenuRadioItem>
+                  ))}
+                </DropdownMenuRadioGroup>
+              </DropdownMenuGroup>
+              <DropdownMenuSeparator />
               {canNotify ? (
                 <DropdownMenuCheckboxItem
                   checked={notify}
@@ -1091,7 +1108,7 @@ export function RoomApp() {
             <button
               key={item.id}
               type="button"
-              className={`flex flex-col items-center gap-0.5 py-2 text-[11px] ${on ? "text-foreground" : "text-muted-foreground"}`}
+              className={`flex flex-col items-center gap-0.5 py-2 text-[0.6875rem] ${on ? "text-foreground" : "text-muted-foreground"}`}
               onClick={() => setTab(item.id)}
               aria-current={on ? "page" : undefined}
             >

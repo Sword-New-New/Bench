@@ -47,7 +47,7 @@ export function SpeedLine({ speed, color, now }: { speed: Speed | undefined; col
     // Inside the entry's button, so a click here must not also @ the client.
     // The settings menu opens the same board for keyboards.
     <span
-      className="mt-1 flex cursor-pointer items-baseline gap-1.5 text-[11px] leading-4 text-muted-foreground hover:text-foreground"
+      className="mt-1 flex cursor-pointer items-baseline gap-1.5 text-[0.6875rem] leading-4 text-muted-foreground hover:text-foreground"
       title={`最近一次 ${speed.tps} tok/s（${speed.model}），近 30 次中位 ${speed.median} tok/s${wait ? `，${wait}` : ""}，${when}。点开测速台`}
       onClick={(event) => {
         event.stopPropagation()

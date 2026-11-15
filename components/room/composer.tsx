@@ -245,7 +245,7 @@ export function Composer({
                 回复 <span className="font-medium text-foreground">{reply.authorName}</span>：{previewText(reply)}
               </span>
               {agents.some((agent) => agent.id === reply.authorId) ? (
-                <span className="shrink-0 text-[11px]">发出去就会叫醒它，不用 @</span>
+                <span className="shrink-0 text-[0.6875rem]">发出去就会叫醒它，不用 @</span>
               ) : null}
               <button type="button" className="rounded p-0.5 hover:bg-muted" onClick={onClearReply} aria-label="取消回复">
                 <X className="size-3.5" />
@@ -400,7 +400,7 @@ export function Composer({
         </div>
       </div>
       <Reveal open={slash !== null}>
-        <p className="pill mx-auto mt-1.5 w-fit max-w-3xl rounded-full px-3 py-0.5 text-[11px] text-muted-foreground">
+        <p className="pill mx-auto mt-1.5 w-fit max-w-3xl rounded-full px-3 py-0.5 text-[0.6875rem] text-muted-foreground">
           {slash === null
             ? null
             : slash.targets.length === 0
@@ -411,13 +411,13 @@ export function Composer({
         </p>
       </Reveal>
       <Reveal open={unknown.length > 0}>
-        <p className="pill mx-auto mt-1.5 w-fit max-w-3xl rounded-full px-3 py-0.5 text-[11px] text-amber-700 dark:text-amber-300">
+        <p className="pill mx-auto mt-1.5 w-fit max-w-3xl rounded-full px-3 py-0.5 text-[0.6875rem] text-amber-700 dark:text-amber-300">
           房间里还没有 {unknown.map((name) => `@${name}`).join("、")}
           {fallback ? `，会改叫 @${fallback.name}` : "，这句不会叫醒谁"}
         </p>
       </Reveal>
       <Reveal open={Boolean(fallback) && unknown.length === 0 && (value.trim().length > 0 || files.length > 0)}>
-        <p className="pill mx-auto mt-1.5 w-fit max-w-3xl rounded-full px-3 py-0.5 text-[11px] text-muted-foreground">
+        <p className="pill mx-auto mt-1.5 w-fit max-w-3xl rounded-full px-3 py-0.5 text-[0.6875rem] text-muted-foreground">
           没 @ 人，发给 @{fallback?.name}
         </p>
       </Reveal>

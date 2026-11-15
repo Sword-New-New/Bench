@@ -87,7 +87,7 @@ export function AdaptersDialog({
                     {kind ? `${kind.label} · ${kind.harness}` : ""}
                   </span>
                   {row.installed === false ? (
-                    <span className="shrink-0 rounded-full bg-amber-500/12 px-2 py-0.5 text-[10px] text-amber-700 dark:text-amber-300">
+                    <span className="shrink-0 rounded-full bg-amber-500/12 px-2 py-0.5 text-[0.625rem] text-amber-700 dark:text-amber-300">
                       未安装
                     </span>
                   ) : null}

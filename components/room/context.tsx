@@ -111,7 +111,7 @@ export function ContextLine({ context, now }: { context: SeatContext | undefined
   if (!context) return null
   const { near, mark, title, amount } = contextFacts(context, now)
   return (
-    <span className="mt-0.5 flex items-center gap-1.5 text-[11px] leading-4 text-muted-foreground" title={title}>
+    <span className="mt-0.5 flex items-center gap-1.5 text-[0.6875rem] leading-4 text-muted-foreground" title={title}>
       <span className="shrink-0">上下文</span>
       <Meter context={context} near={near} mark={mark} className="h-1.5 w-14" />
       <span className="min-w-0 truncate tabular-nums">{amount}</span>

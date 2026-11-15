@@ -136,8 +136,8 @@ function KindTile({
     >
       <Avatar name={kind.label} color={kind.color} kind={kind} size="sm" />
       <span className="min-w-0 flex-1">
-        <span className="block truncate text-[13px] font-medium leading-tight">{kind.label}</span>
-        <span className="block truncate text-[11px] text-muted-foreground">
+        <span className="block truncate text-[0.8125rem] font-medium leading-tight">{kind.label}</span>
+        <span className="block truncate text-[0.6875rem] text-muted-foreground">
           {seated > 0 ? `已接入 ${seated} 个` : kind.harness}
         </span>
       </span>
@@ -279,7 +279,7 @@ export function JoinDialog({
             ))}
           </div>
           {joined.length ? (
-            <p className="text-[11px] leading-4 text-muted-foreground">
+            <p className="text-[0.6875rem] leading-4 text-muted-foreground">
               已入座：{joined.map((kind) => kind.label).join("、")}（要加开去左栏点「开新会话」）。
             </p>
           ) : null}

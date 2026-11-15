@@ -58,7 +58,7 @@ export function ProjectMenu({
       >
         <span className="min-w-0">
           {/* On xl the project rail already shows the name; the path and the menu stay. */}
-          <span className="block truncate text-[15px] leading-tight font-semibold xl:hidden">{current?.name ?? "并坐"}</span>
+          <span className="block truncate text-[0.9375rem] leading-tight font-semibold xl:hidden">{current?.name ?? "并坐"}</span>
           <span className="hidden truncate text-xs text-muted-foreground sm:block">{placeLine(current)}</span>
         </span>
         <ChevronsUpDown className="size-3.5 shrink-0 text-muted-foreground" />
@@ -113,7 +113,7 @@ export function ProjectMenu({
 export function ProjectPlace({ project }: { project: ProjectInfo | null }) {
   return (
     <span className="hidden min-w-0 lg:block" title={project?.dir}>
-      <span className="block truncate text-[15px] leading-tight font-semibold xl:hidden">{project?.name ?? "并坐"}</span>
+      <span className="block truncate text-[0.9375rem] leading-tight font-semibold xl:hidden">{project?.name ?? "并坐"}</span>
       <span className="block truncate text-xs text-muted-foreground">{placeLine(project)}</span>
     </span>
   )
@@ -299,7 +299,7 @@ export function ProjectDialog({
                 {browsing ? "选择中…" : "浏览"}
               </Button>
             </div>
-            <p className="text-[11px] leading-4 text-muted-foreground">
+            <p className="text-[0.6875rem] leading-4 text-muted-foreground">
               同目录 AI 入座自动归入此项目，后台新开会话也默认在此。
             </p>
           </div>
@@ -323,7 +323,7 @@ export function ProjectDialog({
                   ))}
                 </SelectContent>
               </Select>
-              <p className="text-[11px] leading-4 text-muted-foreground">
+              <p className="text-[0.6875rem] leading-4 text-muted-foreground">
                 请验收时先叫醒它后台验一遍（耗一次叫醒额度，选便宜模型；它自己的待办不复验）。
               </p>
             </div>
@@ -348,7 +348,7 @@ export function ProjectDialog({
                   ))}
                 </SelectContent>
               </Select>
-              <p className="text-[11px] leading-4 text-muted-foreground">
+              <p className="text-[0.6875rem] leading-4 text-muted-foreground">
                 长回复首行非结论时，攒几条叫醒它补一句摘要（耗叫醒额度，选便宜模型）。
               </p>
             </div>

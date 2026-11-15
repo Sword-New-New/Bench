@@ -155,9 +155,9 @@ function FlowCard({
         >
           <ChevronDown className={`size-4 shrink-0 text-muted-foreground transition-transform motion-reduce:transition-none ${open ? "" : "-rotate-90"}`} />
           <span className="min-w-0 truncate text-sm font-medium">{note?.title ?? flow.title}</span>
-          <span className="shrink-0 text-[11px] text-muted-foreground tabular-nums">{clock(flow.at)} 起</span>
+          <span className="shrink-0 text-[0.6875rem] text-muted-foreground tabular-nums">{clock(flow.at)} 起</span>
           {flow.waiting > 0 ? (
-            <span className="shrink-0 rounded-full bg-amber-500/15 px-1.5 text-[11px] font-medium text-amber-700 dark:text-amber-300">
+            <span className="shrink-0 rounded-full bg-amber-500/15 px-1.5 text-[0.6875rem] font-medium text-amber-700 dark:text-amber-300">
               等你 {flow.waiting}
             </span>
           ) : null}
@@ -167,7 +167,7 @@ function FlowCard({
               return (
                 <span
                   key={lane.id}
-                  className="grid size-4 place-items-center rounded-full text-[8px] font-semibold text-background ring-2 ring-background"
+                  className="grid size-4 place-items-center rounded-full text-[0.5rem] font-semibold text-background ring-2 ring-background"
                   style={{ background: color }}
                   title={name}
                 >
@@ -180,7 +180,7 @@ function FlowCard({
         {open && hasHuman ? (
           <button
             type="button"
-            className="pill flex shrink-0 items-center gap-1 rounded-full px-2 py-0.5 text-[11px] text-muted-foreground hover:text-foreground"
+            className="pill flex shrink-0 items-center gap-1 rounded-full px-2 py-0.5 text-[0.6875rem] text-muted-foreground hover:text-foreground"
             title={humanAt === "center" ? "改成你那一列在最左" : "改成你那一列在中间"}
             onClick={onFlipHuman}
           >
@@ -197,7 +197,7 @@ function FlowCard({
           title={`${note.by} 写于 ${clock(note.at)}，随房间摘要一起写`}
         >
           {note.text}
-          {flow.lastAt > note.upToAt ? <span className="ml-1.5 whitespace-nowrap text-[11px] text-muted-foreground/70">· 之后又有新动静</span> : null}
+          {flow.lastAt > note.upToAt ? <span className="ml-1.5 whitespace-nowrap text-[0.6875rem] text-muted-foreground/70">· 之后又有新动静</span> : null}
         </p>
       ) : null}
       <Reveal open={open}>{open ? <FlowGraph key={humanAt} flow={flow} names={note?.nodes} humanAt={humanAt} look={look} onOpen={onOpen} /> : null}</Reveal>
@@ -285,7 +285,7 @@ function FlowGraph({
           const showTime = index === 0 || minute !== clock(flow.nodes[index - 1].at)
           const row = index + 2
           return [
-            <span key={`${node.id}:t`} className="pt-2 text-[10px] text-muted-foreground tabular-nums" style={{ gridRow: row, gridColumn: 1 }}>
+            <span key={`${node.id}:t`} className="pt-2 text-[0.625rem] text-muted-foreground tabular-nums" style={{ gridRow: row, gridColumn: 1 }}>
               {showTime ? minute : ""}
             </span>,
             <Block
@@ -343,9 +343,9 @@ function Block({
       onClick={() => node.messageId && onOpen(node.messageId)}
     >
       <span className={`block ${node.state === "done" ? "opacity-55" : ""}`}>
-        <span className="block truncate text-[10px] text-muted-foreground">{kind}</span>
-        <span className="line-clamp-2 text-[12.5px] leading-[1.35] font-semibold">{name ?? node.title}</span>
-        {node.note ? <span className={`mt-0.5 block truncate text-[11px] ${look.note}`}>{node.note}</span> : null}
+        <span className="block truncate text-[0.625rem] text-muted-foreground">{kind}</span>
+        <span className="line-clamp-2 text-[0.78125rem] leading-[1.35] font-semibold">{name ?? node.title}</span>
+        {node.note ? <span className={`mt-0.5 block truncate text-[0.6875rem] ${look.note}`}>{node.note}</span> : null}
       </span>
     </button>
   )

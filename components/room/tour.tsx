@@ -412,7 +412,7 @@ export function Tour() {
           {step.title}
         </h2>
         <p
-          className={`${centered ? "text-center" : ""} mt-2 text-[13px] leading-6 text-muted-foreground`}
+          className={`${centered ? "text-center" : ""} mt-2 text-[0.8125rem] leading-6 text-muted-foreground`}
         >
           {step.bodies?.[hit] ?? step.body}
         </p>

@@ -319,7 +319,7 @@ export function SpawnDialog({
                 {from && mode === "same" ? <span className="font-sans text-muted-foreground">（与 {from.name} 同目录）</span> : null}
               </p>
             ) : null}
-            <p className={`text-[11px] leading-4 ${blocked ? "text-amber-700 dark:text-amber-400" : "text-muted-foreground"}`}>
+            <p className={`text-[0.6875rem] leading-4 ${blocked ? "text-amber-700 dark:text-amber-400" : "text-muted-foreground"}`}>
               {noFolder && mode !== "temp" && mode !== "path"
                 ? "项目未设目录，请选临时目录或指定目录。"
                 : blocked

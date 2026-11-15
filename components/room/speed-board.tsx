@@ -298,7 +298,7 @@ function Segmented<T extends string>({
             type="button"
             onClick={() => onChange(opt.value)}
             className={`cursor-pointer rounded-md font-medium whitespace-nowrap transition-colors ${
-              small ? "px-2.5 py-1 text-xs" : "px-2.5 py-1 text-xs sm:text-[13px]"
+              small ? "px-2.5 py-1 text-xs" : "px-2.5 py-1 text-xs sm:text-[0.8125rem]"
             } ${active ? "bg-foreground text-background shadow-xs" : "text-muted-foreground hover:text-foreground"}`}
           >
             {opt.label}
@@ -927,25 +927,25 @@ export function SpeedBoard({ embedded = false, refreshSignal = 0 }: SpeedBoardPr
 
                   <div className="mt-4 grid grid-cols-3 justify-between gap-2 border-t border-dashed pt-3 sm:grid-cols-5">
                     <div>
-                      <span className="block text-[11px] text-muted-foreground">中位数</span>
+                      <span className="block text-[0.6875rem] text-muted-foreground">中位数</span>
                       <b className="text-sm font-semibold tabular-nums">{fmt(stats.med)}</b>
                     </div>
                     <div>
-                      <span className="block text-[11px] text-muted-foreground">加权平均</span>
+                      <span className="block text-[0.6875rem] text-muted-foreground">加权平均</span>
                       <b className="text-sm font-semibold tabular-nums">{fmt(stats.weighted)}</b>
                     </div>
                     <div>
-                      <span className="block text-[11px] text-muted-foreground">P10 – P90</span>
+                      <span className="block text-[0.6875rem] text-muted-foreground">P10 – P90</span>
                       <b className="text-sm font-semibold tabular-nums">
                         {fmt(stats.p10, 0)}–{fmt(stats.p90, 0)}
                       </b>
                     </div>
                     <div>
-                      <span className="block text-[11px] text-muted-foreground">{meta.ttftLabel}</span>
+                      <span className="block text-[0.6875rem] text-muted-foreground">{meta.ttftLabel}</span>
                       <b className="text-sm font-semibold tabular-nums">{fmtTtft(ttftMedianFor(meta.key), meta.key)}</b>
                     </div>
                     <div>
-                      <span className="block text-[11px] text-muted-foreground">请求 / 输出</span>
+                      <span className="block text-[0.6875rem] text-muted-foreground">请求 / 输出</span>
                       <b className="text-sm font-semibold tabular-nums">
                         {stats.n.toLocaleString()} / {fmtInt(stats.out)}
                       </b>
@@ -1402,13 +1402,13 @@ export function SpeedBoard({ embedded = false, refreshSignal = 0 }: SpeedBoardPr
 function UsageTile({ label, value, sub, dot }: { label: string; value: string; sub?: string; dot?: string }) {
   return (
     <div className="rounded-lg border bg-muted/25 px-3 py-2">
-      <span className="flex items-center gap-1.5 text-[11px] text-muted-foreground">
+      <span className="flex items-center gap-1.5 text-[0.6875rem] text-muted-foreground">
         {dot ? <i className="inline-block size-2 rounded-xs" style={{ backgroundColor: dot }} /> : null}
         {label}
       </span>
       <div className="mt-0.5 flex items-baseline gap-1">
         <b className="text-base font-semibold tabular-nums">{value}</b>
-        {sub ? <small className="text-[11px] text-muted-foreground">{sub}</small> : null}
+        {sub ? <small className="text-[0.6875rem] text-muted-foreground">{sub}</small> : null}
       </div>
     </div>
   )

@@ -63,7 +63,7 @@ export function QuotaLines({ quota, now }: { quota: Quota | undefined; now: numb
   if (!quota?.account) return null
   if (quota.windows.length === 0) {
     return quota.error ? (
-      <span className="mt-1 block truncate text-[11px] text-muted-foreground" title={quota.error}>
+      <span className="mt-1 block truncate text-[0.6875rem] text-muted-foreground" title={quota.error}>
         额度：{quota.error}
       </span>
     ) : null
@@ -73,18 +73,18 @@ export function QuotaLines({ quota, now }: { quota: Quota | undefined; now: numb
       {quota.windows.map((window, index) => (
         <span key={`${window.group ?? ""}${window.label}`} className="block">
           {window.group && window.group !== quota.windows[index - 1]?.group ? (
-            <span className="block text-[11px] leading-4 font-medium text-muted-foreground/80">{window.group}</span>
+            <span className="block text-[0.6875rem] leading-4 font-medium text-muted-foreground/80">{window.group}</span>
           ) : null}
           <Line window={window} now={now} />
         </span>
       ))}
       {quota.source ? (
-        <span className="block truncate text-[10px] leading-4 text-muted-foreground/70" title="插件递交的用量，不是房间自己读的">
+        <span className="block truncate text-[0.625rem] leading-4 text-muted-foreground/70" title="插件递交的用量，不是房间自己读的">
           {quota.source} 递交{quota.reportedAt ? ` · ${ago(quota.reportedAt, now)}` : ""}
         </span>
       ) : quota.staleAt ? (
         <span
-          className="block truncate text-[10px] leading-4 text-muted-foreground/70"
+          className="block truncate text-[0.625rem] leading-4 text-muted-foreground/70"
           title={quota.error ? `${quota.error}；先显示上次读到的数` : "先显示上次读到的数"}
         >
           上次读数 · {ago(quota.staleAt, now)}
@@ -99,7 +99,7 @@ function Line({ window, now }: { window: QuotaWindow; now: number }) {
   const reset = resetText(window.resetsAt, now)
   return (
     <span
-      className="flex items-center gap-1.5 text-[11px] leading-4 text-muted-foreground"
+      className="flex items-center gap-1.5 text-[0.6875rem] leading-4 text-muted-foreground"
       title={`${window.group ? `${window.group} ` : ""}${window.label}已用 ${window.percent}%${reset.full ? `，${reset.full}` : ""}`}
     >
       <span className="w-[3.25rem] shrink-0 truncate">{window.label}</span>
@@ -158,7 +158,7 @@ export function QuotaRing({
   return (
     <TooltipPrimitive.Root>
       <TooltipPrimitive.Trigger
-        className="flex h-7 min-w-0 shrink items-center gap-1 rounded-lg px-1 text-[11px] transition-colors hover:bg-sidebar-accent"
+        className="flex h-7 min-w-0 shrink items-center gap-1 rounded-lg px-1 text-[0.6875rem] transition-colors hover:bg-sidebar-accent"
         aria-expanded={expanded}
         aria-label={`${heading} 的额度${label ? `：${label}` : ""}，点开看详情`}
         onClick={onClick}
@@ -197,14 +197,14 @@ export function QuotaRing({
               <>
                 <QuotaLines quota={quota} now={now} />
                 {top.resetsAt ? (
-                  <span className="mt-1 block text-[11px] leading-4 text-muted-foreground">
+                  <span className="mt-1 block text-[0.6875rem] leading-4 text-muted-foreground">
                     {top.group ? `${top.group} ` : ""}
                     {top.label}：{resetText(top.resetsAt, now).full}
                   </span>
                 ) : null}
               </>
             ) : (
-              <span className="mt-1 block text-[11px] text-muted-foreground">额度读不到：{quota.error}</span>
+              <span className="mt-1 block text-[0.6875rem] text-muted-foreground">额度读不到：{quota.error}</span>
             )}
             {card}
           </TooltipPrimitive.Popup>

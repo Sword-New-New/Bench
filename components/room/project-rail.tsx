@@ -248,7 +248,7 @@ export function ProjectTitle({
       ) : (
         <span className="size-2 shrink-0 rounded-full" style={{ background: tint(project.id) }} aria-hidden="true" />
       )}
-      <span className={`min-w-0 truncate text-[13px] leading-5 ${strong ? "font-semibold" : "font-medium text-foreground/80"}`}>{project.name}</span>
+      <span className={`min-w-0 truncate text-[0.8125rem] leading-5 ${strong ? "font-semibold" : "font-medium text-foreground/80"}`}>{project.name}</span>
       {project.front ? <FrontStage /> : null}
     </span>
   )
@@ -294,7 +294,7 @@ function Card({ item, buttonRef, onPick, onEdit, ahead }: { item: Item; buttonRe
             <ProjectTitle project={project} shared={anchor} strong={on || anchor || unread} />
           </span>
           {project.waiting ? (
-            <span className="grid h-[18px] min-w-[18px] shrink-0 place-items-center rounded-full bg-destructive px-1 text-[11px] leading-none font-semibold text-white transition-opacity group-hover:opacity-0">
+            <span className="grid h-[18px] min-w-[18px] shrink-0 place-items-center rounded-full bg-destructive px-1 text-[0.6875rem] leading-none font-semibold text-white transition-opacity group-hover:opacity-0">
               {project.waiting > 99 ? "99+" : project.waiting}
             </span>
           ) : unread ? (
@@ -303,7 +303,7 @@ function Card({ item, buttonRef, onPick, onEdit, ahead }: { item: Item; buttonRe
         </span>
         <span className="flex items-end gap-3">
           <Bench seats={project.bench} rest={rest} note={project.seats ? "" : "空房间"} />
-          <span className="mb-[-4px] ml-auto shrink-0 text-right text-[11px] leading-4 text-muted-foreground">
+          <span className="mb-[-4px] ml-auto shrink-0 text-right text-[0.6875rem] leading-4 text-muted-foreground">
             {project.working ? <span className="block text-cyan-700 dark:text-cyan-300">{project.working} 个在做</span> : null}
             <span className="block">{project.seats ? `${project.seats} 个席位` : ""}</span>
             {on ? <span className="block font-medium text-foreground/70">当前</span> : null}
@@ -326,7 +326,7 @@ function Card({ item, buttonRef, onPick, onEdit, ahead }: { item: Item; buttonRe
 // What the front desk may do for now (its first stage: it looks, it doesn't act).
 export function FrontStage() {
   return (
-    <span className="shrink-0 rounded-full bg-foreground/[0.06] px-1.5 text-[10px] leading-4 font-medium text-muted-foreground">只读阶段</span>
+    <span className="shrink-0 rounded-full bg-foreground/[0.06] px-1.5 text-[0.625rem] leading-4 font-medium text-muted-foreground">只读阶段</span>
   )
 }
 
@@ -360,14 +360,14 @@ function FrontCard({ item, buttonRef, onPick, onEdit, ahead }: { item: Item; but
               <ProjectTitle project={project} shared={anchor} strong />
             </span>
           </span>
-          <span className="mt-0.5 block truncate text-[11px] leading-4 text-muted-foreground">
+          <span className="mt-0.5 block truncate text-[0.6875rem] leading-4 text-muted-foreground">
             {duty ? `${duty.name} 值班` : "还没人值班"}
             {project.working ? <span className="text-cyan-700 dark:text-cyan-300"> · 在看</span> : null}
             {on ? <span className="font-medium text-foreground/70"> · 当前</span> : null}
           </span>
         </span>
         {project.waiting ? (
-          <span className="grid h-[18px] min-w-[18px] shrink-0 place-items-center rounded-full bg-destructive px-1 text-[11px] leading-none font-semibold text-white transition-opacity group-hover:opacity-0">
+          <span className="grid h-[18px] min-w-[18px] shrink-0 place-items-center rounded-full bg-destructive px-1 text-[0.6875rem] leading-none font-semibold text-white transition-opacity group-hover:opacity-0">
             {project.waiting > 99 ? "99+" : project.waiting}
           </span>
         ) : unread ? (
@@ -403,8 +403,8 @@ function EnableFront({ onEnable }: { onEnable: () => void }) {
         <ConciergeBell className="size-4" />
       </span>
       <span className="min-w-0">
-        <span className="block text-[13px] leading-5 font-semibold">开启前台</span>
-        <span className="block text-[11px] leading-4 text-muted-foreground">一个 AI 替你看所有项目：做到哪了、什么在等你</span>
+        <span className="block text-[0.8125rem] leading-5 font-semibold">开启前台</span>
+        <span className="block text-[0.6875rem] leading-4 text-muted-foreground">一个 AI 替你看所有项目：做到哪了、什么在等你</span>
       </span>
     </button>
   )
@@ -436,7 +436,7 @@ function Bench({ seats, rest, note }: { seats: BenchSeat[]; rest: number; note: 
   return (
     <span className="relative mt-1.5 block h-[50px] w-[150px] shrink-0" aria-hidden="true">
       {note ? (
-        <span className="absolute inset-x-0 bottom-1 text-center text-[11px] leading-none text-muted-foreground">{note}</span>
+        <span className="absolute inset-x-0 bottom-1 text-center text-[0.6875rem] leading-none text-muted-foreground">{note}</span>
       ) : (
         <span className="absolute inset-x-0 -bottom-[3px] flex h-[38px] items-end gap-1 pl-1.5">
           {seats.map((seat) => (
@@ -451,7 +451,7 @@ function Bench({ seats, rest, note }: { seats: BenchSeat[]; rest: number; note: 
       <span data-wreck-wood className="absolute bottom-[-14px] left-3 h-2 w-[3px] rounded-b-sm bg-[#8c6440] dark:bg-[#5e4128]" />
       <span data-wreck-wood className="absolute right-3 bottom-[-14px] h-2 w-[3px] rounded-b-sm bg-[#8c6440] dark:bg-[#5e4128]" />
       {rest ? (
-        <span className="absolute right-0 bottom-[3px] grid h-[18px] min-w-[26px] place-items-center rounded-full bg-foreground/10 px-1.5 text-[11px] leading-none font-semibold text-foreground/70">
+        <span className="absolute right-0 bottom-[3px] grid h-[18px] min-w-[26px] place-items-center rounded-full bg-foreground/10 px-1.5 text-[0.6875rem] leading-none font-semibold text-foreground/70">
           +{rest}
         </span>
       ) : null}
@@ -499,7 +499,7 @@ function Sitter({ seat, turn }: { seat: BenchSeat; turn: number }) {
           </span>
         </span>
         {seat.waiting ? (
-          <span className="absolute -top-2 left-1/2 grid size-3.5 -translate-x-1/2 place-items-center rounded-full bg-destructive text-[9px] leading-none font-bold text-white ring-2 ring-background">
+          <span className="absolute -top-2 left-1/2 grid size-3.5 -translate-x-1/2 place-items-center rounded-full bg-destructive text-[0.5625rem] leading-none font-bold text-white ring-2 ring-background">
             !
           </span>
         ) : null}

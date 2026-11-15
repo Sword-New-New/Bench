@@ -43,7 +43,7 @@ export function PermitCard({ item }: { item: PermitRequest }) {
           </span>
         </span>
       </p>
-      <pre className="mt-1.5 max-h-32 overflow-auto rounded-lg bg-muted/70 px-2.5 py-1.5 font-mono text-[11px] leading-4 break-all whitespace-pre-wrap">
+      <pre className="mt-1.5 max-h-32 overflow-auto rounded-lg bg-muted/70 px-2.5 py-1.5 font-mono text-[0.6875rem] leading-4 break-all whitespace-pre-wrap">
         {full ? item.reason : item.input}
       </pre>
       {denying ? (
@@ -144,7 +144,7 @@ export function FullAccessToggle({ agent }: { agent: PublicAgent }) {
     <button
       type="button"
       disabled={busy}
-      className={`inline-flex items-center gap-1 rounded-full px-1.5 py-0.5 text-[11px] disabled:opacity-50 ${
+      className={`inline-flex items-center gap-1 rounded-full px-1.5 py-0.5 text-[0.6875rem] disabled:opacity-50 ${
         on ? "bg-amber-500/15 text-amber-700 hover:bg-amber-500/25 dark:text-amber-300" : "text-muted-foreground hover:bg-muted"
       }`}
       title={hint}

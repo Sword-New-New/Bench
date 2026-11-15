@@ -162,7 +162,7 @@ export function SummaryLine({
           <div className="line-clamp-2 text-[0.9rem] leading-relaxed break-words">
             <Markdown text={summary.text} names={names} tone={tone} from={from} />
           </div>
-          <span className="mt-1 flex flex-wrap items-center gap-x-2 text-[11px] text-muted-foreground">
+          <span className="mt-1 flex flex-wrap items-center gap-x-2 text-[0.6875rem] text-muted-foreground">
             <span className="flex items-center gap-0.5">
               <ChevronDown className="size-3" />
               展开
@@ -184,7 +184,7 @@ export function SummaryButton({ state, node }: { state: SummaryState; node: () =
   return (
     <button
       type="button"
-      className="flex items-center gap-1 rounded-md px-1 text-[11px] text-muted-foreground hover:bg-muted hover:text-foreground"
+      className="flex items-center gap-1 rounded-md px-1 text-[0.6875rem] text-muted-foreground hover:bg-muted hover:text-foreground"
       aria-expanded
       onClick={() => state.toggle(node())}
     >

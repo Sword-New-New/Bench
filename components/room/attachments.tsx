@@ -116,7 +116,7 @@ export function PendingFiles({ files, onRemove }: { files: Pending[]; onRemove: 
           )}
           <span className="min-w-0">
             <span className="block truncate font-medium">{item.name}</span>
-            <span className="block truncate text-[10px] text-muted-foreground">
+            <span className="block truncate text-[0.625rem] text-muted-foreground">
               {item.uploading ? "在传…" : item.kind === "dir" ? "文件夹" : size(item.size) || "从磁盘选的"}
             </span>
           </span>
@@ -371,9 +371,9 @@ export function MessageFiles({
           <Icon kind={item.kind} />
           <span className="min-w-0">
             <span className="block truncate font-medium">{item.name}</span>
-            <span className="block truncate font-mono text-[10px] text-muted-foreground">{item.path}</span>
+            <span className="block truncate font-mono text-[0.625rem] text-muted-foreground">{item.path}</span>
           </span>
-          {item.size !== undefined ? <span className="shrink-0 text-[10px] text-muted-foreground">{size(item.size)}</span> : null}
+          {item.size !== undefined ? <span className="shrink-0 text-[0.625rem] text-muted-foreground">{size(item.size)}</span> : null}
         </button>
       ))}
     </div>

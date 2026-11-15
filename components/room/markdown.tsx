@@ -312,7 +312,7 @@ export function CodeBox({ code, lang, tone }: { code: string; lang: string; tone
       }`}
     >
       <span
-        className={`flex items-center justify-between gap-2 border-b px-2.5 py-1 text-[11px] ${
+        className={`flex items-center justify-between gap-2 border-b px-2.5 py-1 text-[0.6875rem] ${
           inverse ? "border-white/15 text-white/75" : "border-border/70 text-muted-foreground"
         }`}
       >

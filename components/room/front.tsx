@@ -129,7 +129,7 @@ export function FrontButton({
       <ConciergeBell className="size-3.5 text-primary" />
       <span className="hidden sm:inline">前台</span>
       {front.waiting ? (
-        <span className="grid h-4 min-w-4 place-items-center rounded-full bg-destructive px-1 text-[10px] leading-none font-semibold text-white">
+        <span className="grid h-4 min-w-4 place-items-center rounded-full bg-destructive px-1 text-[0.625rem] leading-none font-semibold text-white">
           {front.waiting > 99 ? "99+" : front.waiting}
         </span>
       ) : unread ? (

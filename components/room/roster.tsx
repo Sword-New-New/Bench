@@ -251,8 +251,8 @@ function KindStub({
         <span className="grid w-9 shrink-0 place-items-center opacity-60 grayscale-[.4] group-hover/stub:opacity-100 group-hover/stub:grayscale-0">
           <Avatar name={kind.label} color={kind.color} kind={kind} size="sm" />
         </span>
-        <span className="truncate text-[13px] text-muted-foreground group-hover/stub:text-foreground">{kind.label}</span>
-        <span className={`shrink-0 text-[11px] ${state.tone === "warn" ? WARN : "text-muted-foreground/70"}`}>{state.text}</span>
+        <span className="truncate text-[0.8125rem] text-muted-foreground group-hover/stub:text-foreground">{kind.label}</span>
+        <span className={`shrink-0 text-[0.6875rem] ${state.tone === "warn" ? WARN : "text-muted-foreground/70"}`}>{state.text}</span>
         <ChevronRight className={`ml-auto size-3.5 shrink-0 text-muted-foreground transition-transform duration-200 ${open ? "rotate-90" : ""}`} />
       </button>
       <Reveal open={open}>
@@ -324,7 +324,7 @@ function KindGroup({
           <span className="truncate text-sm font-semibold hover:underline">{kind.label}</span>
           {/* Only when something is wrong (or, in an empty room, that it isn't here yet). */}
           {state.tone !== "ok" ? (
-            <span className={`min-w-0 shrink truncate text-[11px] ${state.tone === "warn" ? WARN : "text-muted-foreground"}`}>
+            <span className={`min-w-0 shrink truncate text-[0.6875rem] ${state.tone === "warn" ? WARN : "text-muted-foreground"}`}>
               {state.text}
             </span>
           ) : null}
@@ -465,11 +465,11 @@ function SeatRow({ agent, ...props }: Props & { agent: PublicAgent }) {
           title={tip}
           onClick={() => props.onMention(agent.name)}
         >
-          <span className="truncate text-[13px] font-medium">{agent.name}</span>
-          {agent.demo ? <span className="shrink-0 text-[10px] text-muted-foreground">演示</span> : null}
+          <span className="truncate text-[0.8125rem] font-medium">{agent.name}</span>
+          {agent.demo ? <span className="shrink-0 text-[0.625rem] text-muted-foreground">演示</span> : null}
           {agent.standby && agent.status !== "offline" ? (
             <span
-              className="shrink-0 rounded-full bg-emerald-500/12 px-1.5 text-[10px] font-medium text-emerald-700 dark:text-emerald-300"
+              className="shrink-0 rounded-full bg-emerald-500/12 px-1.5 text-[0.625rem] font-medium text-emerald-700 dark:text-emerald-300"
               title="守候中，点名立刻收到"
             >
               待命
@@ -587,14 +587,14 @@ function SeatRow({ agent, ...props }: Props & { agent: PublicAgent }) {
 
       {/* Near compacting: the numbers, and 「压缩」 when it can be done now. */}
       {facts && facts.near >= CONTEXT_WARN ? (
-        <div className={`flex items-center gap-2 pl-4 text-[11px] leading-5 ${WARN}`}>
+        <div className={`flex items-center gap-2 pl-4 text-[0.6875rem] leading-5 ${WARN}`}>
           <span className="min-w-0 truncate tabular-nums" title={facts.title}>
             上下文 {facts.amount}
           </span>
           {compactable ? (
             <button
               type="button"
-              className="ml-auto shrink-0 rounded-full bg-amber-500/15 px-1.5 text-[10px] font-medium leading-4 hover:bg-amber-500/25"
+              className="ml-auto shrink-0 rounded-full bg-amber-500/15 px-1.5 text-[0.625rem] font-medium leading-4 hover:bg-amber-500/25"
               onClick={() => props.onCompact(agent)}
             >
               压缩
@@ -619,7 +619,7 @@ function SeatRow({ agent, ...props }: Props & { agent: PublicAgent }) {
       {/* Tier 2: controllable wake queue bar — shown only when paused or holding queued mentions. */}
       {/* Tier 2: its wake failed on the network and goes again by itself (lib/netfail.ts). */}
       {agent.retry && !agent.runId ? (
-        <div data-retry className="flex items-center gap-1 pl-4 text-[11px] leading-5 text-amber-700 dark:text-amber-300">
+        <div data-retry className="flex items-center gap-1 pl-4 text-[0.6875rem] leading-5 text-amber-700 dark:text-amber-300">
           <RotateCw className="size-3 shrink-0" />
           <span className="truncate" title="网络断了，到点自动重叫">
             网络断了 · {new Date(agent.retry.at).toLocaleTimeString("zh-CN", { hour12: false })} 再叫（{agent.retry.n}/{agent.retry.of}）
@@ -637,7 +637,7 @@ function SeatRow({ agent, ...props }: Props & { agent: PublicAgent }) {
       ) : null}
 
       {showQueueBar ? (
-        <div className="flex items-center gap-1 pl-4 text-[11px] leading-5 text-amber-700 dark:text-amber-300">
+        <div className="flex items-center gap-1 pl-4 text-[0.6875rem] leading-5 text-amber-700 dark:text-amber-300">
           { queuedCount > 0 ? (
             <DropdownMenu>
               <DropdownMenuTrigger className="truncate text-left hover:underline" title="查看或剔除排队消息">
@@ -734,7 +734,7 @@ function SeatRow({ agent, ...props }: Props & { agent: PublicAgent }) {
 
       {/* Tier 2: stopped with work still on it. Gone once it works, asks, or the work is done. */}
       {owes ? (
-        <div data-owes className={`flex items-center gap-1 pl-4 text-[11px] leading-5 ${WARN}`}>
+        <div data-owes className={`flex items-center gap-1 pl-4 text-[0.6875rem] leading-5 ${WARN}`}>
           <DropdownMenu>
             <DropdownMenuTrigger
               className="flex min-w-0 items-center gap-1 truncate text-left hover:underline"
@@ -749,7 +749,7 @@ function SeatRow({ agent, ...props }: Props & { agent: PublicAgent }) {
                 {owes.tasks.map((task) => (
                   <DropdownMenuItem key={task.id} className="flex-col items-start gap-0 text-xs" onClick={() => goto("task", task.id)}>
                     <span className="w-full truncate">{task.title}</span>
-                    <span className="w-full truncate text-[11px] text-muted-foreground">
+                    <span className="w-full truncate text-[0.6875rem] text-muted-foreground">
                       待办 {task.id}
                       {task.step ? ` · 到「${task.step}」` : ""}
                     </span>
@@ -758,7 +758,7 @@ function SeatRow({ agent, ...props }: Props & { agent: PublicAgent }) {
                 {owes.calls.map((call) => (
                   <DropdownMenuItem key={call.messageId} className="flex-col items-start gap-0 text-xs" onClick={() => goto("message", call.messageId)}>
                     <span className="w-full truncate">{call.from} 叫过它，{call.state === "cut" ? "中途断了" : "没叫成"}</span>
-                    <span className="w-full truncate text-[11px] text-muted-foreground">消息 {call.messageId}</span>
+                    <span className="w-full truncate text-[0.6875rem] text-muted-foreground">消息 {call.messageId}</span>
                   </DropdownMenuItem>
                 ))}
               </DropdownMenuGroup>
@@ -767,7 +767,7 @@ function SeatRow({ agent, ...props }: Props & { agent: PublicAgent }) {
           {agent.callable ? (
             <button
               type="button"
-              className="ml-auto shrink-0 rounded-full bg-amber-500/15 px-1.5 text-[10px] font-medium leading-4 hover:bg-amber-500/25"
+              className="ml-auto shrink-0 rounded-full bg-amber-500/15 px-1.5 text-[0.625rem] font-medium leading-4 hover:bg-amber-500/25"
               title="发消息 @ 它接着做"
               onClick={() => void nudge()}
             >

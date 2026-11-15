@@ -67,7 +67,7 @@ export function TasksPanel({
     <div className="flex h-full min-h-0 flex-col">
       <div className="flex items-baseline justify-between px-4 pt-3 pb-3">
         <h2 className="text-xs font-semibold tracking-wider text-muted-foreground uppercase">待办</h2>
-        <span className="text-[11px] text-muted-foreground">
+        <span className="text-[0.6875rem] text-muted-foreground">
           {active.length} 进行中{done.length > 0 ? ` · ${done.length} 完成` : ""}
         </span>
       </div>
@@ -160,11 +160,11 @@ function TaskCard({
       <div className="flex items-start gap-2">
         <span className={`mt-[7px] size-2 shrink-0 rounded-full ${waiting ? "bg-amber-500" : DOT[task.status]}`} aria-hidden />
         <h3 className="min-w-0 flex-1 text-sm leading-5 font-medium">{task.title}</h3>
-        <span className={`mt-px shrink-0 rounded-full px-2 py-0.5 text-[10px] leading-4 font-medium ${waiting ? WAITING_CHIP : CHIP[task.status]}`}>
+        <span className={`mt-px shrink-0 rounded-full px-2 py-0.5 text-[0.625rem] leading-4 font-medium ${waiting ? WAITING_CHIP : CHIP[task.status]}`}>
           {waiting ? "待验收" : TASK_STATUS_LABEL[task.status]}
         </span>
       </div>
-      <p className="mt-0.5 pl-4 text-[11px] text-muted-foreground">
+      <p className="mt-0.5 pl-4 text-[0.6875rem] text-muted-foreground">
         {task.ownerName ? task.ownerName : "未设负责人"}
         <span className="opacity-60"> · {task.id}</span>
         {task.createdByName !== task.ownerName ? ` · ${task.createdByName} 建` : ""}
@@ -173,7 +173,7 @@ function TaskCard({
       {waiting ? (
         <ReviewBox task={task} busy={busy} onReview={(pass, note) => onReview(task, pass, note)} onOpenRun={onOpenRun} />
       ) : task.review?.state === "rejected" && task.status !== "done" ? (
-        <p className="mt-2.5 rounded-xl bg-red-500/10 px-2.5 py-1.5 text-[11px] leading-5 text-red-800 ring-1 ring-red-500/20 dark:text-red-200">
+        <p className="mt-2.5 rounded-xl bg-red-500/10 px-2.5 py-1.5 text-[0.6875rem] leading-5 text-red-800 ring-1 ring-red-500/20 dark:text-red-200">
           {clock(task.review.at)} 打回：{task.review.note}
         </p>
       ) : null}
@@ -181,7 +181,7 @@ function TaskCard({
         <StepDrawer steps={task.steps} busy={busy} locked={task.status === "done"} onStep={(step, state) => onStep(task, step, state)} />
       ) : null}
       {task.brief && task.status !== "done" ? (
-        <dl className={`mt-2 space-y-1 px-2.5 py-2 text-[11px] leading-5 ${INSET}`}>
+        <dl className={`mt-2 space-y-1 px-2.5 py-2 text-[0.6875rem] leading-5 ${INSET}`}>
           <div className="text-muted-foreground">{task.brief.by} 的交接单</div>
           {(
             [
@@ -198,7 +198,7 @@ function TaskCard({
         </dl>
       ) : null}
       {task.history.length > 0 ? (
-        <ol className="mt-2.5 space-y-0.5 pl-4 text-[11px] leading-5 text-muted-foreground">
+        <ol className="mt-2.5 space-y-0.5 pl-4 text-[0.6875rem] leading-5 text-muted-foreground">
           {task.history.slice(-2).map((event, index) => (
             <li key={`${event.at}-${index}`} className="truncate" title={`${clock(event.at)} ${event.actor} ${event.action}${event.note ? `：${event.note}` : ""}`}>
               <span className="tabular-nums opacity-70">{clock(event.at)}</span> <span className="text-foreground/75">{event.actor}</span> {event.action}
@@ -219,7 +219,7 @@ function TaskCard({
           >
             复制
           </Button>
-          <span className="text-[10px] text-muted-foreground">已完成不可改</span>
+          <span className="text-[0.625rem] text-muted-foreground">已完成不可改</span>
         </div>
       ) : null}
       {task.status !== "done" ? (
@@ -285,7 +285,7 @@ function ReviewBox({
   const [reason, setReason] = useState("")
   const asked = task.review?.state === "waiting" ? task.review : undefined
   return (
-    <div className="mt-2.5 space-y-2 rounded-xl bg-amber-500/[0.08] px-2.5 py-2 text-[11px] leading-5 ring-1 ring-amber-500/30">
+    <div className="mt-2.5 space-y-2 rounded-xl bg-amber-500/[0.08] px-2.5 py-2 text-[0.6875rem] leading-5 ring-1 ring-amber-500/30">
       <p className="font-medium text-amber-800 dark:text-amber-200">
         等你验收
         <span className="font-normal text-muted-foreground">
@@ -429,7 +429,7 @@ function StepDrawer({
     <div className={`mt-2.5 ${INSET}`}>
       <button
         type="button"
-        className="flex w-full items-center gap-2 rounded-xl px-2.5 py-1.5 text-left text-[11px] hover:bg-foreground/[0.03]"
+        className="flex w-full items-center gap-2 rounded-xl px-2.5 py-1.5 text-left text-[0.6875rem] hover:bg-foreground/[0.03]"
         aria-expanded={open}
         onClick={() => setOpen((value) => !value)}
       >
@@ -451,7 +451,7 @@ function StepDrawer({
           room's many tasks each drawing every step slowed switching projects. */}
       <Reveal open={open}>
         {open ? (
-          <ol className="space-y-1.5 px-2.5 pt-0.5 pb-2.5 text-[11px] leading-5">
+          <ol className="space-y-1.5 px-2.5 pt-0.5 pb-2.5 text-[0.6875rem] leading-5">
             {steps.map((step, index) => (
               <li key={step.id} className="flex gap-1.5">
                 <button

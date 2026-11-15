@@ -58,7 +58,7 @@ export function Avatar({
     return <Bot shape={kind.shape} color={kind.color} size={BOT_SIZE[size]} status={status} hover={hover} watch={watch ?? hover} mood={mood} />
   }
   const glyph = (label || name).slice(0, 1).toUpperCase()
-  const box = size === "lg" ? "size-9 text-sm" : size === "sm" ? "size-6 text-[11px]" : "size-8 text-xs"
+  const box = size === "lg" ? "size-9 text-sm" : size === "sm" ? "size-6 text-[0.6875rem]" : "size-8 text-xs"
   return (
     <span className="relative shrink-0">
       <span
@@ -129,7 +129,7 @@ export function FoldButton({ fold }: { fold: Fold }) {
   return (
     <button
       type="button"
-      className="flex items-center gap-1 rounded-md px-1 text-[11px] text-muted-foreground hover:bg-muted hover:text-foreground"
+      className="flex items-center gap-1 rounded-md px-1 text-[0.6875rem] text-muted-foreground hover:bg-muted hover:text-foreground"
       aria-expanded={fold.open}
       onClick={fold.toggle}
     >

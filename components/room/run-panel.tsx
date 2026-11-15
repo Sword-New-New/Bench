@@ -148,7 +148,7 @@ export function StepRow({ step, start }: { step: RunStep; start: number }) {
         >
           {step.title}
         </span>
-        <span className="shrink-0 tabular-nums text-[10px] text-muted-foreground">+{seconds(start, step.at)}</span>
+        <span className="shrink-0 tabular-nums text-[0.625rem] text-muted-foreground">+{seconds(start, step.at)}</span>
         {more ? (
           <ChevronRight className={`size-3.5 shrink-0 text-muted-foreground transition-transform ${open ? "rotate-90" : ""}`} />
         ) : (
@@ -170,10 +170,10 @@ export function StepRow({ step, start }: { step: RunStep; start: number }) {
 // The call's arguments are small print; what came back is what you read, so
 // it is set larger (and in the body font when it is something it said).
 function Block({ label, text, main, prose }: { label: string; text: string; main?: boolean; prose?: boolean }) {
-  const size = main ? "max-h-80 text-[13px] leading-5" : "max-h-40 text-[11px] leading-4 text-muted-foreground"
+  const size = main ? "max-h-80 text-[0.8125rem] leading-5" : "max-h-40 text-[0.6875rem] leading-4 text-muted-foreground"
   return (
     <div>
-      <p className="mb-0.5 text-[10px] text-muted-foreground">{label}</p>
+      <p className="mb-0.5 text-[0.625rem] text-muted-foreground">{label}</p>
       <pre
         className={`overflow-auto rounded-md bg-muted/60 px-2 py-1.5 break-all whitespace-pre-wrap ${size} ${prose ? "font-sans" : "font-mono"}`}
       >

@@ -207,7 +207,7 @@ export function LeftPane({
         <ChevronLeft className="size-4" />
         项目
         {waiting ? (
-          <span className="ml-1 grid h-4 min-w-4 place-items-center rounded-full bg-destructive px-1 text-[10px] leading-none font-semibold text-white">
+          <span className="ml-1 grid h-4 min-w-4 place-items-center rounded-full bg-destructive px-1 text-[0.625rem] leading-none font-semibold text-white">
             {waiting > 99 ? "99+" : waiting}
           </span>
         ) : null}
@@ -240,7 +240,7 @@ export function LeftPane({
         <nav aria-label="项目" data-tour="project-rail" className="flex h-full min-h-0 flex-col">
           <div className="flex h-12 shrink-0 items-center gap-2 px-4 pt-2">
             <h2 className="flex-1 text-xs font-semibold tracking-wider text-muted-foreground uppercase">项目</h2>
-            <span className="text-[11px] text-muted-foreground/80">点一个进去</span>
+            <span className="text-[0.6875rem] text-muted-foreground/80">点一个进去</span>
           </div>
           <div className="min-h-0 flex-1 overflow-y-auto px-1 pt-1 pb-3">
             <ProjectList

@@ -68,7 +68,7 @@ export function VideoCard({ item }: { item: Attachment }) {
         <span className="min-w-0 flex-1 truncate font-medium" title={item.path}>
           {item.name}
         </span>
-        <span className="shrink-0 text-[10px] text-muted-foreground tabular-nums">
+        <span className="shrink-0 text-[0.625rem] text-muted-foreground tabular-nums">
           {[clock(length ?? NaN), sizeOf(item.size)].filter(Boolean).join(" · ")}
         </span>
         <a

@@ -206,7 +206,7 @@ export function ProgressView({
         {fresh > 0 && !talkOpen ? (
           <button
             type="button"
-            className="self-start rounded-full border bg-card/80 px-3 py-1 text-[11px] text-muted-foreground hover:text-foreground"
+            className="self-start rounded-full border bg-card/80 px-3 py-1 text-[0.6875rem] text-muted-foreground hover:text-foreground"
             onClick={() => {
               jump("talk")
             }}
@@ -297,7 +297,7 @@ function Group({
               {list.map(rowOf)}
               <button
                 type="button"
-                className="self-end rounded-md px-1 text-[11px] text-muted-foreground hover:bg-muted hover:text-foreground"
+                className="self-end rounded-md px-1 text-[0.6875rem] text-muted-foreground hover:bg-muted hover:text-foreground"
                 onClick={() => setOpen(`group:${state}`, false)}
               >
                 收起
@@ -393,7 +393,7 @@ function Row({
             {row.owner ? " · " : ""}
             {row.line}
           </span>
-          <span className="mt-0.5 flex flex-wrap items-center gap-x-2 text-[11px] text-muted-foreground/90">
+          <span className="mt-0.5 flex flex-wrap items-center gap-x-2 text-[0.6875rem] text-muted-foreground/90">
             {row.since ? <span>停了 {ago(row.since, now).replace("前", "")}</span> : <span>{clock(row.at)}</span>}
             {row.attachments > 0 ? <span>附 {row.attachments} 个</span> : null}
             {row.messageIds.length > 0 ? <span>{row.messageIds.length} 条对话</span> : null}
@@ -402,7 +402,7 @@ function Row({
         </button>
         <div className="flex shrink-0 flex-col items-end gap-1.5">
           {steps ? (
-            <span className="flex items-center gap-1.5 text-[11px] text-muted-foreground tabular-nums" title={steps.current ? `现在：${steps.current}` : undefined}>
+            <span className="flex items-center gap-1.5 text-[0.6875rem] text-muted-foreground tabular-nums" title={steps.current ? `现在：${steps.current}` : undefined}>
               <span className="h-1 w-14 overflow-hidden rounded-full bg-foreground/10">
                 <span className={`block h-full origin-left rounded-full ${look.stripe}`} style={{ width: `${percent}%` }} />
               </span>
@@ -560,7 +560,7 @@ export function JustSaid({ messages, agents, digest }: { messages: Message[]; ag
               <span className="shrink-0 font-medium text-foreground">你刚说的</span>
               <span className="min-w-0 truncate">{message.text.replace(/\s+/g, " ")}</span>
             </p>
-            <p className="mt-0.5 flex min-w-0 items-center gap-x-3 text-[11px] text-muted-foreground">
+            <p className="mt-0.5 flex min-w-0 items-center gap-x-3 text-[0.6875rem] text-muted-foreground">
               {calls.map((call) => (
                 <span key={call.id} className="shrink-0">
                   {call.name} · {CALL[call.state] ?? call.state}

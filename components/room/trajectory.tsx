@@ -160,7 +160,7 @@ export function Trajectory({
             onClick={() => card && goto("message", card.id)}
           >
             {earlier > 0 ? (
-              <span className="absolute left-0 text-[9px] leading-none text-muted-foreground/60 tabular-nums" style={{ top: at(top - 14) }}>
+              <span className="absolute left-0 text-[0.5625rem] leading-none text-muted-foreground/60 tabular-nums" style={{ top: at(top - 14) }}>
                 ↑{earlier}
               </span>
             ) : null}

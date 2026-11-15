@@ -14,7 +14,7 @@ import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } f
 // wherever it shows (seat menu, roster line, this dialog's title).
 export function BetaTag() {
   return (
-    <span className="shrink-0 rounded-full bg-violet-500/15 px-1.5 py-px text-[10px] leading-4 font-medium tracking-wide text-violet-700 dark:text-violet-300">
+    <span className="shrink-0 rounded-full bg-violet-500/15 px-1.5 py-px text-[0.625rem] leading-4 font-medium tracking-wide text-violet-700 dark:text-violet-300">
       Beta
     </span>
   )

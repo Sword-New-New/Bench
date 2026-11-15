@@ -56,13 +56,13 @@ export function RunTrail({ runId, answer }: { runId: string; answer?: string }) 
   const tools = run.steps.filter((step) => step.kind === "tool").length
   return (
     <div className="mb-1.5 rounded-xl border border-dashed bg-background/40 px-1 py-1">
-      <p className="flex items-center gap-1.5 px-2 pt-0.5 pb-1 text-[11px] text-muted-foreground">
+      <p className="flex items-center gap-1.5 px-2 pt-0.5 pb-1 text-[0.6875rem] text-muted-foreground">
         {run.state === "running" ? <Loader2 className="size-3 animate-spin" /> : null}
         过程 · {tools} 次工具调用 · {took(run)}
         <span className="ml-auto">只有你看得到</span>
       </p>
       {steps.length === 0 ? (
-        <p className="px-2 pb-1 text-[11px] text-muted-foreground">
+        <p className="px-2 pb-1 text-[0.6875rem] text-muted-foreground">
           {run.state === "running" ? "还没有动静…" : "这次没有记下步骤"}
         </p>
       ) : (

@@ -311,7 +311,7 @@ export function PushDialog() {
                         {spec.required ? <span className="ml-0.5 text-destructive">*</span> : null}
                       </Label>
                       {alreadyFilled && !val ? (
-                        <span className="rounded-full bg-emerald-500/15 px-2 py-0.5 text-[10px] text-emerald-700 dark:text-emerald-300">
+                        <span className="rounded-full bg-emerald-500/15 px-2 py-0.5 text-[0.625rem] text-emerald-700 dark:text-emerald-300">
                           已填（留空不变）
                         </span>
                       ) : null}

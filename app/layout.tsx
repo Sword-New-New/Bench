@@ -1,6 +1,7 @@
 import type { Metadata } from "next";
 import { Geist, Geist_Mono } from "next/font/google";
 import { Providers } from "@/components/providers";
+import { FONT_SIZE_SCRIPT } from "@/lib/font-size";
 import "./globals.css";
 
 const geistSans = Geist({
@@ -25,6 +26,10 @@ export default function RootLayout({ children }: LayoutProps<"/">) {
       className={`${geistSans.variable} ${geistMono.variable} h-full antialiased`}
       suppressHydrationWarning
     >
+      <head>
+        {/* The text size picked in settings, before the page paints. */}
+        <script dangerouslySetInnerHTML={{ __html: FONT_SIZE_SCRIPT }} />
+      </head>
       <body className="h-dvh overflow-hidden">
         <Providers>{children}</Providers>
       </body>

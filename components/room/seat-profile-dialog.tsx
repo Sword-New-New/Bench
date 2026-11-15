@@ -275,7 +275,7 @@ export function SeatProfileDialog({
                   />
                 </div>
                 {markdownPath ? (
-                  <p className="truncate text-[11px] text-muted-foreground" title={markdownPath}>
+                  <p className="truncate text-[0.6875rem] text-muted-foreground" title={markdownPath}>
                     只读副本（直接改它无效）：<span className="font-mono">{shortPath(markdownPath)}</span>
                   </p>
                 ) : null}
@@ -334,9 +334,9 @@ export function SeatProfileDialog({
                       <Avatar name={item.label} color={item.color} kind={item} size="sm" />
                       <span className="truncate font-medium">{item.label}</span>
                       {isCurrent ? (
-                        <span className="text-[10px] leading-none text-muted-foreground">当前</span>
+                        <span className="text-[0.625rem] leading-none text-muted-foreground">当前</span>
                       ) : missing ? (
-                        <span className="text-[10px] leading-none text-amber-600 dark:text-amber-400">未装</span>
+                        <span className="text-[0.625rem] leading-none text-amber-600 dark:text-amber-400">未装</span>
                       ) : null}
                     </button>
                   )
@@ -358,7 +358,7 @@ export function SeatProfileDialog({
                 <Label className="text-xs">工作目录</Label>
                 <button
                   type="button"
-                  className="text-[11px] text-muted-foreground hover:text-foreground"
+                  className="text-[0.6875rem] text-muted-foreground hover:text-foreground"
                   onClick={() => setEditDir((v) => !v)}
                 >
                   {editDir ? "收起" : "修改"}
@@ -394,7 +394,7 @@ export function SeatProfileDialog({
 
             {agent?.previousBindings && agent.previousBindings.length > 0 ? (
               <div className="space-y-1.5 rounded-xl border bg-muted/30 p-2.5">
-                <p className="flex items-center gap-1.5 text-[11px] font-medium text-muted-foreground">
+                <p className="flex items-center gap-1.5 text-[0.6875rem] font-medium text-muted-foreground">
                   <History className="size-3.5" />
                   历史会话（原额度恢复后可切回）
                 </p>

@@ -132,7 +132,7 @@ export function AudioCard({ item }: { item: Attachment }) {
           <span className="truncate font-medium">{item.name}</span>
         </div>
         {broken ? (
-          <div className="mt-1.5 text-[11px] text-destructive">放不了：文件不在了，或浏览器不认这种格式</div>
+          <div className="mt-1.5 text-[0.6875rem] text-destructive">放不了：文件不在了，或浏览器不认这种格式</div>
         ) : (
           <>
             <div
@@ -159,7 +159,7 @@ export function AudioCard({ item }: { item: Attachment }) {
                 style={{ left: `${done * 100}%` }}
               />
             </div>
-            <div className="mt-0.5 flex items-center gap-2 font-mono text-[10px] text-muted-foreground tabular-nums">
+            <div className="mt-0.5 flex items-center gap-2 font-mono text-[0.625rem] text-muted-foreground tabular-nums">
               <span>
                 {clock(time)} / {clock(length)}
               </span>
@@ -173,7 +173,7 @@ export function AudioCard({ item }: { item: Attachment }) {
           type="button"
           onClick={nextSpeed}
           disabled={broken}
-          className="rounded-md px-1 font-mono text-[10px] text-muted-foreground hover:bg-muted hover:text-foreground"
+          className="rounded-md px-1 font-mono text-[0.625rem] text-muted-foreground hover:bg-muted hover:text-foreground"
           aria-label="切换播放速度"
           title="播放速度"
         >

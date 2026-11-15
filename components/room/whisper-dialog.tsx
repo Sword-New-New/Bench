@@ -112,7 +112,7 @@ export function WhisperDialog({
                 )}
                 <button
                   type="button"
-                  className="mt-0.5 flex items-center gap-1 text-[11px] text-muted-foreground hover:text-foreground"
+                  className="mt-0.5 flex items-center gap-1 text-[0.6875rem] text-muted-foreground hover:text-foreground"
                   onClick={() => onOpenRun(run.id)}
                 >
                   <ListTree className="size-3" />

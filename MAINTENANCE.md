@@ -564,6 +564,8 @@ Next 开发徽章用 `devIndicators: false` 关掉了，它以前挡住入口栏
 
 页面以 SSE 为主，只有 SSE 断开时才每 4 秒轮询一次。客户端只在快照的 `rev` 不比当前旧时才覆盖本地状态。
 
+字号设置（2026-11-15，t_98e8844e）：设置菜单里的「字号」改的是 `<html>` 的根字号（小 90%、标准 100%、大 112.5%、特大 125%，以浏览器自己的字号为基准），记在 localStorage `bench-font-size`。档位和 `<head>` 里那段先设字号的脚本在 `lib/font-size.ts`，读写的钩子在 `components/room/font-size.ts`。layout 是服务端组件，只能导入 lib 那份：曾经直接导入带 `useSyncExternalStore` 的那份，整个服务（页面和接口）报 500。所以**字号要用 rem 写**：`text-[0.6875rem]`，不要写 `text-[11px]`，px 写的字不跟着设置变（当时把 130 处 px 字号等值换成了 rem）。小块的 px 尺寸（`h-[18px]` 之类）没换，大字号下可以接受。没用 CSS `zoom`：Chrome 157 里 `zoom` 会把 `100dvh` 一起放大（整页超出窗口），`getBoundingClientRect` 也变成放大后的坐标，弹出层定位会偏。xterm 终端的字号是它自己的 13，不跟设置走。
+
 `lib/summon.ts` 的监听只在进程里绑一次（`__benchSummonBound`），改了 `ensureSummon` 里注册监听的那段，要重启开发服务才生效。
 
 ## 前台项目与跨项目只读工具

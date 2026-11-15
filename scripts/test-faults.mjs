@@ -97,6 +97,15 @@ export const FAULTS = [
     find: `      if (actor.type === "agent" && state === "done" && isReviewStep(step)) {`,
     replace: `      if (false && actor.type === "agent" && state === "done" && isReviewStep(step)) {`,
   },
+  {
+    id: "front-guard-bypassed",
+    artery: "6. 权限卡片与用户口令",
+    file: "lib/store.ts",
+    desc: "requireFrontSeat 未拦截非前台项目席位，导致普通项目的席位也能跨项目读取别的房间",
+    expectedTest: "普通项目的席位调 /api/v1/overview 与 /api/v1/peek 应返回 403",
+    find: `  if (!info.front) {\n    throw new ApiError(403, "这两件跨项目工具只给「前台」房间里的席位用")\n  }`,
+    replace: `  if (false && !info.front) {\n    throw new ApiError(403, "这两件跨项目工具只给「前台」房间里的席位用")\n  }`,
+  },
 ]
 
 const COPY_ITEMS = [
@@ -183,6 +192,8 @@ function runRoomTest(copyDir, port, dataDir) {
         BENCH_KEY_FILE: path.join(dataDir, "human-key"),
         XDG_STATE_HOME: path.join(copyDir, "state"),
         BENCH_RETRY_MS: "400,800",
+        BENCH_PUSH_MERGE_MS: "600",
+        BENCH_PUSH_PERMIT_MS: "1200",
       },
       stdio: ["ignore", "pipe", "pipe"],
     })
@@ -261,6 +272,8 @@ async function main() {
       XDG_STATE_HOME: path.join(copyDir, "state"),
       BENCH_URL: `http://127.0.0.1:${port}`,
       BENCH_RETRY_MS: "400,800",
+      BENCH_PUSH_MERGE_MS: "600",
+      BENCH_PUSH_PERMIT_MS: "1200",
     },
     stdio: ["ignore", logFd, logFd],
     detached: true,

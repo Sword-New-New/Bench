@@ -269,14 +269,14 @@ async function steps(stamp) {
     body: { agentId: alpha.data.agent.id, token: alpha.data.token, after: question.data.message.seq - 1 },
   })
   const hinted = box.data.messages.find((message) => message.id === answer.data.message.id)
-  assert(hinted?.reply?.id === question.data.message.id && hinted.reply.gist === "回复链的起点", "收件箱没说这条回复的是哪条")
+  assert(hinted?.reply?.id === question.data.message.id && hinted.reply.gist === question.data.message.text, "收件箱没说这条回复的是哪条")
   const chain = await request("/api/v1/messages", {
     method: "POST",
     body: { agentId: alpha.data.agent.id, token: alpha.data.token, chain: answer.data.message.id },
   })
   assert(chain.status === 200, `取回复链失败 ${chain.data.error || chain.status}`)
   assert(
-    chain.data.messages.map((message) => message.text).join("|") === "回复链的起点|我来回|接着回",
+    chain.data.messages.map((message) => message.text).join("|") === `${question.data.message.text}|我来回|接着回`,
     "回复链不完整或顺序不对",
   )
   assert(chain.data.messages[0].author.type === "human" && chain.data.messages[1].author.type === "agent", "作者类型不对")
@@ -332,7 +332,7 @@ async function steps(stamp) {
   await new Promise((resolve) => setTimeout(resolve, 300))
   const afterRoom = await request(`/api/v1/room?project=${project}`)
   assert(
-    afterRoom.data.messages.some((message) => message.kind === "system" && message.seq > afterEnd.data.message.seq && message.text.includes(`己${stamp} 被点到了`)),
+    afterRoom.data.messages.some((message) => message.kind === "system" && message.seq > afterEnd.data.message.seq && message.text.includes(`己${stamp} 未报会话 id`)),
     "别的席位结束本轮后，agent 之间的 @ 被悄悄挡掉了",
   )
   const marked = await request("/api/v1/say", {
@@ -342,6 +342,17 @@ async function steps(stamp) {
   assert(marked.data.message.end === true, "以标记开头的回答没认成结束本轮")
   const mimic = await request("/api/v1/say", { method: "POST", body: { as: "human", text: "【本轮结束】人说的不算" } })
   assert(!mimic.data.message.end, "人说的话不该当成结束本轮")
+  // The user says something to nobody and answers nothing: it goes to the
+  // last AI that spoke here (t_bd01d3c1), the @ written into the text.
+  const lastName = beta.data.agent.name
+  assert(
+    mimic.data.message.mentions.join() === beta.data.agent.id && mimic.data.message.text === `@${lastName} 【本轮结束】人说的不算`,
+    `没 @ 人的话没改叫最后说话的 AI：${mimic.data.message.text}`,
+  )
+  const named = await request("/api/v1/say", { method: "POST", body: { as: "human", text: `@${alpha.data.agent.name} 只叫甲` } })
+  assert(named.data.message.mentions.join() === alpha.data.agent.id && !named.data.message.text.includes(`@${lastName}`), "@ 了人还被加了别人")
+  const answering = await request("/api/v1/say", { method: "POST", body: { as: "human", text: "回甲那句", replyTo: ended.data.message.id } })
+  assert(answering.data.message.mentions.length === 0 && answering.data.message.text === "回甲那句", "回复某条时不该再加 @")
   closed = await request(`/api/v1/room?project=${project}`)
   assert(closed.data.relayClosed === false, "人发话后接力没恢复")
 
@@ -436,7 +447,7 @@ async function steps(stamp) {
   const notMineRecall = await request("/api/v1/recall", { method: "POST", body: { as: "human", id: agentSaid.data.message.id } })
   assert(notMineRecall.status === 403, "不能撤回 agent 的消息")
   const recalled = await request("/api/v1/recall", { method: "POST", body: { as: "human", id: secretId } })
-  assert(recalled.status === 200 && recalled.data.original.text === "撤回测试：口令 4399", "撤回失败或没带回原文")
+  assert(recalled.status === 200 && recalled.data.original.text === secret.data.message.text, "撤回失败或没带回原文")
   assert(recalled.data.message.recalled && recalled.data.message.text === "", "撤回后不该还留着原文")
   const recallAgain = await request("/api/v1/recall", { method: "POST", body: { as: "human", id: secretId } })
   assert(recallAgain.status === 409, "撤回过的不能再撤回")
@@ -744,12 +755,22 @@ async function steps(stamp) {
   const mockReliefName = `mockrel_${stamp}`
   const mockSlowName = `mockslow_${stamp}`
   const mockMuteName = `mockmute_${stamp}`
+  // Ends well, and the only thing on stderr is the isolation launcher's socat
+  // complaining about a bridged connection (lib/summon.ts withoutBridgeNoise).
+  const mockBridgeName = `mockbridge_${stamp}`
   const mockBadName = `mockbad_${stamp}`
   // Network failures (lib/netfail.ts): fails twice then answers, always fails,
   // and one that says back the to-dos its prompt told it it still owes.
   const mockFlakyName = `mockflaky_${stamp}`
   const mockNetName = `mocknet_${stamp}`
   const mockOwesName = `mockowes_${stamp}`
+  // Gists (t_83c6fcc9): a reply whose first line is its conclusion, a long one
+  // that opens with a heading, a summary seat that writes one line per
+  // message it is given, and one that fails.
+  const mockGistName = `mockgist_${stamp}`
+  const mockHeadName = `mockhead_${stamp}`
+  const mockGisterName = `mockgister_${stamp}`
+  const mockGisterBadName = `mockgbad_${stamp}`
   // The checker before the user's sign-off (lib/summon.ts checkTask): its
   // verdict goes by a mark in the task's title.
   const mockCheckName = `mockcheck_${stamp}`
@@ -817,12 +838,33 @@ createInterface({ input: process.stdin }).on("line", async (line) => {
           },
           // Ends well without a word, and ends in an error.
           { name: mockMuteName, command: `node -e "setTimeout(() => {}, 200)" {uuid} {text}`, reply: "stdout" },
+          {
+            name: mockBridgeName,
+            command: `node -e "process.stderr.write('2026/11/14 22:24:33 socat[52] E write(5, 0x58a7e3bed000, 24): Broken pipe\\n')" {uuid} {text}`,
+            reply: "stdout",
+          },
           { name: mockBadName, command: `node -e "process.stderr.write('mock 故意出错'); process.exit(3)" {uuid} {text}`, reply: "stdout" },
           {
             name: mockFlakyName,
             command: `node -e "const fs = require('fs'); const f = require('os').tmpdir() + '/bench-flaky-' + process.argv[1]; const n = fs.existsSync(f) ? Number(fs.readFileSync(f, 'utf8')) : 0; fs.writeFileSync(f, String(n + 1)); if (n < 2) { process.stderr.write('read ECONNRESET'); process.exit(1) } fs.rmSync(f); console.log('[重试后答了]' + ((process.argv[2] || '').includes('刚才被打断') ? '|带着原来的消息' : ''))" {uuid} {text}`,
             reply: "stdout",
           },
+          {
+            name: mockGistName,
+            command: `node -e "console.log('做完了：第一行就是结论。' + String.fromCharCode(10, 10) + '## 细节' + String.fromCharCode(10) + '细节'.repeat(150))" {uuid} {text}`,
+            reply: "stdout",
+          },
+          {
+            name: mockHeadName,
+            command: `node -e "console.log('## 先写标题' + String.fromCharCode(10) + '| a | b |' + String.fromCharCode(10) + '细节'.repeat(150))" {uuid} {text}`,
+            reply: "stdout",
+          },
+          {
+            name: mockGisterName,
+            command: `node -e "const t = process.argv[2] || ''; const ids = [...t.matchAll(/【(m_[0-9a-z]+)】/g)].map((m) => m[1]); console.log(ids.map((id) => '[' + id + '] 补的摘要 @谁 ' + id).join(String.fromCharCode(10)))" {uuid} {text}`,
+            reply: "stdout",
+          },
+          { name: mockGisterBadName, command: `node -e "process.stderr.write('摘要席位故意出错'); process.exit(2)" {uuid} {text}`, reply: "stdout" },
           { name: mockNetName, command: `node -e "process.stderr.write('TRANSPORT: Connection error.'); process.exit(1)" {uuid} {text}`, reply: "stdout" },
           {
             name: mockCheckName,
@@ -1098,6 +1140,11 @@ createInterface({ input: process.stdin }).on("line", async (line) => {
     const c3 = await request("/api/v1/say", { method: "POST", body: { as: "human", text: `@${muteSeat.name} 你不会回答` } })
     const end3 = await settled(c3.data.message.id, muteSeat.id)
     assert(end3?.state === "silent", `跑完没说话该记成 silent，实际 ${end3?.state}`)
+    // The launcher's socat line on stderr is not the client's error.
+    const bridgeSeat = await seatIn("去向桥", mockBridgeName)
+    const c3b = await request("/api/v1/say", { method: "POST", body: { as: "human", text: `@${bridgeSeat.name} 隔离启动器` } })
+    const end3b = await settled(c3b.data.message.id, bridgeSeat.id)
+    assert(end3b?.state === "silent", `只有 socat 桥接报错不该算失败，实际 ${end3b?.state} ${end3b?.note}`)
 
     // Ended in an error: failed, with why; and the seat owes that call.
     const badSeat = await seatIn("去向坏", mockBadName)
@@ -1255,6 +1302,76 @@ createInterface({ input: process.stdin }).on("line", async (line) => {
       (item) => item.authorId === owesSeat.id && item.replyTo === o2.data.message.id,
     )
     assert(clearAnswer?.text === "[不欠]", `没有欠的就什么都不加，实际 ${clearAnswer?.text}`)
+
+    // Gists (Message.gist, t_83c6fcc9): an agent's reply gets its first line
+    // when that is a conclusion; a long one that opens with structure gets
+    // none, until the project's summary seat writes one; the user's messages
+    // never have one. Start the room with BENCH_GIST_MS=500 to keep it short.
+    const replyTo = async (messageId, seatId, limit = 15_000) => {
+      const until = Date.now() + limit
+      while (Date.now() < until) {
+        const found = (await request(`/api/v1/room?project=${project}`)).data.messages.find(
+          (item) => item.authorId === seatId && item.replyTo === messageId,
+        )
+        if (found) return found
+        await new Promise((resolve) => setTimeout(resolve, 150))
+      }
+      return undefined
+    }
+    const gistOfMessage = async (messageId) => (await request(`/api/v1/room?project=${project}`)).data.messages.find((item) => item.id === messageId)?.gist
+    const waitGist = async (messageId, limit) => {
+      const until = Date.now() + limit
+      while (Date.now() < until) {
+        const gist = await gistOfMessage(messageId)
+        if (gist) return gist
+        await new Promise((resolve) => setTimeout(resolve, 200))
+      }
+      return undefined
+    }
+    const gistSeat = await seatIn("摘要甲", mockGistName)
+    const headSeat = await seatIn("摘要乙", mockHeadName)
+    const g1 = await request("/api/v1/say", { method: "POST", body: { as: "human", text: `@${gistSeat.name} 第一行写结论。${"人说的长话".repeat(60)}` } })
+    assert(!g1.data.message.gist, "人的消息不该有 gist")
+    const r1 = await replyTo(g1.data.message.id, gistSeat.id)
+    assert(
+      r1?.gist?.text === "做完了：第一行就是结论。" && r1.gist.by === "author",
+      `第一行是短结论的回复，gist 就是它、by 是 author，实际 ${JSON.stringify(r1?.gist)}`,
+    )
+    const g2 = await request("/api/v1/say", { method: "POST", body: { as: "human", text: `@${headSeat.name} 先写标题` } })
+    const r2 = await replyTo(g2.data.message.id, headSeat.id)
+    assert(r2 && !r2.gist, `第一行是标题的长回复不该有 gist，实际 ${JSON.stringify(r2?.gist)}`)
+    assert(!(await waitGist(r2.id, 2500)), "没设摘要席位时不该补")
+
+    const gisterSeatMade = await seatIn("补摘要", mockGisterName)
+    const setG = await request(`/api/v1/agents/${gisterSeatMade.id}`, { method: "POST", body: { as: "human", action: "gister", on: true } })
+    assert(setG.status === 200, `设摘要席位失败 ${setG.data.error || setG.status}`)
+    const roomG = await request(`/api/v1/room?project=${project}`)
+    assert(roomG.data.agents.filter((a) => a.gister).map((a) => a.id).join() === gisterSeatMade.id, "一个项目只该有一个摘要席位")
+    const g3 = await request("/api/v1/say", { method: "POST", body: { as: "human", text: `@${headSeat.name} 再来一条标题开头的` } })
+    const r3 = await replyTo(g3.data.message.id, headSeat.id)
+    const filled = await waitGist(r3.id, 20_000)
+    assert(
+      filled?.by === gisterSeatMade.name && filled.text === `补的摘要 谁 ${r3.id}`,
+      `开了摘要席位后该被补上、by 是那个席位、去掉 @，实际 ${JSON.stringify(filled)}`,
+    )
+    const quiet = (await request(`/api/v1/room?project=${project}`)).data.messages.filter(
+      (item) => item.seq > g3.data.message.seq && item.authorId === gisterSeatMade.id,
+    )
+    assert(quiet.length === 0, "摘要席位补摘要不该在群里发言")
+    assert(r1.gist.by === "author" && (await gistOfMessage(r1.id))?.by === "author", "作者自己的 gist 不该被覆盖")
+
+    const badGister = await seatIn("坏补摘要", mockGisterBadName)
+    await request(`/api/v1/agents/${badGister.id}`, { method: "POST", body: { as: "human", action: "gister", on: true } })
+    const g4 = await request("/api/v1/say", { method: "POST", body: { as: "human", text: `@${headSeat.name} 摘要席位会出错` } })
+    const r4 = await replyTo(g4.data.message.id, headSeat.id)
+    assert(!(await waitGist(r4.id, 5000)), "摘要席位失败时不该有 gist")
+    const r4Now = (await request(`/api/v1/room?project=${project}`)).data.messages.find((item) => item.id === r4.id)
+    assert(r4Now?.text === r4.text, "摘要席位失败不该动消息本身")
+    const failNotes = (await request(`/api/v1/room?project=${project}`)).data.messages.filter(
+      (item) => item.seq > g4.data.message.seq && item.authorId === "room" && item.text.includes(badGister.name),
+    )
+    assert(failNotes.length === 0, `摘要席位失败不在群里报错，实际 ${failNotes.map((item) => item.text).join(" / ")}`)
+    await request(`/api/v1/agents/${badGister.id}`, { method: "POST", body: { as: "human", action: "gister", on: false } })
 
     // 「请验收时先复验」: the project's checker is woken on its own when an owner
     // asks for review; its verdict lands on the task (Task.check), not in the room.
@@ -1855,6 +1972,627 @@ createInterface({ input: process.stdin }).on("line", async (line) => {
         fsMod.rmSync(pushConfigFile, { force: true })
       }
       mockPushServer.close()
+    }
+  }
+
+  // ---- Reception project (「前台」) & cross-project read-only tools (t_d2b37871) ----
+  {
+    const fsFront = await import("node:fs")
+    const osFront = await import("node:os")
+    const pathFront = await import("node:path")
+    const { spawn: spawnFront } = await import("node:child_process")
+
+    const frontReq = async (pathname, { method = "GET", proj = "", body, key = humanKey } = {}) => {
+      const url = proj ? `${origin}${pathname}${pathname.includes("?") ? "&" : "?"}project=${encodeURIComponent(proj)}` : `${origin}${pathname}`
+      const headers = {}
+      if (body !== undefined) headers["content-type"] = "application/json"
+      if (key && body && body.as === "human") headers["x-bench-human"] = key
+      const res = await fetch(url, {
+        method,
+        headers: Object.keys(headers).length ? headers : undefined,
+        body: body !== undefined ? JSON.stringify(proj ? { project: proj, ...body } : body) : undefined,
+      })
+      const raw = await res.text()
+      let data = {}
+      try {
+        data = JSON.parse(raw)
+      } catch {}
+      return { status: res.status, data, raw }
+    }
+
+    const sleepFront = (ms) => new Promise((r) => setTimeout(r, ms))
+    const mcpStateRoot = fsFront.mkdtempSync(pathFront.join(osFront.tmpdir(), `bench-front-mcp-${stamp}-`))
+    const wakeOutFile = pathFront.join(mcpStateRoot, "front-wake-prompt.txt")
+    const mockFailKind = `mockffail_${stamp}`
+    const mockFrontKind = `mockfbot_${stamp}`
+    const agentsJsonPath = `${process.cwd()}/agents.json`
+    const hadAgentsBefore = fsFront.existsSync(agentsJsonPath)
+    const savedAgentsRaw = hadAgentsBefore ? fsFront.readFileSync(agentsJsonPath, "utf8") : null
+
+    const beforeProjectsRes = await frontReq("/api/v1/projects")
+    assert(beforeProjectsRes.status === 200, "读取初始项目列表失败")
+    const existingFront = beforeProjectsRes.data.projects.find((p) => p.front === true)
+    let createdFrontId = ""
+    let bizProjectId = ""
+    let pendingPermitPromise = null
+    let cleanBaseAdapters = null
+    const mcpProcs = []
+    const mockFailScript = pathFront.join(mcpStateRoot, "mock-fail-wake.mjs")
+    const mockFrontScript = pathFront.join(mcpStateRoot, "mock-front-wake.mjs")
+    fsFront.writeFileSync(
+      mockFailScript,
+      `process.stderr.write(${JSON.stringify(`模拟点名唤起报错_${stamp}`)})\nprocess.exit(2)\n`,
+      "utf8",
+    )
+    fsFront.writeFileSync(
+      mockFrontScript,
+      `import { writeFileSync } from "node:fs"\nwriteFileSync(${JSON.stringify(wakeOutFile)}, process.argv[3] || "", "utf8")\nconsole.log(${JSON.stringify(`【本轮结束】前台已收到指令_${stamp}`)})\n`,
+      "utf8",
+    )
+
+    const startMcpClient = (uuidTag) => {
+      const child = spawnFront(process.execPath, ["scripts/bench-mcp.mjs", "--agent", "claude"], {
+        cwd: process.cwd(),
+        env: {
+          ...process.env,
+          BENCH_URL: origin,
+          XDG_STATE_HOME: mcpStateRoot,
+          CLAUDE_CODE_SESSION_ID: uuidTag,
+        },
+        stdio: ["pipe", "pipe", "pipe"],
+      })
+      mcpProcs.push(child)
+      let seqId = 1
+      const pending = new Map()
+      let buf = ""
+      child.stdout.on("data", (chunk) => {
+        buf += chunk.toString("utf8")
+        let idx
+        while ((idx = buf.indexOf("\n")) >= 0) {
+          const line = buf.slice(0, idx).trim()
+          buf = buf.slice(idx + 1)
+          if (!line) continue
+          try {
+            const msg = JSON.parse(line)
+            if (msg.id !== undefined && pending.has(msg.id)) {
+              const resolve = pending.get(msg.id)
+              pending.delete(msg.id)
+              resolve(msg)
+            }
+          } catch {}
+        }
+      })
+      const rpc = (method, params = {}) =>
+        new Promise((resolve, reject) => {
+          const id = seqId++
+          const timer = setTimeout(() => {
+            pending.delete(id)
+            reject(new Error(`MCP ${method} 超时`))
+          }, 15_000)
+          pending.set(id, (msg) => {
+            clearTimeout(timer)
+            resolve(msg)
+          })
+          child.stdin.write(`${JSON.stringify({ jsonrpc: "2.0", id, method, params })}\n`)
+        })
+      return { child, rpc }
+    }
+
+    try {
+      // 1) Ordinary project cannot take reserved name 「前台」 or set front: true via update
+      const badPlainFront = await frontReq("/api/v1/projects", {
+        method: "POST",
+        body: { as: "human", name: "前台" },
+      })
+      assert(badPlainFront.status === 400, `普通新建项目起名「前台」应返回 400，实际 ${badPlainFront.status}`)
+
+      const badPatchFront = await frontReq(`/api/v1/projects/${project}`, {
+        method: "POST",
+        body: { as: "human", front: true },
+      })
+      assert(badPatchFront.status === 400, `普通项目改成 front: true 应返回 400，实际 ${badPatchFront.status}`)
+
+      // 2) Create / get single reception project (idempotent, pinned at index 0)
+      const f1 = await frontReq("/api/v1/projects", {
+        method: "POST",
+        body: { as: "human", front: true },
+      })
+      assert(
+        (existingFront ? f1.status === 200 : f1.status === 201) &&
+          f1.data.project?.name === "前台" &&
+          f1.data.project?.front === true,
+        `开启前台失败：${f1.status} ${f1.raw}`,
+      )
+      const frontId = f1.data.project.id
+      if (!existingFront) createdFrontId = frontId
+
+      const f2 = await frontReq("/api/v1/projects", {
+        method: "POST",
+        body: { as: "human", front: true },
+      })
+      assert(
+        f2.status === 200 && f2.data.project?.id === frontId && f2.data.project?.front === true,
+        `重复请求 front: true 应幂等返回同一个前台项目，实际 ${f2.status} ${f2.raw}`,
+      )
+
+      const renameFrontAttempt = await frontReq(`/api/v1/projects/${frontId}`, {
+        method: "POST",
+        body: { as: "human", name: "别的名字" },
+      })
+      assert(renameFrontAttempt.status === 400, `前台改名应返回 400，实际 ${renameFrontAttempt.status}`)
+
+      const listedAfterFront = await frontReq("/api/v1/projects")
+      assert(
+        listedAfterFront.data.projects[0]?.id === frontId &&
+          listedAfterFront.data.projects[0]?.front === true &&
+          listedAfterFront.data.projects.filter((p) => p.front === true).length === 1,
+        "GET /api/v1/projects 必须把唯一的前台项目排在第 0 项且带 front: true",
+      )
+
+      // 3) Register temporary mock adapters for failed call & reception wake prompt capture
+      const curAdapters = await frontReq("/api/v1/adapters")
+      assert(curAdapters.status === 200, "读取 adapters 失败")
+      cleanBaseAdapters = curAdapters.data.agents.map(({ name, command, reply }) => ({ name, command, reply }))
+      const saveAdaptersRes = await frontReq("/api/v1/adapters", {
+        method: "POST",
+        body: {
+          as: "human",
+          agents: [
+            ...cleanBaseAdapters,
+            {
+              name: mockFailKind,
+              command: `node '${mockFailScript}' {uuid} {text}`,
+              reply: "stdout",
+            },
+            {
+              name: mockFrontKind,
+              command: `node '${mockFrontScript}' {uuid} {text}`,
+              reply: "stdout",
+            },
+          ],
+        },
+      })
+      assert(saveAdaptersRes.status === 200, `保存前台测试适配器失败 ${saveAdaptersRes.raw}`)
+
+      // 4) Build a realistic business project with >4 seats, summary, tasks, open ask, pending permit, failed call, recalled msg, and >30 chat lines
+      const bizDir = fsFront.mkdtempSync(pathFront.join(osFront.tmpdir(), `bench-biz-dir-${stamp}-`))
+      const mkBiz = await frontReq("/api/v1/projects", {
+        method: "POST",
+        body: { as: "human", name: `业务房${stamp}`, dir: bizDir },
+      })
+      assert(mkBiz.status === 201, `建业务项目失败 ${mkBiz.raw}`)
+      bizProjectId = mkBiz.data.project.id
+      const bizName = mkBiz.data.project.name
+
+      // Re-verify reception stays at index 0 even after creating another project
+      const listedWithBiz = await frontReq("/api/v1/projects")
+      assert(listedWithBiz.data.projects[0]?.id === frontId, "新建普通项目后前台仍须排在第 0 项")
+
+      const joinBizSeat = async (name, extra = {}) => {
+        const res = await frontReq("/api/v1/join", {
+          method: "POST",
+          proj: bizProjectId,
+          body: { name, model: "mock-model", role: "开发", ...extra },
+        })
+        assert(res.status === 201, `业务席位 ${name} 入座失败 ${res.raw}`)
+        return { id: res.data.agent.id, name: res.data.agent.name, token: res.data.token }
+      }
+
+      const secretSessionUuid = `sess_secret_${stamp}_xyz987`
+      const bizWorker = await joinBizSeat("工匠", { agentName: "claude", uuid: secretSessionUuid })
+      const bizAsker = await joinBizSeat("提问员")
+      const bizOweSeat = await joinBizSeat("欠活员", { agentName: mockFailKind, uuid: `fail_${stamp}` })
+      const bizQuiet1 = await joinBizSeat("闲甲")
+      const bizQuiet2 = await joinBizSeat("闲乙")
+      const bizQuiet3 = await joinBizSeat("闲丙")
+      void bizQuiet1
+      void bizQuiet2
+      void bizQuiet3
+
+      await frontReq("/api/v1/pulse", {
+        method: "POST",
+        proj: bizProjectId,
+        body: { agentId: bizWorker.id, token: bizWorker.token, status: "working", doing: "正在重构结算管线" },
+      })
+
+      // Room summary (>300 chars so overview clips head while peek shows full text)
+      const fullSummaryText = `【摘要头_${stamp}】` + "这是业务房间阶段进展摘要正文，记录架构与接口决策。".repeat(12) + `【摘要尾_${stamp}】`
+      const sumRes = await frontReq("/api/v1/summary", {
+        method: "POST",
+        proj: bizProjectId,
+        body: { agentId: bizWorker.id, token: bizWorker.token, action: "write", text: fullSummaryText },
+      })
+      assert(sumRes.status === 200, `写摘要失败 ${sumRes.raw}`)
+
+      // Tasks: one waiting for review, one owed by quiet seat
+      const tReviewRes = await frontReq("/api/v1/tasks", {
+        method: "POST",
+        proj: bizProjectId,
+        body: {
+          agentId: bizWorker.id,
+          token: bizWorker.token,
+          title: `结算对账单_${stamp}`,
+          owner: bizWorker.name,
+          steps: ["核对流水", "请用户验收"],
+        },
+      })
+      assert(tReviewRes.status === 201, "建待验收任务失败")
+      const tReviewId = tReviewRes.data.task.id
+      await frontReq(`/api/v1/tasks/${tReviewId}`, {
+        method: "POST",
+        proj: bizProjectId,
+        body: { agentId: bizWorker.id, token: bizWorker.token, action: "step", step: 1, state: "done", note: "对账完毕" },
+      })
+      await frontReq(`/api/v1/tasks/${tReviewId}`, {
+        method: "POST",
+        proj: bizProjectId,
+        body: { agentId: bizWorker.id, token: bizWorker.token, action: "review", note: "报表已生成，请核验导出结果" },
+      })
+
+      const tOwedRes = await frontReq("/api/v1/tasks", {
+        method: "POST",
+        proj: bizProjectId,
+        body: {
+          as: "human",
+          title: `补齐回滚脚本_${stamp}`,
+          owner: bizOweSeat.name,
+          steps: ["编写回滚脚本", "本地演练"],
+        },
+      })
+      assert(tOwedRes.status === 201, "建欠活任务失败")
+      const tOwedId = tOwedRes.data.task.id
+
+      // Trigger a failed @ call on bizOweSeat
+      const callFailMsg = await frontReq("/api/v1/say", {
+        method: "POST",
+        proj: bizProjectId,
+        body: { as: "human", text: `@${bizOweSeat.name} 请把回滚脚本交上来` },
+      })
+      assert(callFailMsg.status === 200, "发送点名消息失败")
+      const callFailMsgId = callFailMsg.data.message.id
+      for (let i = 0; i < 30; i++) {
+        const snap = await frontReq("/api/v1/room", { proj: bizProjectId })
+        const msg = snap.data.messages.find((m) => m.id === callFailMsgId)
+        if (msg?.calls?.some((c) => c.state === "failed")) break
+        await sleepFront(150)
+      }
+
+      // Open bench_ask with options
+      const askRes = await frontReq("/api/v1/ask", {
+        method: "POST",
+        proj: bizProjectId,
+        body: {
+          agentId: bizAsker.id,
+          token: bizAsker.token,
+          action: "ask",
+          text: `导出格式用 CSV 还是 Parquet_${stamp}？`,
+          options: [
+            { label: "CSV", detail: "兼容表格直接打开" },
+            { label: "Parquet", detail: "列式压缩体积小" },
+          ],
+        },
+      })
+      assert(askRes.status === 200, `发起提问失败 ${askRes.raw}`)
+      const openAskId = askRes.data.message.id
+
+      // Pending permit request
+      pendingPermitPromise = frontReq("/api/v1/permit", {
+        method: "POST",
+        proj: bizProjectId,
+        key: "",
+        body: {
+          agentId: bizWorker.id,
+          token: bizWorker.token,
+          action: "tool",
+          tool: "Bash",
+          input: { command: `pg_dump --schema-only db_${stamp}` },
+        },
+      })
+      let pendingPermitId = ""
+      for (let i = 0; i < 20; i++) {
+        const snap = await frontReq("/api/v1/room", { proj: bizProjectId })
+        if (snap.data.permits?.length > 0) {
+          pendingPermitId = snap.data.permits[0].id
+          break
+        }
+        await sleepFront(100)
+      }
+      assert(Boolean(pendingPermitId), "业务项目应有一条挂起的权限请求")
+
+      // Post & immediately recall a sensitive message (must NEVER appear in overview/peek)
+      const recalledSecret = `绝密撤回口令_${stamp}_DO_NOT_SHOW`
+      const toRecall = await frontReq("/api/v1/say", {
+        method: "POST",
+        proj: bizProjectId,
+        body: { as: "human", text: recalledSecret },
+      })
+      const recallDone = await frontReq("/api/v1/recall", {
+        method: "POST",
+        proj: bizProjectId,
+        body: { as: "human", id: toRecall.data.message.id },
+      })
+      assert(recallDone.status === 200, "撤回消息失败")
+
+      // Post 33 talk lines so peek's 30-message window + `before` pagination can be verified
+      for (let i = 1; i <= 31; i++) {
+        await frontReq("/api/v1/say", {
+          method: "POST",
+          proj: bizProjectId,
+          body: {
+            agentId: bizWorker.id,
+            token: bizWorker.token,
+            text: `流水日志_${stamp}_${String(i).padStart(2, "0")}`,
+          },
+        })
+      }
+
+      // Advance bizQuiet1's seenSeq to right here, then post 2 more lines that remain unseen by bizQuiet1
+      const quietInboxBefore = await frontReq("/api/v1/inbox", {
+        method: "POST",
+        proj: bizProjectId,
+        body: { agentId: bizQuiet1.id, token: bizQuiet1.token, after: 0 },
+      })
+      const savedQuietCursor = quietInboxBefore.data.seq
+      assert(savedQuietCursor > 0, "记录测试席位初始 seenSeq 失败")
+
+      for (let i = 32; i <= 33; i++) {
+        await frontReq("/api/v1/say", {
+          method: "POST",
+          proj: bizProjectId,
+          body: {
+            agentId: bizWorker.id,
+            token: bizWorker.token,
+            text: `流水日志_${stamp}_${String(i).padStart(2, "0")}`,
+          },
+        })
+      }
+
+      // 5) Guard checks: 401 without token, 403 for seats in ordinary projects (both HTTP & MCP)
+      const unauthOverview = await frontReq("/api/v1/overview", { method: "POST", body: {} })
+      assert(unauthOverview.status === 401, `无凭证调 overview 应返回 401，实际 ${unauthOverview.status}`)
+      const unauthPeek = await frontReq("/api/v1/peek", { method: "POST", body: { project: bizProjectId } })
+      assert(unauthPeek.status === 401, `无凭证调 peek 应返回 401，实际 ${unauthPeek.status}`)
+
+      const forbidOverview = await frontReq("/api/v1/overview", {
+        method: "POST",
+        body: { agentId: bizWorker.id, token: bizWorker.token },
+      })
+      assert(forbidOverview.status === 403, `普通项目席位调 /api/v1/overview 必须返回 403，实际 ${forbidOverview.status}`)
+
+      const forbidPeek = await frontReq("/api/v1/peek", {
+        method: "POST",
+        body: { agentId: bizWorker.id, token: bizWorker.token, project: bizProjectId },
+      })
+      assert(forbidPeek.status === 403, `普通项目席位调 /api/v1/peek 必须返回 403，实际 ${forbidPeek.status}`)
+
+      // Also verify via real bench-mcp.mjs stdio bridge for an ordinary project seat
+      const ordinaryMcp = startMcpClient(`ord_mcp_${stamp}`)
+      await ordinaryMcp.rpc("initialize", { protocolVersion: "2025-06-18" })
+      const ordJoin = await ordinaryMcp.rpc("tools/call", {
+        name: "bench_join",
+        arguments: { project: bizName, name: "桥普通席", model: "claude", role: "验证" },
+      })
+      assert(!ordJoin.result?.isError, `普通桥席位入座失败：${JSON.stringify(ordJoin)}`)
+      const ordOverviewCall = await ordinaryMcp.rpc("tools/call", { name: "bench_overview", arguments: {} })
+      assert(
+        ordOverviewCall.result?.isError === true && ordOverviewCall.result?.content?.[0]?.text?.includes("前台"),
+        `普通项目席位经 MCP 调 bench_overview 应报错拒绝，实际：${JSON.stringify(ordOverviewCall)}`,
+      )
+      const ordPeekCall = await ordinaryMcp.rpc("tools/call", {
+        name: "bench_peek",
+        arguments: { project: bizName },
+      })
+      assert(
+        ordPeekCall.result?.isError === true && ordPeekCall.result?.content?.[0]?.text?.includes("前台"),
+        `普通项目席位经 MCP 调 bench_peek 应报错拒绝，实际：${JSON.stringify(ordPeekCall)}`,
+      )
+
+      // 6) Seat in reception project: verify wake prompt carries <200-char front duty (and ordinary project does not)
+      const frontWakeSeat = await frontReq("/api/v1/join", {
+        method: "POST",
+        proj: frontId,
+        body: {
+          name: `前台总管${stamp}`,
+          model: "mock-front",
+          role: "接待总览",
+          agentName: mockFrontKind,
+          uuid: `front_wake_${stamp}`,
+        },
+      })
+      assert(frontWakeSeat.status === 201, `前台席位入座失败 ${frontWakeSeat.raw}`)
+
+      const wakeTrigger = await frontReq("/api/v1/say", {
+        method: "POST",
+        proj: frontId,
+        body: { as: "human", text: `@前台总管${stamp} 帮我看下各项目有什么事等我处理` },
+      })
+      assert(wakeTrigger.status === 200, "前台点名发言失败")
+
+      for (let i = 0; i < 40; i++) {
+        if (fsFront.existsSync(wakeOutFile)) break
+        await sleepFront(150)
+      }
+      assert(fsFront.existsSync(wakeOutFile), "前台席位被点名后应被成功唤起并写出提示词")
+      const capturedFrontPrompt = fsFront.readFileSync(wakeOutFile, "utf8")
+      const dutyMatch = capturedFrontPrompt.match(/你是前台[\s\S]*?说清楚。/)
+      assert(
+        dutyMatch &&
+          dutyMatch[0].length <= 200 &&
+          dutyMatch[0].includes("bench_overview") &&
+          dutyMatch[0].includes("bench_peek") &&
+          dutyMatch[0].includes("t_…") &&
+          dutyMatch[0].includes("m_…") &&
+          dutyMatch[0].includes("只读阶段"),
+        `前台唤起提示词须包含 <=200 字的完整职责说明，实际：${dutyMatch ? `${dutyMatch[0].length}字: ${dutyMatch[0]}` : capturedFrontPrompt.slice(-400)}`,
+      )
+
+      // Ordinary project wake prompt must NOT include reception duty
+      const bizPromptPreview = await frontReq("/api/v1/prompt", { proj: bizProjectId })
+      assert(!JSON.stringify(bizPromptPreview.data).includes("你是前台"), "普通项目提示词不应含前台职责")
+
+      // 7) Call bench_overview & bench_peek from reception seat (both MCP stdio & HTTP)
+      const frontMcp = startMcpClient(`front_mcp_${stamp}`)
+      await frontMcp.rpc("initialize", { protocolVersion: "2025-06-18" })
+      const toolListRes = await frontMcp.rpc("tools/list", {})
+      const toolNames = (toolListRes.result?.tools ?? []).map((t) => t.name)
+      assert(
+        toolNames.includes("bench_overview") && toolNames.includes("bench_peek"),
+        "bench-mcp.mjs tools/list 应注册 bench_overview 与 bench_peek",
+      )
+
+      const frontMcpJoin = await frontMcp.rpc("tools/call", {
+        name: "bench_join",
+        arguments: { project: "前台", name: `前台桥${stamp}`, model: "claude", role: "前台" },
+      })
+      assert(!frontMcpJoin.result?.isError, `前台 MCP 入座失败：${JSON.stringify(frontMcpJoin)}`)
+
+      const snapBizBefore = await frontReq("/api/v1/room", { proj: bizProjectId })
+      const bizSeqBefore = snapBizBefore.data.seq
+
+      const mcpOverview = await frontMcp.rpc("tools/call", { name: "bench_overview", arguments: {} })
+      assert(!mcpOverview.result?.isError, `前台调 bench_overview 失败：${JSON.stringify(mcpOverview)}`)
+      const overviewText = mcpOverview.result?.content?.[0]?.text ?? ""
+      assert(overviewText.length > 0 && overviewText.length <= 4600, `bench_overview 输出应精简控制在几千字内，实际 ${overviewText.length}`)
+      assert(
+        overviewText.includes(bizProjectId) &&
+          overviewText.includes(bizName) &&
+          overviewText.includes(bizDir) &&
+          overviewText.includes("提问 1") &&
+          overviewText.includes("权限 1") &&
+          overviewText.includes("验收 1") &&
+          overviewText.includes("未完待办：2") &&
+          overviewText.includes("工匠（在做）") &&
+          overviewText.includes("欠活员") &&
+          overviewText.includes("停着还欠") &&
+          overviewText.includes("其余无事席位") &&
+          overviewText.includes(`【摘要头_${stamp}】`) &&
+          !overviewText.includes(`【摘要尾_${stamp}】`),
+        `bench_overview 内容不符合预期：\n${overviewText}`,
+      )
+
+      // Peek by project name via MCP
+      const mcpPeek = await frontMcp.rpc("tools/call", {
+        name: "bench_peek",
+        arguments: { project: bizName },
+      })
+      assert(!mcpPeek.result?.isError, `前台调 bench_peek 失败：${JSON.stringify(mcpPeek)}`)
+      const peekText = mcpPeek.result?.content?.[0]?.text ?? ""
+      assert(
+        peekText.includes(`【摘要头_${stamp}】`) &&
+          peekText.includes(`【摘要尾_${stamp}】`) &&
+          peekText.includes(tReviewId) &&
+          peekText.includes("步骤 1/2") &&
+          peekText.includes("报表已生成，请核验导出结果") &&
+          peekText.includes(tOwedId) &&
+          peekText.includes(openAskId) &&
+          peekText.includes(`导出格式用 CSV 还是 Parquet_${stamp}？`) &&
+          peekText.includes("Parquet") &&
+          peekText.includes(pendingPermitId) &&
+          peekText.includes(`pg_dump --schema-only db_${stamp}`) &&
+          peekText.includes(callFailMsgId) &&
+          peekText.includes(`模拟点名唤起报错_${stamp}`) &&
+          peekText.includes(`流水日志_${stamp}_33`) &&
+          !peekText.includes(`流水日志_${stamp}_01`),
+        `bench_peek 内容缺失关键段落：\n${peekText}`,
+      )
+
+      // HTTP /api/v1/peek pagination with `before` (by project id)
+      const httpOverview = await frontReq("/api/v1/overview", {
+        method: "POST",
+        body: { agentId: frontWakeSeat.data.agent.id, token: frontWakeSeat.data.token },
+      })
+      assert(httpOverview.status === 200, "HTTP /api/v1/overview 应返回 200")
+
+      const httpPeekPage1 = await frontReq("/api/v1/peek", {
+        method: "POST",
+        body: { agentId: frontWakeSeat.data.agent.id, token: frontWakeSeat.data.token, project: bizProjectId },
+      })
+      assert(
+        httpPeekPage1.status === 200 &&
+          httpPeekPage1.data.talk.messages.length === 30 &&
+          httpPeekPage1.data.talk.hasMore === true &&
+          typeof httpPeekPage1.data.talk.oldestSeq === "number",
+        `HTTP /api/v1/peek 第一页应返回最近 30 条且 hasMore=true`,
+      )
+
+      const httpPeekPage2 = await frontReq("/api/v1/peek", {
+        method: "POST",
+        body: {
+          agentId: frontWakeSeat.data.agent.id,
+          token: frontWakeSeat.data.token,
+          project: bizProjectId,
+          before: httpPeekPage1.data.talk.oldestSeq,
+        },
+      })
+      assert(
+        httpPeekPage2.status === 200 && httpPeekPage2.data.text.includes(`流水日志_${stamp}_01`),
+        `bench_peek 传 before 往前翻页应能读到第 01 条早期对话`,
+      )
+
+      // 8) Security & strictly read-only guarantees: no recalled text, no humanKey/tokens/uuids, no seenSeq move, no wake triggered
+      const combinedPayloads = [overviewText, peekText, httpOverview.raw, httpPeekPage1.raw, httpPeekPage2.raw].join("\n")
+      assert(!combinedPayloads.includes(recalledSecret), "已撤回消息原文绝不能出现在 overview 或 peek 中")
+      assert(!combinedPayloads.includes(humanKey), "human-key 绝不能出现在 overview 或 peek 中")
+      assert(!combinedPayloads.includes(bizWorker.token), "席位 token 绝不能出现在 overview 或 peek 中")
+      assert(!combinedPayloads.includes(secretSessionUuid), "席位底层 session uuid 绝不能出现在 overview 或 peek 中")
+
+      const snapBizAfter = await frontReq("/api/v1/room", { proj: bizProjectId })
+      assert(snapBizAfter.data.seq === bizSeqBefore, `只读工具不应往业务房间写任何消息或改变 seq（前 ${bizSeqBefore}，后 ${snapBizAfter.data.seq}）`)
+      assert(
+        !snapBizAfter.data.agents.some((a) => Boolean(a.runId)),
+        "跨项目只读查询绝不应触发任何席位唤起",
+      )
+
+      // Check bizQuiet1's unseen messages are still unseen (seenSeq was NOT advanced by overview/peek)
+      const quietInboxAfter = await frontReq("/api/v1/inbox", {
+        method: "POST",
+        proj: bizProjectId,
+        body: { agentId: bizQuiet1.id, token: bizQuiet1.token, after: savedQuietCursor },
+      })
+      const unseenTexts = quietInboxAfter.data.messages.map((m) => m.text).join("\n")
+      assert(
+        unseenTexts.includes(`流水日志_${stamp}_32`) && unseenTexts.includes(`流水日志_${stamp}_33`),
+        "调完 overview/peek 后别的项目席位原有的未读消息和 seenSeq 必须保持原样",
+      )
+
+      fsFront.rmSync(bizDir, { recursive: true, force: true })
+    } finally {
+      for (const proc of mcpProcs) {
+        try {
+          proc.kill("SIGTERM")
+        } catch {}
+      }
+      if (bizProjectId) {
+        const snap = await frontReq("/api/v1/room", { proj: bizProjectId }).catch(() => null)
+        for (const p of snap?.data?.permits ?? []) {
+          await frontReq("/api/v1/permit", {
+            method: "POST",
+            proj: bizProjectId,
+            body: { as: "human", id: p.id, decision: "deny", note: "测试清理" },
+          }).catch(() => {})
+        }
+        if (pendingPermitPromise) await Promise.allSettled([pendingPermitPromise])
+        await frontReq(`/api/v1/projects/${bizProjectId}`, {
+          method: "POST",
+          body: { as: "human", action: "delete", confirm: "删除" },
+        }).catch(() => {})
+      }
+      if (createdFrontId) {
+        await frontReq(`/api/v1/projects/${createdFrontId}`, {
+          method: "POST",
+          body: { as: "human", action: "delete", confirm: "删除" },
+        }).catch(() => {})
+      }
+      if (cleanBaseAdapters) {
+        await frontReq("/api/v1/adapters", {
+          method: "POST",
+          body: { as: "human", agents: cleanBaseAdapters },
+        }).catch(() => {})
+      }
+      if (hadAgentsBefore && savedAgentsRaw !== null) {
+        fsFront.writeFileSync(agentsJsonPath, savedAgentsRaw, "utf8")
+      }
+      fsFront.rmSync(mcpStateRoot, { recursive: true, force: true })
     }
   }
 

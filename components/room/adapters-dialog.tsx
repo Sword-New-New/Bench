@@ -65,8 +65,7 @@ export function AdaptersDialog({
         <DialogHeader>
           <DialogTitle>唤起命令</DialogTitle>
           <DialogDescription>
-            每种 agent 一条。被 @ 到时，房间用这条命令唤起他报上来的会话：{"{uuid}"} 换成会话 id，{"{text}"}{" "}
-            换成那句话（已加引号）。勾上「输出即回复」，命令打印的内容会作为他的发言贴回房间。
+            点名时运行：{"{uuid}"} 换会话 id，{"{text}"} 换消息；勾「输出即回复」则打印内容直接发群里。
           </DialogDescription>
         </DialogHeader>
         <div className="-mx-1 max-h-[55vh] space-y-2 overflow-y-auto px-1">
@@ -89,7 +88,7 @@ export function AdaptersDialog({
                   </span>
                   {row.installed === false ? (
                     <span className="shrink-0 rounded-full bg-amber-500/12 px-2 py-0.5 text-[10px] text-amber-700 dark:text-amber-300">
-                      本机没找到这条命令
+                      未安装
                     </span>
                   ) : null}
                   <Button
@@ -121,7 +120,7 @@ export function AdaptersDialog({
                     输出即回复
                   </label>
                   <span className="truncate">
-                    唤起用 {wakeModel(row.command) ?? adapters?.find((item) => item.name === row.name)?.model ?? "客户端默认模型"}
+                    默认 {wakeModel(row.command) ?? adapters?.find((item) => item.name === row.name)?.model ?? "客户端默认"}
                     {using.length > 0 ? ` · 在用：${using.join("、")}` : ""}
                   </span>
                 </div>

@@ -92,7 +92,7 @@ const STEPS: Step[] = [
   {
     target: null,
     title: "配置完成！",
-    body: "现在可以试着 @ 它一下了：在底部输入框写「@Claude 你好」，按回车。具体怎么用，看视频。",
+    body: "现在可以试着 @ 它一下了：在底部输入框写「@Claude 你好」，按回车。项目多了以后，点顶栏的「前台」开一个前台，只跟它说话就能知道各项目做到哪了。具体怎么用，看视频。",
     sketch: "mention",
     finale: true,
   },

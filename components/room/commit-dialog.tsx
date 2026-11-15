@@ -49,20 +49,20 @@ export function CommitDialog() {
           <DialogDescription>
             {commit
               ? `${commit.hash.slice(0, 10)} · ${commit.author} · ${new Date(commit.date).toLocaleString("zh-CN", { hour12: false })} · ${commit.dir}`
-              : shown?.error ?? "正在读…"}
+              : shown?.error ?? "读取中…"}
           </DialogDescription>
         </DialogHeader>
         {!shown ? (
           <div className="flex items-center gap-2 py-6 text-sm text-muted-foreground">
             <Loader2 className="size-4 animate-spin" />
-            在仓库里找这个提交
+            正在读取提交…
           </div>
         ) : commit ? (
           <div className="min-h-0 flex-1 space-y-3 overflow-y-auto pr-1 text-[0.9rem]">
             {commit.body ? <p className="whitespace-pre-wrap text-muted-foreground">{commit.body}</p> : null}
             {commit.stat ? <CodeBox code={commit.stat} lang="改动的文件" tone="ink" /> : null}
             {commit.patch ? <CodeBox code={commit.patch} lang="diff" tone="ink" /> : null}
-            {commit.truncated ? <p className="text-xs text-muted-foreground">diff 太长，只显示了前面一部分。</p> : null}
+            {commit.truncated ? <p className="text-xs text-muted-foreground">diff 太长，已截断。</p> : null}
           </div>
         ) : null}
       </DialogContent>

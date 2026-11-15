@@ -27,7 +27,7 @@ export function PinnedAsks({ asks }: { asks: Message[] }) {
         {/* Dark: the reminder is only this dot; the text is plain. */}
         <span className="breathe mx-0.5 hidden size-1.5 shrink-0 rounded-full bg-amber-500 dark:inline-block" aria-hidden />
         <span className="min-w-0 flex-1 truncate">
-          还有 {asks.length} 个问题在等你回答 · {first.authorName}：{first.text.replace(/\s+/g, " ")}
+          {asks.length} 个问题等你答 · {first.authorName}：{first.text.replace(/\s+/g, " ")}
         </span>
         <ChevronDown className={`size-3.5 shrink-0 transition-transform dark:text-slate-400 ${open ? "rotate-180" : ""}`} />
       </button>
@@ -62,7 +62,7 @@ export function AskCard({ message }: { message: Message }) {
       <div className="mt-1.5 flex max-w-full items-start gap-2 rounded-2xl border border-emerald-500/30 bg-emerald-500/8 px-3 py-2 text-xs">
         <Check className="mt-0.5 size-3.5 shrink-0 text-emerald-600 dark:text-emerald-400" />
         <span className="min-w-0">
-          <span className="text-muted-foreground">你回答了：</span>
+          <span className="text-muted-foreground">已答：</span>
           <span className="font-medium break-words whitespace-pre-wrap">{ask.answer}</span>
         </span>
       </div>
@@ -81,7 +81,7 @@ export function AskCard({ message }: { message: Message }) {
       setText("")
       setPicked([])
     } catch (error) {
-      toast.error(error instanceof Error ? error.message : "没发出去")
+      toast.error(error instanceof Error ? error.message : "发送失败")
     } finally {
       setSending(false)
     }
@@ -94,7 +94,7 @@ export function AskCard({ message }: { message: Message }) {
     <div className="mt-1.5 w-full max-w-md rounded-2xl border border-amber-500/40 bg-card px-3 py-2.5 text-xs shadow-sm ring-2 ring-amber-500/10">
       <p className="flex items-center gap-1.5 font-medium text-amber-700 dark:text-amber-400">
         <CircleHelp className="size-3.5" />
-        {message.authorName} 在等你回答{ask.multi ? "（可多选）" : ""}
+        {message.authorName} 等你回答{ask.multi ? "（可多选）" : ""}
       </p>
       {options.length > 0 ? (
         <div className="mt-2 flex flex-col gap-1.5">
@@ -131,7 +131,7 @@ export function AskCard({ message }: { message: Message }) {
               className="self-end rounded-full bg-primary px-3 py-1 font-medium text-primary-foreground disabled:opacity-50"
               onClick={() => void send(options.filter((option) => picked.includes(option.label)).map((option) => option.label).join("、"))}
             >
-              选好了（{picked.length}）
+              确定（{picked.length}）
             </button>
           ) : null}
         </div>
@@ -146,7 +146,7 @@ export function AskCard({ message }: { message: Message }) {
         <input
           value={text}
           onChange={(event) => setText(event.target.value)}
-          placeholder={options.length ? "都不对？自己写…" : "写下你的回答…"}
+          placeholder={options.length ? "其他回答…" : "输入回答…"}
           aria-label={`回答 ${message.authorName} 的问题`}
           className="h-7 min-w-0 flex-1 rounded-full border bg-background/70 px-3 outline-none focus:border-primary"
         />

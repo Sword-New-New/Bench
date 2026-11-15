@@ -24,11 +24,16 @@ import type { PublicAgent } from "@/lib/types"
 type Workspace = { label: string; path: string; git: boolean }
 type Mode = "same" | "worktree" | "temp" | "path"
 
+// Opened for a particular job (the front desk, components/room/front.tsx):
+// the name, 分工 and workspace it starts with, and the kinds to choose from
+// right in the dialog (no kind picked beforehand).
+export type SpawnPreset = { name: string; role: string; mode: Mode; kinds: string[]; title: string; note: string }
+
 const MODES: { id: Mode; label: string; hint: string; icon: typeof Folders }[] = [
-  { id: "same", label: "同一个目录", hint: "在项目目录里，和别的席位改同一份代码", icon: Folders },
-  { id: "worktree", label: "新 worktree", hint: "从项目目录的仓库再签出一份，用自己的分支", icon: FolderGit2 },
-  { id: "temp", label: "临时目录", hint: "不在项目里干活，房间给它新建一个空文件夹", icon: FolderTree },
-  { id: "path", label: "自己填", hint: "放在你指定的目录里", icon: FolderOpen },
+  { id: "same", label: "同目录", hint: "共用项目目录", icon: Folders },
+  { id: "worktree", label: "新分支", hint: "签出独立 worktree 与分支", icon: FolderGit2 },
+  { id: "temp", label: "临时目录", hint: "新建隔离空目录", icon: FolderTree },
+  { id: "path", label: "指定目录", hint: "手动选择目录", icon: FolderOpen },
 ]
 
 // Long folders read better with the home folder as ~ and the middle cut.
@@ -48,11 +53,16 @@ export function SpawnDialog({
   from,
   agents,
   onClose,
+  preset,
+  onKind,
 }: {
   kind: string | null
   from: PublicAgent | null
   agents: PublicAgent[]
   onClose: () => void
+  preset?: SpawnPreset | null
+  // With a preset: another kind picked in the dialog.
+  onKind?: (kind: string) => void
 }) {
   const info = KINDS.find((item) => item.id === kind)
   const [spaces, setSpaces] = useState<Workspace[] | null>(null)
@@ -80,18 +90,31 @@ export function SpawnDialog({
 
   // Fresh fields each time it opens.
   const [shown, setShown] = useState<string | null>(null)
-  const key = kind ? `${kind}:${from?.id ?? ""}` : null
+  const key = kind ? `${kind}:${from?.id ?? ""}:${preset ? "preset" : ""}` : null
+  // Switching kinds inside a preset dialog keeps what was typed.
+  const sameOpening = Boolean(preset && shown && key && shown.split(":").slice(1).join(":") === key.split(":").slice(1).join(":"))
   if (key !== shown) {
     setShown(key)
-    setSpaces(null)
-    setRole("")
-    setTask("")
     setModel("")
     setEffort("")
     setLimits(NO_LIMITS)
-    setMode("same")
-    setTyped("")
-    if (info) {
+    if (sameOpening) {
+      // Only the model goes: it belongs to the kind.
+    } else if (preset) {
+      setSpaces(null)
+      setTask("")
+      setTyped("")
+      setRole(preset.role)
+      setMode(preset.mode)
+      setName(preset.name)
+    } else {
+      setSpaces(null)
+      setRole("")
+      setTask("")
+      setMode("same")
+      setTyped("")
+    }
+    if (info && !preset) {
       const taken = new Set(agents.map((agent) => agent.name))
       let n = 2
       while (taken.has(`${info.label}${n}`)) n += 1
@@ -110,14 +133,15 @@ export function SpawnDialog({
         const home = data.workspaces.find((item) => item.label.split("、")[0] === "项目目录")
         const pick = mine ?? home ?? null
         setBase(pick)
-        // A project with no folder set: only a folder typed in will do.
-        if (!pick) setMode("path")
+        // A project with no folder set: only a folder typed in will do
+        // (a preset's own workspace stays).
+        if (!pick && !preset) setMode("path")
       })
       .catch(() => !stop && setSpaces([]))
     return () => {
       stop = true
     }
-  }, [kind, from])
+  }, [kind, from, preset])
 
   const folder = mode === "path" ? typed.trim() : (base?.path ?? "")
   const blocked = mode === "worktree" && base !== null && !base.git
@@ -135,7 +159,7 @@ export function SpawnDialog({
       })
       if (result.dir) setTyped(result.dir)
     } catch (error) {
-      toast.error(error instanceof Error ? error.message : "没打开选目录的窗口")
+      toast.error(error instanceof Error ? error.message : "打开目录选择失败")
     } finally {
       setBrowsing(false)
     }
@@ -161,12 +185,11 @@ export function SpawnDialog({
           autoFull: permitsOnPage && autoFull,
         }),
       })
-      toast.success(`${result.agent.name} 入座了`, {
-        description: result.branch ? `在 ${result.dir}（分支 ${result.branch}）` : `在 ${result.dir}`,
-      })
+      const shownName = result.agent.name.length > 10 ? `${result.agent.name.slice(0, 9)}…` : result.agent.name
+      toast.success(`${shownName} 已入座`)
       onClose()
     } catch (error) {
-      toast.error(error instanceof Error ? error.message : "没开出来")
+      toast.error(error instanceof Error ? error.message : "新建会话失败")
     } finally {
       setSending(false)
     }
@@ -176,11 +199,16 @@ export function SpawnDialog({
     <Dialog open={kind !== null} onOpenChange={(open) => !open && onClose()}>
       <DialogContent className="sm:max-w-md">
         <DialogHeader>
-          <DialogTitle>开一个新的 {info?.label} 会话</DialogTitle>
+          <DialogTitle className="flex items-center gap-2">
+            <span>{preset ? preset.title : "开新会话"}</span>
+            {!preset && info ? <span className="text-xs font-normal text-muted-foreground">{info.label}</span> : null}
+          </DialogTitle>
           <DialogDescription>
-            {kind && kind !== "claude" && kind !== "cursor"
-              ? `房间在后台用 ${{ dsh: "dsh-agent", antigravity: "agy", codex: "codex" }[kind] ?? "codebuddy"} 建好会话并入座，要等十几秒。之后和别的席位一样 @ 它就行。`
-              : "房间在后台建好会话，直接入座。第一次被点名时它才真正开始，之后和别的席位一样 @ 它就行。"}
+            {preset
+              ? preset.note
+              : kind && kind !== "claude" && kind !== "cursor"
+                ? "后台建好会话并入座（约十余秒），之后直接 @ 它。"
+                : "后台建好会话直接入座，首次点名时启动。"}
           </DialogDescription>
         </DialogHeader>
         <form
@@ -190,6 +218,34 @@ export function SpawnDialog({
             void create()
           }}
         >
+          {preset ? (
+            <div className="space-y-1.5">
+              <Label>选客户端</Label>
+              <div className="flex flex-wrap gap-1.5" role="radiogroup" aria-label="选客户端">
+                {preset.kinds.map((id) => {
+                  const item = KINDS.find((entry) => entry.id === id)
+                  if (!item) return null
+                  const on = id === kind
+                  return (
+                    <button
+                      key={id}
+                      type="button"
+                      role="radio"
+                      aria-checked={on}
+                      className={`flex items-center gap-1.5 rounded-full border px-2.5 py-1 text-xs transition-colors ${
+                        on ? "border-primary bg-primary/8 text-foreground" : "text-muted-foreground hover:bg-muted"
+                      }`}
+                      onClick={() => onKind?.(id)}
+                    >
+                      <span className="size-2 rounded-full" style={{ background: item.color }} aria-hidden="true" />
+                      {item.label}
+                    </button>
+                  )
+                })}
+              </div>
+            </div>
+          ) : null}
+
           <div className="grid grid-cols-2 gap-3">
             <div className="space-y-1.5">
               <Label htmlFor="spawn-name">名字</Label>
@@ -197,7 +253,7 @@ export function SpawnDialog({
             </div>
             <div className="space-y-1.5">
               <Label htmlFor="spawn-role">分工</Label>
-              <Input id="spawn-role" value={role} onChange={(event) => setRole(event.target.value)} placeholder="比如：写测试" maxLength={24} />
+              <Input id="spawn-role" value={role} onChange={(event) => setRole(event.target.value)} placeholder="如：写测试" maxLength={24} />
             </div>
           </div>
 
@@ -226,7 +282,7 @@ export function SpawnDialog({
                     role="radio"
                     aria-checked={on}
                     disabled={off}
-                    title={off ? "这个项目没设目录" : item.hint}
+                    title={off ? "项目未设目录" : item.hint}
                     className={`flex flex-col items-center gap-1 rounded-xl border px-2 py-2 text-xs transition-colors disabled:cursor-not-allowed disabled:opacity-40 ${
                       on ? "border-primary bg-primary/8 text-foreground" : "text-muted-foreground enabled:hover:bg-muted"
                     }`}
@@ -249,42 +305,42 @@ export function SpawnDialog({
                 />
                 <Button type="button" variant="outline" className="shrink-0" disabled={browsing} onClick={browse}>
                   {browsing ? <Loader2 className="animate-spin" /> : <FolderSearch />}
-                  {browsing ? "在选…" : "浏览…"}
+                  {browsing ? "选择中…" : "浏览"}
                 </Button>
               </div>
             ) : mode === "temp" ? null : spaces === null ? (
               <p className="flex items-center gap-1.5 py-1 text-xs text-muted-foreground">
                 <Loader2 className="size-3 animate-spin" />
-                正在找项目目录…
+                查找目录中…
               </p>
             ) : base ? (
               <p className="truncate rounded-lg bg-muted px-2.5 py-1.5 font-mono text-xs" title={base.path}>
                 {short(base.path)}
-                {from && mode === "same" ? <span className="font-sans text-muted-foreground">（和 {from.name} 同一个）</span> : null}
+                {from && mode === "same" ? <span className="font-sans text-muted-foreground">（与 {from.name} 同目录）</span> : null}
               </p>
             ) : null}
             <p className={`text-[11px] leading-4 ${blocked ? "text-amber-700 dark:text-amber-400" : "text-muted-foreground"}`}>
               {noFolder && mode !== "temp" && mode !== "path"
-                ? "这个项目没设目录：在项目设置里填一个，或者选临时目录、自己填。"
+                ? "项目未设目录，请选临时目录或指定目录。"
                 : blocked
-                  ? "这个目录不在 git 仓库里，没法开 worktree。"
+                  ? "该目录不在 Git 仓库中，无法开新分支。"
                   : mode === "worktree"
-                    ? "会在仓库旁边新建一个目录和 bench/… 分支，做完要你自己合回去；依赖要在那边另装。"
+                    ? "在仓库旁新建目录与 bench/… 分支，做完需手动合并并另装依赖。"
                     : mode === "same"
-                      ? "两个会话同时改同一份代码会互相覆盖，同一阶段最好只留一个人改。"
+                      ? "多人同改一份代码易互相覆盖，同一阶段只留一人改。"
                       : mode === "temp"
-                        ? "房间在 ~/.local/share/bench/scratch 下给它新建一个空文件夹，碰不到项目里的代码；它照常坐在这个项目里聊天。会话结束后文件夹留着，要你自己清理。"
-                        : "目录要已经存在。点「浏览…」在这台电脑上选。"}
+                        ? "在 ~/.local/share/bench/scratch 新建空目录，不碰项目代码，结束后需手动清理。"
+                        : "填已有目录，或点「浏览」选择。"}
             </p>
           </div>
 
           <div className="space-y-1.5">
-            <Label htmlFor="spawn-task">交给它的第一件事（可不填）</Label>
+            <Label htmlFor="spawn-task">首条交代（选填）</Label>
             <Textarea
               id="spawn-task"
               value={task}
               onChange={(event) => setTask(event.target.value)}
-              placeholder="会以你的名义在群里 @ 它；不填就先坐着，等你点名"
+              placeholder="填了会以你的名义 @ 它；不填则先入座待命"
               className="min-h-20 text-sm"
             />
           </div>
@@ -303,9 +359,9 @@ export function SpawnDialog({
                 className="mt-0.5 size-4 shrink-0 accent-primary"
               />
               <span className="space-y-0.5">
-                <span className="block text-sm font-medium">默认开启全部权限</span>
+                <span className="block text-sm font-medium">默认给全权</span>
                 <span className="block text-xs leading-5 text-muted-foreground">
-                  每次被叫醒都直接能跑命令、改文件，不再一条条弹出来等你点允许。之后在它的「…」菜单里随时能关。sudo 密码还是只有你能输。
+                  每次叫醒直接跑命令、改文件，不再逐条确认（随时可在菜单关闭，sudo 仍需手输）。
                 </span>
               </span>
             </label>
@@ -317,7 +373,7 @@ export function SpawnDialog({
             </Button>
             <Button type="submit" disabled={!ready}>
               {sending ? <Loader2 className="animate-spin" /> : null}
-              {sending ? "在开…" : "开出来"}
+              {sending ? "创建中…" : "创建"}
             </Button>
           </DialogFooter>
         </form>

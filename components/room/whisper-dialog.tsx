@@ -70,9 +70,9 @@ export function WhisperDialog({
         body: JSON.stringify({ as: "human", action: "whisper", text: clean }),
       })
       setText("")
-      if (result.interrupted) toast.message(`${agent.name} 先停下手上的事来回你，回完会接着做`)
+      if (result.interrupted) toast.message("已打断先回你，回完接着做")
     } catch (error) {
-      toast.error(error instanceof Error ? error.message : "没送到")
+      toast.error(error instanceof Error ? error.message : "发送失败")
     } finally {
       setSending(false)
     }
@@ -82,15 +82,17 @@ export function WhisperDialog({
     <Dialog open={agent !== null} onOpenChange={(open) => !open && onClose()}>
       <DialogContent className="flex max-h-[calc(100dvh-2rem)] flex-col sm:max-w-lg">
         <DialogHeader>
-          <DialogTitle>单独和 {agent?.name} 说</DialogTitle>
+          <DialogTitle className="flex items-center gap-2">
+            <span>单独说</span>
+            <span className="text-xs font-normal text-muted-foreground">{agent?.name}</span>
+          </DialogTitle>
           <DialogDescription>
-            这里的话不进群聊，它的回答也只在这里。它正在忙时会先停下来回你，回完接着做原来的事；不着急就在群里 @
-            它，排在它手上的事后面。
+            私聊不进群；它正忙会先停下回你，回完接着做。
           </DialogDescription>
         </DialogHeader>
         <div ref={list} className="-mx-1 min-h-32 flex-1 space-y-3 overflow-y-auto px-1 py-1">
           {runs.length === 0 ? (
-            <p className="py-8 text-center text-xs text-muted-foreground">还没单独说过话</p>
+            <p className="py-8 text-center text-xs text-muted-foreground">暂无私聊记录</p>
           ) : null}
           {runs.map((run) => (
             <div key={run.id} className="space-y-1.5">
@@ -101,12 +103,12 @@ export function WhisperDialog({
                 {run.state === "running" ? (
                   <p className="flex items-center gap-1.5 text-xs text-sky-700 dark:text-sky-300">
                     <Loader2 className="size-3 animate-spin" />
-                    {agent?.runId === run.id && agent.doing ? agent.doing : "在想…"}
+                    {agent?.runId === run.id && agent.doing ? agent.doing : "思考中…"}
                   </p>
                 ) : run.answer ? (
                   <p className="w-fit rounded-2xl rounded-bl-md bg-muted px-3 py-1.5 text-sm whitespace-pre-wrap">{run.answer}</p>
                 ) : (
-                  <p className="text-xs text-muted-foreground">{run.steps.at(-1)?.title ?? "没回出东西"}</p>
+                  <p className="text-xs text-muted-foreground">{run.steps.at(-1)?.title ?? "无回复"}</p>
                 )}
                 <button
                   type="button"
@@ -114,7 +116,7 @@ export function WhisperDialog({
                   onClick={() => onOpenRun(run.id)}
                 >
                   <ListTree className="size-3" />
-                  查看过程
+                  过程
                 </button>
               </div>
             </div>
@@ -136,7 +138,7 @@ export function WhisperDialog({
                 void send()
               }
             }}
-            placeholder={agent?.runId ? "它正在忙，说一句会先打断它…" : "单独对它说…"}
+            placeholder={agent?.runId ? "正忙，发送会先打断它…" : "单独说一句…"}
             aria-label={`单独对 ${agent?.name ?? ""} 说`}
             className="max-h-40 min-h-10 flex-1 resize-none text-sm"
             rows={1}

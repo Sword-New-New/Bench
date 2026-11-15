@@ -28,9 +28,13 @@ import { WhisperDialog } from "@/components/room/whisper-dialog"
 import { CommitDialog } from "@/components/room/commit-dialog"
 import { PUSH_OPEN, PushDialog } from "@/components/room/push-dialog"
 import { GOTO_EVENT, goto, type Goto } from "@/components/room/refs"
+import { JustSaid } from "@/components/room/progress"
+import { digestOf, type Digest } from "@/lib/digest"
 import { FlowView } from "@/components/room/flow"
 import { flowsOf } from "@/lib/flow"
-import { SpawnDialog } from "@/components/room/spawn-dialog"
+import { SpawnDialog, type SpawnPreset } from "@/components/room/spawn-dialog"
+import { deskSeat, FRONT_ROLE, FRONT_SEAT, FrontButton, rememberBack, useBack } from "@/components/room/front"
+import { useSeen } from "@/components/room/project-rail"
 import { SeatProfileDialog } from "@/components/room/seat-profile-dialog"
 import { type Pending } from "@/components/room/attachments"
 import { api, human, inOpenProject, setOpenProject, storedHumanKey, type AdapterInfo } from "@/components/room/api"
@@ -98,15 +102,16 @@ function showDetail(value: boolean) {
   window.dispatchEvent(new Event(DETAIL_EVENT))
 }
 
-// 「对话 / 流程」 for the thread, remembered the same way.
-type ThreadView = "chat" | "flow"
+// 「进展 / 对话 / 流程」 for the thread, remembered the same way. 「进展」 is
+// what you get until you pick another.
+type ThreadView = "progress" | "chat" | "flow"
 const VIEW_KEY = "bench-thread-view"
-let viewNow: ThreadView = "chat"
+let viewNow: ThreadView = "progress"
 
 function viewSaved(): ThreadView {
   try {
     const saved = localStorage.getItem(VIEW_KEY)
-    return saved === "flow" || saved === "chat" ? saved : viewNow
+    return saved === "flow" || saved === "chat" || saved === "progress" ? saved : viewNow
   } catch {
     return viewNow
   }
@@ -120,8 +125,24 @@ function showView(value: ThreadView) {
   window.dispatchEvent(new Event(DETAIL_EVENT))
 }
 
+// What the progress tab holds while the page is not drawn.
+const EMPTY_DIGEST: Digest = { counts: { you: 0, stuck: 0, doing: 0, done: 0 }, you: [], stuck: [], doing: [], done: [], talk: [] }
+
 // Kinds the room can open a session of itself (lib/spawn.ts SPAWNABLE).
 const SPAWNABLE_KINDS = KINDS.filter((kind) => kind.spawn).map((kind) => kind.id)
+
+// The front desk: how its seat is opened. It reads a lot, so the note asks
+// for a big window and quota; it needs no project folder, so a scratch one.
+const FRONT_KINDS = SPAWNABLE_KINDS
+const NO_PROJECTS: Project[] = []
+const FRONT_PRESET: SpawnPreset = {
+  name: FRONT_SEAT,
+  role: FRONT_ROLE,
+  mode: "temp",
+  kinds: FRONT_KINDS,
+  title: "挑一个 AI 来值班",
+  note: "前台要读各项目的摘要、待办和对话，挑上下文大、额度宽裕的那家。",
+}
 
 // The project last open in this browser, and the one a link names.
 const PROJECT_KEY = "bench-project"
@@ -194,7 +215,9 @@ export function RoomApp() {
   // The seat whose model is being picked (「换模型…」).
   const [modelId, setModelId] = useState<string | null>(null)
   const detail = useSyncExternalStore(onDetailChange, detailSaved, () => false)
-  const view = useSyncExternalStore(onDetailChange, viewSaved, (): ThreadView => "chat")
+  const picked = useSyncExternalStore(onDetailChange, viewSaved, (): ThreadView => "progress")
+  // The front desk has no to-dos to line up: it stays a plain conversation.
+  const view: ThreadView = room?.project.front && picked === "progress" ? "chat" : picked
   // No key in this browser: whatever the user does here is refused.
   const keyless = useSyncExternalStore(noSubscribe, () => !storedHumanKey(), () => false)
   // 「背景缓慢流动」 (ambient.tsx): the dark wallpaper drifts.
@@ -202,7 +225,7 @@ export function RoomApp() {
   // 「其他项目做完时通知我」 (notify.ts).
   const notify = useSyncExternalStore(onNotifyChange, notifyOn, () => false)
   const canNotify = useSyncExternalStore(noSubscribe, notifySupported, () => false)
-  const [spawn, setSpawn] = useState<{ kind: string; from: PublicAgent | null } | null>(null)
+  const [spawn, setSpawn] = useState<{ kind: string; from: PublicAgent | null; preset?: SpawnPreset } | null>(null)
   const [adaptersOpen, setAdaptersOpen] = useState(false)
   const [adapterName, setAdapterName] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
@@ -226,7 +249,10 @@ export function RoomApp() {
         if (current && ids.includes(current)) return current
         const wanted = current ? null : projectWanted()
         const byName = wanted ? data.projects.find((item) => item.name === wanted)?.id : undefined
-        return wanted && ids.includes(wanted) ? wanted : (byName ?? ids[0] ?? null)
+        // With nothing asked for, a project rather than the front desk
+        // (listed first), unless the desk is all there is.
+        const first = data.projects.find((item) => !item.front)?.id ?? ids[0] ?? null
+        return wanted && ids.includes(wanted) ? wanted : (byName ?? first)
       })
       return data.projects
     })
@@ -297,6 +323,40 @@ export function RoomApp() {
     openProject(id)
   })
 
+  // The front desk (components/room/front.tsx). 「回到」 goes to the last
+  // project open before it, kept in this browser so a reload in the desk
+  // still knows.
+  const backId = useBack()
+  // What the user has seen where, kept current whichever tier the left
+  // column shows (the desk's dot in the header depends on it).
+  useSeen(projects ?? NO_PROJECTS, projectId)
+  const frontProject = projects?.find((item) => item.front)
+  const backProject = projects?.find((item) => item.id === backId && !item.front) ?? projects?.find((item) => !item.front)
+  const walkInto = useCallback(
+    (id: string) => {
+      window.dispatchEvent(new CustomEvent(LEFT_TIER, { detail: "room" }))
+      openProject(id)
+    },
+    [openProject],
+  )
+  // Opening the desk: make it, walk in, and ask who sits at it.
+  const staffing = useRef(false)
+  const staffFront = useCallback(() => {
+    setSpawn({ kind: FRONT_KINDS[0], from: null, preset: FRONT_PRESET })
+  }, [])
+  const enableFront = useCallback(() => {
+    void api<{ project: ProjectInfo }>("/api/v1/projects", {
+      method: "POST",
+      body: JSON.stringify({ as: "human", front: true }),
+    })
+      .then(async ({ project }) => {
+        await loadProjects().catch(() => {})
+        staffing.current = true
+        walkInto(project.id)
+      })
+      .catch((error: unknown) => toast.error(error instanceof Error ? error.message : "前台没开出来"))
+  }, [loadProjects, walkInto])
+
   // The project whose room is on screen (committed). Until the new project's
   // room is, every snapshot of it goes in as a transition: the first one often
   // arrives twice (the pull and the stream), and a plain update would commit it
@@ -315,6 +375,24 @@ export function RoomApp() {
     },
     [projectId],
   )
+
+  // The desk's room is on screen (so new sessions go into it): ask who sits
+  // there, if it was just opened and nobody does yet. Remember the last
+  // project that isn't the desk, for 「回到」.
+  useEffect(() => {
+    if (!room) return
+    if (!room.project.front) {
+      rememberBack(room.project.id)
+      return
+    }
+    if (!staffing.current) return
+    staffing.current = false
+    if (room.agents.some((agent) => !agent.demo)) return
+    // After this commit's effects, so the page's open project (api.ts) is
+    // the desk when the dialog asks for its folders.
+    // Not called off by the next snapshot (the first one often comes twice).
+    setTimeout(staffFront, 0)
+  }, [room, staffFront])
 
   useEffect(() => {
     if (!projectId) return
@@ -407,6 +485,22 @@ export function RoomApp() {
       return false
     })
   }, [room?.messages, focusAgent])
+  // The 「进展」 rows, worked out only while that page is showing (or its
+  // 「你刚说的」 is, over the composer).
+  const digest = useMemo(
+    () =>
+      view === "progress" && room
+        ? digestOf({
+            messages: room.messages,
+            tasks: room.tasks,
+            agents: room.agents,
+            permits: room.permits ?? [],
+            userName: room.userName,
+            now: Date.now(),
+          })
+        : null,
+    [view, room],
+  )
   // The 「流程」 view's pictures, worked out only while it is showing.
   const flows = useMemo(
     () => (view === "flow" && room ? flowsOf(room.messages, room.tasks, room.agents, room.userName) : []),
@@ -586,11 +680,22 @@ export function RoomApp() {
               onPick={openProject}
               onCreate={() => setProjectDialog({ editing: null })}
               onEdit={() => room && setProjectDialog({ editing: room.project })}
+              onEnableFront={frontProject ? undefined : enableFront}
             />
           </div>
           <ProjectPlace project={currentProject} />
         </div>
         <div className="ml-auto flex items-center gap-1.5">
+          {projects ? (
+            <FrontButton
+              front={frontProject}
+              current={currentProject}
+              back={backProject}
+              onEnter={() => frontProject && walkInto(frontProject.id)}
+              onBack={() => backProject && walkInto(backProject.id)}
+              onEnable={enableFront}
+            />
+          ) : null}
           <span
             className="pill mr-1 hidden items-center gap-1.5 rounded-full px-2.5 py-1 text-xs text-muted-foreground sm:flex"
             title={live ? "实时连接正常" : "正在重连"}
@@ -735,6 +840,7 @@ export function RoomApp() {
               onPrefetch={prefetch}
               onCreate={() => setProjectDialog({ editing: null })}
               onEdit={(project) => setProjectDialog({ editing: project })}
+              onEnableFront={enableFront}
               roster={(head) => (
             <Roster
               head={head}
@@ -787,6 +893,7 @@ export function RoomApp() {
               onDetail={showDetail}
               view={view}
               onView={showView}
+              progress={room.project.front ? undefined : { digest: digest ?? EMPTY_DIGEST, permits: room.permits ?? [] }}
               flow={
                 view === "flow" ? (
                   <FlowView
@@ -830,10 +937,13 @@ export function RoomApp() {
                 draft.set(text)
                 requestAnimationFrame(() => composerRef.current?.focus())
               }}
+              front={Boolean(room.project.front)}
+              onStaff={staffFront}
             />
             {/* Over the thread, in the blank to its left; lets the scroll through. */}
             {view === "chat" ? <Trajectory agents={agents} messages={visibleMessages} onOpenRun={setRunId} /> : null}
             <DraftComposer
+              placeholder={room.project.front ? frontHint(agents) : undefined}
               agents={agents}
               speakers={speakers}
               reply={reply}
@@ -845,7 +955,15 @@ export function RoomApp() {
               notice={
                 room ? (
                   <>
-                    <PermitBar room={room} />
+                    {/* On the progress page a permission is a button on its row; the bar only holds those no row has. */}
+                    <PermitBar
+                      room={
+                        digest
+                          ? { ...room, permits: (room.permits ?? []).filter((item) => !digest.you.some((row) => row.permitId === item.id)) }
+                          : room
+                      }
+                    />
+                    {digest ? <JustSaid messages={room.messages} agents={room.agents} digest={digest} /> : null}
                     <SummaryNudge
                       room={room}
                       busy={busy}
@@ -1006,7 +1124,14 @@ export function RoomApp() {
         }
       />
 
-      <SpawnDialog kind={spawn?.kind ?? null} from={spawn?.from ?? null} agents={agents} onClose={() => setSpawn(null)} />
+      <SpawnDialog
+        kind={spawn?.kind ?? null}
+        from={spawn?.from ?? null}
+        agents={agents}
+        preset={spawn?.preset ?? null}
+        onKind={(kind) => setSpawn((current) => (current ? { ...current, kind } : current))}
+        onClose={() => setSpawn(null)}
+      />
       <SeatProfileDialog agents={agents} adapters={adapters} />
       <ModelDialog agent={agents.find((agent) => agent.id === modelId) ?? null} onClose={() => setModelId(null)} />
       <CommitDialog />
@@ -1209,4 +1334,10 @@ function noSubscribe() {
 function DraftComposer(props: Omit<ComponentProps<typeof Composer>, "value" | "onChange">) {
   const value = useDraft()
   return <Composer {...props} value={value} onChange={draft.set} />
+}
+
+// The front desk's composer: whom to @ (a message wakes only those it names).
+function frontHint(agents: PublicAgent[]) {
+  const seat = deskSeat(agents)
+  return seat ? `问前台… @${seat.name} 它就去看各项目，每件事带上项目名和编号` : "问前台… 先在左栏接一个 AI 进来值班"
 }

@@ -11,7 +11,7 @@ import { Label } from "@/components/ui/label"
 import { Textarea } from "@/components/ui/textarea"
 import { SLASH_COMMANDS, parseSlash } from "@/lib/commands"
 import { KINDS, kindOf } from "@/lib/kinds"
-import { escapeRegExp, insertMention, unknownMentions } from "@/lib/text"
+import { escapeRegExp, insertMention, mentionedAgentIds, unknownMentions } from "@/lib/text"
 import type { Message, PublicAgent } from "@/lib/types"
 
 export const DOCK_EVENT = "bench-dock"
@@ -33,6 +33,7 @@ export function Composer({
   files,
   onFiles,
   speakers = [],
+  placeholder,
 }: {
   agents: PublicAgent[]
   value: string
@@ -49,6 +50,8 @@ export function Composer({
   onFiles: (update: (current: Pending[]) => Pending[]) => void
   // Seat ids that spoke in the room, latest first (one each).
   speakers?: string[]
+  // In place of the usual hint (the front desk's room: 「问前台…」).
+  placeholder?: string
 }) {
   const [picked, setPicked] = useState(false)
   const [dragging, setDragging] = useState(false)
@@ -149,6 +152,12 @@ export function Composer({
     value,
     agents.map((agent) => agent.name),
   )
+  // Said to nobody and answering nothing, the room sends it to the last AI
+  // that spoke here (lib/store.ts say, t_bd01d3c1): say who before it goes.
+  const fallback =
+    reply || slash || mentionedAgentIds(value, agents).length
+      ? undefined
+      : agents.find((agent) => agent.id === speakers.find((id) => agents.some((seat) => seat.id === id && !seat.demo)))
 
   // Quick targets: every seat that is online or can be woken, so two sessions
   // of the same kind are two chips; a kind with none of those still gets its
@@ -296,7 +305,7 @@ export function Composer({
           ref={inputRef}
           id="composer"
           value={value}
-          placeholder={dragging ? "松手就附上" : "说点什么，@ 谁就唤起谁 · / 是命令 · 可以粘贴图片、拖文件进来 · Enter 发送"}
+          placeholder={dragging ? "松手就附上" : (placeholder ?? "说点什么，@ 谁就唤起谁 · / 是命令 · 可以粘贴图片、拖文件进来 · Enter 发送")}
           className="max-h-60 min-h-14 resize-none border-0 bg-transparent px-4 pt-3.5 shadow-none placeholder:text-foreground/45 focus-visible:ring-0 dark:bg-transparent"
           onFocus={() => {
             const ids = new Set(targets.map((item) => item.seat.id))
@@ -403,7 +412,13 @@ export function Composer({
       </Reveal>
       <Reveal open={unknown.length > 0}>
         <p className="pill mx-auto mt-1.5 w-fit max-w-3xl rounded-full px-3 py-0.5 text-[11px] text-amber-700 dark:text-amber-300">
-          房间里还没有 {unknown.map((name) => `@${name}`).join("、")}，这句不会叫醒谁
+          房间里还没有 {unknown.map((name) => `@${name}`).join("、")}
+          {fallback ? `，会改叫 @${fallback.name}` : "，这句不会叫醒谁"}
+        </p>
+      </Reveal>
+      <Reveal open={Boolean(fallback) && unknown.length === 0 && (value.trim().length > 0 || files.length > 0)}>
+        <p className="pill mx-auto mt-1.5 w-fit max-w-3xl rounded-full px-3 py-0.5 text-[11px] text-muted-foreground">
+          没 @ 人，发给 @{fallback?.name}
         </p>
       </Reveal>
     </form>

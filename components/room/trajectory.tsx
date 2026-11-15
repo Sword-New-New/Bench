@@ -127,7 +127,7 @@ export function Trajectory({
             className={`pointer-events-auto absolute -top-7 left-0 grid size-5 place-items-center rounded-full hover:bg-foreground/6 ${
               rhythm ? "text-muted-foreground" : "text-muted-foreground/40"
             }`}
-            title={rhythm ? "没人干活时跟着电脑正在放的声音律动（点一下关掉）" : "律动关着（点一下打开）"}
+            title={rhythm ? "跟随系统声音律动（点此关闭）" : "律动已关（点此开启）"}
             aria-pressed={rhythm}
             onClick={() => {
               setRhythm(!rhythm)
@@ -210,7 +210,7 @@ export function Trajectory({
                   key={agent.id}
                   type="button"
                   className="relative grid size-3 place-items-center"
-                  title={`${agent.name} 正在做，点开看过程`}
+                  title={`${agent.name.slice(0, 10)} 在做，点看过程`}
                   onClick={() => agent.runId && onOpenRun(agent.runId)}
                 >
                   <span className="absolute inset-0 animate-ping rounded-full opacity-40 motion-reduce:animate-none" style={{ background: color }} />

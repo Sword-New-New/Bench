@@ -1,7 +1,7 @@
 "use client"
 
 import { useEffect, useRef, useSyncExternalStore, ViewTransition } from "react"
-import { Plus, Settings2 } from "lucide-react"
+import { ConciergeBell, Plus, Settings2 } from "lucide-react"
 
 import { Avatar, seatLook } from "@/components/room/bits"
 import type { BotMood } from "@/components/room/bot"
@@ -48,6 +48,17 @@ function subscribe(listener: () => void) {
 
 const EMPTY: Record<string, number> = {}
 
+// When the user last had each project open (this browser), live.
+export function useSeenAt() {
+  return useSyncExternalStore(subscribe, seenMap, () => EMPTY)
+}
+
+// Said there (not by the user, not a system note) since the user last had
+// it open. A project never recorded counts as read (useSeen).
+export function unreadIn(project: Project, seenAt: Record<string, number>, current: string | null) {
+  return project.id !== current && project.lastOtherAt > (seenAt[project.id] ?? project.lastOtherAt)
+}
+
 // A seat's bot on a bench and its lamp in the roster share this name. When a
 // project switch swaps both in one transition (room-app.tsx), the old
 // project's seats fly from the roster back onto its bench and the new one's
@@ -77,6 +88,7 @@ export function ProjectList({
   onPrefetch,
   onCreate,
   onEdit,
+  onEnableFront,
 }: {
   projects: Project[]
   current: string | null
@@ -90,8 +102,11 @@ export function ProjectList({
   onPrefetch?: (id: string) => void
   onCreate: () => void
   onEdit: (project: Project) => void
+  // No front desk yet (components/room/front.tsx): its place at the top asks
+  // to open one.
+  onEnableFront?: () => void
 }) {
-  const seenAt = useSyncExternalStore(subscribe, seenMap, () => EMPTY)
+  const seenAt = useSeenAt()
   const hoverTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
   useEffect(() => () => {
     if (hoverTimer.current) clearTimeout(hoverTimer.current)
@@ -114,7 +129,7 @@ export function ProjectList({
   const anchorId = picking ?? current
   const items: Item[] = projects.map((project) => {
     const on = project.id === current
-    const unread = !on && project.lastOtherAt > (seenAt[project.id] ?? project.lastOtherAt)
+    const unread = unreadIn(project, seenAt, current)
     const notes = [
       project.waiting ? `${project.waiting} 件等你处理` : "",
       project.working ? `${project.working} 个在干活` : "",
@@ -122,11 +137,26 @@ export function ProjectList({
     ].filter(Boolean)
     return { project, on, anchor: project.id === anchorId, unread, notes }
   })
-  const at = Math.max(0, items.findIndex((item) => item.anchor))
+  // The front desk sits at the top (listProjects puts it first); without
+  // one, the card that opens it takes that place.
+  const hasFront = items.some((item) => item.project.front)
+  const lead = !hasFront && onEnableFront ? 1 : 0
+  const at = Math.max(0, items.findIndex((item) => item.anchor)) + lead
 
   return (
     <div className={`flex flex-col gap-2 ${picking ? "tier-leaving" : ""}`}>
-      {items.map((item, index) => (
+      {lead ? (
+        <div
+          className="tier-card"
+          style={{ "--dir": -1, "--far": Math.min(at, 6) } as React.CSSProperties}
+          data-motion={motion === "out" ? "in" : undefined}
+        >
+          <EnableFront onEnable={onEnableFront!} />
+        </div>
+      ) : null}
+      {items.map((item, slot) => {
+        const index = slot + lead
+        return (
         <div
           key={item.project.id}
           className="tier-card"
@@ -136,10 +166,15 @@ export function ProjectList({
           data-anchor={item.anchor || undefined}
           data-motion={motion === "out" && !item.anchor ? "in" : undefined}
         >
-          <Card item={item} buttonRef={item.anchor ? cardRef : undefined} {...handlers} />
+          {item.project.front ? (
+            <FrontCard item={item} buttonRef={item.anchor ? cardRef : undefined} {...handlers} />
+          ) : (
+            <Card item={item} buttonRef={item.anchor ? cardRef : undefined} {...handlers} />
+          )}
         </div>
-      ))}
-      <div className="tier-card" style={{ "--dir": 1, "--far": Math.min(items.length - at, 6) } as React.CSSProperties} data-motion={motion === "out" ? "in" : undefined}>
+        )
+      })}
+      <div className="tier-card" style={{ "--dir": 1, "--far": Math.min(items.length + lead - at, 6) } as React.CSSProperties} data-motion={motion === "out" ? "in" : undefined}>
         <NewButton onCreate={onCreate} className="h-11 w-full" label="新建项目" />
       </div>
     </div>
@@ -196,11 +231,25 @@ function settingsOnRightClick(project: Project, onEdit: (project: Project) => vo
 
 // The project's dot and name: on the anchor card they share a name with the
 // room's title (left-pane.tsx), and slide there when the room opens.
-export function ProjectTitle({ project, shared, strong }: { project: Pick<Project, "id" | "name">; shared: boolean; strong: boolean }) {
+export function ProjectTitle({
+  project,
+  shared,
+  strong,
+}: {
+  project: Pick<Project, "id" | "name"> & { front?: true }
+  shared: boolean
+  strong: boolean
+}) {
   const title = (
     <span className="inline-flex max-w-full min-w-0 items-center gap-1.5 align-middle">
-      <span className="size-2 shrink-0 rounded-full" style={{ background: tint(project.id) }} aria-hidden="true" />
+      {/* The front desk has a bell where a project has its colour. */}
+      {project.front ? (
+        <ConciergeBell className="size-3.5 shrink-0 text-primary" aria-hidden="true" />
+      ) : (
+        <span className="size-2 shrink-0 rounded-full" style={{ background: tint(project.id) }} aria-hidden="true" />
+      )}
       <span className={`min-w-0 truncate text-[13px] leading-5 ${strong ? "font-semibold" : "font-medium text-foreground/80"}`}>{project.name}</span>
+      {project.front ? <FrontStage /> : null}
     </span>
   )
   if (!shared) return title
@@ -271,6 +320,93 @@ function Card({ item, buttonRef, onPick, onEdit, ahead }: { item: Item; buttonRe
     <ViewTransition name="tier-pane" share="tier-pane" default="none">
       {card}
     </ViewTransition>
+  )
+}
+
+// What the front desk may do for now (its first stage: it looks, it doesn't act).
+export function FrontStage() {
+  return (
+    <span className="shrink-0 rounded-full bg-foreground/[0.06] px-1.5 text-[10px] leading-4 font-medium text-muted-foreground">只读阶段</span>
+  )
+}
+
+// The front desk (ProjectInfo.front): not a project but the one seat that
+// looks across all of them for the user, so no bench and no folder. Its seat
+// sits at the right end and flies into the roster like any other.
+function FrontCard({ item, buttonRef, onPick, onEdit, ahead }: { item: Item; buttonRef?: React.Ref<HTMLButtonElement> } & Handlers) {
+  const { project, on, anchor, unread, notes } = item
+  const duty = project.bench[0]
+  const card = (
+    <div data-wreck={project.id} data-wreck-kind="card" className="group relative w-full shrink-0" onContextMenu={settingsOnRightClick(project, onEdit)}>
+      <button
+        ref={buttonRef}
+        type="button"
+        onClick={() => onPick(project.id)}
+        {...aheadProps(project.id, ahead)}
+        onPointerDown={(event) => {
+          ahead(project.id, true)
+          if (event.pointerType === "mouse" && event.button === 0 && !event.ctrlKey && !event.metaKey && !event.shiftKey) onPick(project.id)
+        }}
+        aria-current={on ? "page" : undefined}
+        aria-label={["前台", on ? "现在在前台" : "", ...notes].filter(Boolean).join("，")}
+        title={["前台：替你看所有项目，做到哪了、什么在等你", ...notes, project.names.length ? `值班：${project.names.join("、")}` : ""].filter(Boolean).join(" · ")}
+        className={`relative flex w-full items-center gap-2.5 rounded-2xl px-3 py-2.5 text-left transition-colors duration-200 ${
+          on || anchor ? "frost ring-1 ring-primary/35" : "bg-linear-to-r from-primary/[0.09] to-foreground/[0.02] ring-1 ring-primary/20 hover:ring-primary/35"
+        }`}
+      >
+        <span className="min-w-0 flex-1">
+          <span className="flex items-center gap-1.5">
+            <span className="min-w-0 flex-1">
+              <ProjectTitle project={project} shared={anchor} strong />
+            </span>
+          </span>
+          <span className="mt-0.5 block truncate text-[11px] leading-4 text-muted-foreground">
+            {duty ? `${duty.name} 值班` : "还没人值班"}
+            {project.working ? <span className="text-cyan-700 dark:text-cyan-300"> · 在看</span> : null}
+            {on ? <span className="font-medium text-foreground/70"> · 当前</span> : null}
+          </span>
+        </span>
+        {project.waiting ? (
+          <span className="grid h-[18px] min-w-[18px] shrink-0 place-items-center rounded-full bg-destructive px-1 text-[11px] leading-none font-semibold text-white transition-opacity group-hover:opacity-0">
+            {project.waiting > 99 ? "99+" : project.waiting}
+          </span>
+        ) : unread ? (
+          <span className="size-2 shrink-0 rounded-full bg-primary transition-opacity group-hover:opacity-0" aria-hidden="true" />
+        ) : null}
+        {duty ? (
+          <span className="shrink-0" aria-hidden="true">
+            <Sitter seat={duty} turn={duty.status === "working" ? 0 : -1} />
+          </span>
+        ) : null}
+      </button>
+      <Gear project={project} onEdit={onEdit} className="top-1.5 right-1.5 size-6" />
+    </div>
+  )
+  if (!anchor) return card
+  return (
+    <ViewTransition name="tier-pane" share="tier-pane" default="none">
+      {card}
+    </ViewTransition>
+  )
+}
+
+// The front desk's place before there is one: what it is, in a line.
+function EnableFront({ onEnable }: { onEnable: () => void }) {
+  return (
+    <button
+      type="button"
+      onClick={onEnable}
+      title="建一个前台，挑一个 AI 来值班：你只跟它说话，它替你看所有项目"
+      className="flex w-full items-center gap-2.5 rounded-2xl border border-dashed border-primary/35 px-3 py-2.5 text-left transition-colors duration-200 hover:border-primary/60 hover:bg-primary/[0.04]"
+    >
+      <span className="grid size-8 shrink-0 place-items-center rounded-full bg-primary/10 text-primary">
+        <ConciergeBell className="size-4" />
+      </span>
+      <span className="min-w-0">
+        <span className="block text-[13px] leading-5 font-semibold">开启前台</span>
+        <span className="block text-[11px] leading-4 text-muted-foreground">一个 AI 替你看所有项目：做到哪了、什么在等你</span>
+      </span>
+    </button>
   )
 }
 

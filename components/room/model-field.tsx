@@ -30,12 +30,12 @@ const OTHER = "__other"
 type Found = { models: Choice[]; fallback: string | null; efforts?: string[] }
 
 const EFFORT_LABEL: Record<string, string> = {
-  minimal: "minimal · 几乎不想",
-  low: "low · 少想，快",
+  minimal: "minimal · 极简",
+  low: "low · 少想",
   medium: "medium · 适中",
   high: "high · 多想",
-  xhigh: "xhigh · 想得很深",
-  max: "max · 想到底，最慢",
+  xhigh: "xhigh · 深想",
+  max: "max · 最深",
 }
 
 // How much context a seat may hold and at what share of it it compacts by
@@ -95,11 +95,11 @@ export function ModelField({
   const found = useChoices(kind)
   const efforts = found?.efforts ?? []
   const effortItems = [
-    { value: DEFAULT, label: "默认（跟客户端设置走）" },
+    { value: DEFAULT, label: "默认（随客户端）" },
     ...efforts.map((level) => ({ value: level, label: EFFORT_LABEL[level] ?? level })),
   ]
   const windowItems = [
-    { value: DEFAULT, label: "默认（模型自带的）" },
+    { value: DEFAULT, label: "默认（随模型）" },
     ...WINDOWS.map((tokens) => ({ value: String(tokens), label: `${wan(tokens)} tokens` })),
   ]
   const pct = limits.pct ?? PCT_SHOWN
@@ -116,7 +116,7 @@ export function ModelField({
   const items = [
     { value: DEFAULT, label: fallback ? `默认（${fallback}）` : "默认" },
     ...(choices ?? []).map((choice) => ({ value: choice.id, label: choice.note ? `${choice.label} · ${choice.note}` : choice.label })),
-    { value: OTHER, label: "其他，自己填…" },
+    { value: OTHER, label: "自定义…" },
   ]
 
   return (
@@ -125,7 +125,7 @@ export function ModelField({
       {choices === null ? (
         <p className="flex items-center gap-1.5 py-1 text-xs text-muted-foreground">
           <Loader2 className="size-3 animate-spin" />
-          正在看有哪些模型…
+          读取模型…
         </p>
       ) : (
         <Select
@@ -183,7 +183,7 @@ export function ModelField({
       ) : null}
       {onLimits && kind && WINDOW_KINDS.includes(kind) ? (
         <div className="space-y-1.5 pt-2">
-          <Label htmlFor={`${id}-window`}>最大上下文窗口</Label>
+          <Label htmlFor={`${id}-window`}>最大上下文</Label>
           <Select
             items={windowItems}
             value={limits.window || DEFAULT}
@@ -201,10 +201,10 @@ export function ModelField({
             </SelectContent>
           </Select>
           <div className="flex items-baseline justify-between gap-2 pt-2">
-            <Label htmlFor={`${id}-pct`}>用到多少自动压缩</Label>
+            <Label htmlFor={`${id}-pct`}>自动压缩阈值</Label>
             <span className="text-sm tabular-nums">
               {limits.pct === null ? (
-                <span className="text-muted-foreground">默认（跟客户端设置走）</span>
+                <span className="text-muted-foreground">默认</span>
               ) : (
                 <>
                   {limits.pct}%
@@ -213,7 +213,7 @@ export function ModelField({
                     className="ml-2 text-xs text-muted-foreground underline-offset-2 hover:underline"
                     onClick={() => onLimits({ ...limits, pct: null })}
                   >
-                    恢复默认
+                    重置
                   </button>
                 </>
               )}
@@ -232,12 +232,11 @@ export function ModelField({
           />
           <p className="text-xs text-muted-foreground">
             {limits.pct === null && !limits.window
-              ? "都不设就按客户端自己的设置压缩。"
+              ? "随客户端默认设置压缩"
               : point
-                ? `用到约 ${wan(Math.max(kind === "claude" ? 100_000 : 0, point))} 时自动压缩。`
-                : `用到模型窗口的 ${pct}% 时自动压缩。`}
-            越早压越省钱、回得越快，但记得的细节越少。
-            {kind === "claude" ? "Claude Code 最低 10 万。" : ""}
+                ? `约 ${wan(Math.max(kind === "claude" ? 100_000 : 0, point))} 时自动压缩`
+                : `用到 ${pct}% 时自动压缩`}
+            （越早压越省额度，保留细节越少{kind === "claude" ? "；Claude 最低 10 万" : ""}）。
           </p>
         </div>
       ) : null}
@@ -279,15 +278,10 @@ export function ModelDialog({ agent, onClose }: { agent: PublicAgent | null; onC
           compactPct: limits.pct,
         }),
       })
-      toast.success(
-        `${agent.name} 下次被叫醒时用 ${value || "默认模型"}${effort ? `，思考强度 ${effort}` : ""}${
-          limits.window ? `，最大上下文 ${wan(Number(limits.window))}` : ""
-        }${limits.pct ? `，用到 ${limits.pct}% 自动压缩` : ""
-        }`,
-      )
+      toast.success("已保存，下次叫醒生效")
       onClose()
     } catch (error) {
-      toast.error(error instanceof Error ? error.message : "没改成")
+      toast.error(error instanceof Error ? error.message : "修改失败")
     } finally {
       setSending(false)
     }
@@ -297,9 +291,12 @@ export function ModelDialog({ agent, onClose }: { agent: PublicAgent | null; onC
     <Dialog open={agent !== null} onOpenChange={(open) => !open && onClose()}>
       <DialogContent className="sm:max-w-sm">
         <DialogHeader>
-          <DialogTitle>{agent?.name} 用哪个模型</DialogTitle>
+          <DialogTitle className="flex items-center gap-2">
+            <span>换模型</span>
+            <span className="text-xs font-normal text-muted-foreground">{agent?.name}</span>
+          </DialogTitle>
           <DialogDescription>
-            从它下一次被叫醒开始生效，正在跑的这次不变。同一个会话换模型，之前的对话都还在。
+            下次叫醒生效，原会话对话保留。
           </DialogDescription>
         </DialogHeader>
         <form
@@ -325,7 +322,7 @@ export function ModelDialog({ agent, onClose }: { agent: PublicAgent | null; onC
             </Button>
             <Button type="submit" disabled={sending || unchanged}>
               {sending ? <Loader2 className="animate-spin" /> : null}
-              好
+              保存
             </Button>
           </DialogFooter>
         </form>

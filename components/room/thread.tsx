@@ -2,6 +2,7 @@ import { Fragment, startTransition, useEffect, useLayoutEffect, useMemo, useRef,
 import { ArrowRight, Check, ChevronDown, ChevronsUpDown, ListTree, Loader2, Reply, Search, Square, Undo2, X, Zap } from "lucide-react"
 import { toast } from "sonner"
 
+import { deskSeat, FrontWelcome } from "@/components/room/front"
 import { api } from "@/components/room/api"
 import { AskCard, PinnedAsks } from "@/components/room/ask-card"
 import { MessageFiles, previewText } from "@/components/room/attachments"
@@ -9,12 +10,15 @@ import { LimitedCard } from "@/components/room/limited-card"
 import { FullAccessToggle } from "@/components/room/permits"
 import { Avatar, FoldButton, keepTopInView, MessageBody, seatLook, useFold } from "@/components/room/bits"
 import { DOCK_EVENT } from "@/components/room/composer"
+import { expandMessage, openFold, SummaryButton, SummaryLine, useSummary } from "@/components/room/gist"
+import { ProgressView } from "@/components/room/progress"
 import { GOTO_EVENT, type Goto } from "@/components/room/refs"
 import { Reveal } from "@/components/room/reveal"
 import { RunTrail } from "@/components/room/run-trail"
 import { Button } from "@/components/ui/button"
+import type { Digest } from "@/lib/digest"
 import { clock } from "@/lib/status"
-import type { CallState, Message, PublicAgent } from "@/lib/types"
+import type { CallState, Message, PermitRequest, PublicAgent } from "@/lib/types"
 
 const EXAMPLES = [
   "@所有人 各自说一下你现在在做什么、擅长什么",
@@ -41,17 +45,23 @@ export function Thread({
   onRewake,
   onMention,
   onExample,
+  front = false,
+  onStaff,
   detail,
   onDetail,
   view = "chat",
   onView,
   flow,
+  progress,
 }: {
-  // 「对话 / 流程」: the flow view (components/room/flow.tsx) takes the place of
-  // the messages; the thread stays mounted under it so a jump back is quick.
-  view?: "chat" | "flow"
-  onView?: (view: "chat" | "flow") => void
+  // 「进展 / 对话 / 流程」: the progress page (components/room/progress.tsx) and
+  // the flow view (components/room/flow.tsx) take the place of the messages;
+  // the thread stays mounted under them so a jump back is quick.
+  view?: "progress" | "chat" | "flow"
+  onView?: (view: "progress" | "chat" | "flow") => void
   flow?: ReactNode
+  // What the progress page draws; none in a room that has no use for it (the front desk).
+  progress?: { digest: Digest; permits: PermitRequest[] }
   // 「详细」: each wake's steps show in the thread too (only on this page).
   detail: boolean
   onDetail: (detail: boolean) => void
@@ -72,6 +82,10 @@ export function Thread({
   // Clicking an avatar @-mentions that seat in the composer.
   onMention: (name: string) => void
   onExample: (text: string) => void
+  // The front desk's room (components/room/front.tsx): its own welcome.
+  front?: boolean
+  // Nobody at the desk yet: open a session to sit there.
+  onStaff?: () => void
 }) {
   const scroller = useRef<HTMLDivElement>(null)
   const stick = useRef(true)
@@ -344,6 +358,21 @@ export function Thread({
     </div>
   )
 
+  // A message of an opened row on the progress page: always the one-line gist.
+  const progressLine = (message: Message, previous: Message | undefined) => (
+    <ChainLine
+      message={message}
+      previous={previous}
+      messages={messages}
+      agents={agents}
+      names={names}
+      detail={false}
+      onReply={onReply}
+      onOpenRun={onOpenRun}
+      onMention={onMention}
+    />
+  )
+
   const line = (message: Message, previous: Message | undefined) => (
     <div key={message.id} data-message={message.id} className="contents">
     <ChainLine
@@ -363,27 +392,32 @@ export function Thread({
   // A message id clicked in some message (components/room/refs.ts): draw far
   // enough back to include it, open its reply chain if folded there (ReplyChain
   // listens too), scroll to it and flash it.
-  const latest = useRef({ messages, items, limit })
+  const latest = useRef({ messages, items, limit, view })
   useEffect(() => {
-    latest.current = { messages, items, limit }
+    latest.current = { messages, items, limit, view }
   })
   useEffect(() => {
     const onGoto = (event: Event) => {
       const { kind, id } = (event as CustomEvent<Goto>).detail
       if (kind !== "message") return
       const now = latest.current
+      // The progress page and the flow view answer their own jumps.
+      if (now.view !== "chat") return
       if (!now.messages.some((message) => message.id === id)) {
         toast("这条消息太早了，页面上没有加载到")
         return
       }
       const index = now.items.findIndex((item) => (item.chain ?? [item.message]).some((message) => message.id === id))
       stick.current = false
+      // A folded reply opens, so the jump lands on its text.
+      expandMessage(id)
       if (index >= 0 && index < now.items.length - now.limit) setLimit(now.items.length - index + 3)
       const find = (tries: number) => {
         const holder = document.querySelector(`[data-message="${CSS.escape(id)}"]`)
         const target = holder?.firstElementChild as HTMLElement | null | undefined
         if (target) {
           target.scrollIntoView({ block: "center", behavior: "smooth" })
+          keepTopInView(target)
           target.animate(
             [
               { outline: "2px solid color-mix(in oklab, var(--color-mention, #3b82f6) 85%, transparent)", outlineOffset: "4px" },
@@ -446,9 +480,10 @@ export function Thread({
           <Search className="size-3" />
         </button>
         {onView ? (
-          <div className="flex rounded-full p-0.5 pill" role="radiogroup" aria-label="对话还是流程">
+          <div className="flex rounded-full p-0.5 pill" role="radiogroup" aria-label="进展、对话还是流程">
             {(
               [
+                ...(progress ? ([["progress", "进展"]] as const) : []),
                 ["chat", "对话"],
                 ["flow", "流程"],
               ] as const
@@ -458,7 +493,13 @@ export function Thread({
                 type="button"
                 role="radio"
                 aria-checked={view === value}
-                title={value === "flow" ? "把每件事画成图：分给了谁、各自到哪了、哪里在等你" : "群聊"}
+                title={
+                  value === "flow"
+                    ? "把每件事画成图：分给了谁、各自到哪了、哪里在等你"
+                    : value === "progress"
+                      ? "一件事一行：谁在做、做到哪、哪里在等你"
+                      : "按时间排的群聊"
+                }
                 className={`rounded-full px-2.5 py-0.5 text-[11px] transition-colors ${
                   view === value ? "bg-foreground text-background" : "text-muted-foreground hover:text-foreground"
                 }`}
@@ -469,7 +510,7 @@ export function Thread({
             ))}
           </div>
         ) : null}
-        <div className={`${view === "flow" ? "hidden" : "flex"} rounded-full p-0.5 pill`} role="radiogroup" aria-label="群聊显示">
+        <div className={`${view !== "chat" ? "hidden" : "flex"} rounded-full p-0.5 pill`} role="radiogroup" aria-label="群聊显示">
           {(
             [
               [false, "摘要"],
@@ -558,9 +599,25 @@ export function Thread({
         </div>
       ) : null}
       {view === "flow" ? flow : null}
+      {view === "progress" && progress ? (
+        <ProgressView
+          digest={progress.digest}
+          agents={agents}
+          permits={progress.permits}
+          messages={messages}
+          renderMessage={progressLine}
+          onOpenRun={onOpenRun}
+          onStop={onStop}
+          onShowChat={(id) => {
+            onView?.("chat")
+            // Once the thread is showing again.
+            requestAnimationFrame(() => requestAnimationFrame(() => window.dispatchEvent(new CustomEvent<Goto>(GOTO_EVENT, { detail: { kind: "message", id } }))))
+          }}
+        />
+      ) : null}
       <div
         ref={scroller}
-        className={`min-h-0 flex-1 overflow-y-auto ${view === "flow" ? "hidden" : ""}`}
+        className={`min-h-0 flex-1 overflow-y-auto ${view !== "chat" ? "hidden" : ""}`}
         onScroll={(event) => {
           if (gliding.current) return
           const node = event.currentTarget
@@ -578,7 +635,13 @@ export function Thread({
           className="mx-auto flex max-w-3xl flex-col gap-1 px-4 pt-6 pb-[calc(var(--dock,8rem)+1rem)] md:px-6 [&>.live-slot]:[--live-gap:0.25rem]"
         >
           <PinnedAsks asks={pinned} />
-          {!talked ? <Welcome onExample={onExample} /> : null}
+          {!talked ? (
+            front ? (
+              <FrontWelcome seat={deskSeat(agents)?.name ?? null} onExample={onExample} onStaff={onStaff} />
+            ) : (
+              <Welcome onExample={onExample} />
+            )
+          ) : null}
           {hidden > 0 || canFetchOlderFromDb ? (
             <button
               type="button"
@@ -787,6 +850,8 @@ function ChainLine({
   onMention: (name: string) => void
 }) {
   const fold = useFold(message.text)
+  const sum = useSummary(message, detail)
+  const row = useRef<HTMLElement>(null)
   if (message.recalled) return <RecalledLine message={message} inChain />
   const author = agents.find((agent) => agent.id === message.authorId)
   const look = seatLook(
@@ -799,7 +864,10 @@ function ChainLine({
       : undefined
   const avatar = <Avatar name={message.authorName} color={look.color} label={look.label} kind={look.kind} size="sm" />
   return (
-    <article className={`flex gap-3 px-4 py-3 ${previous ? "border-t border-foreground/8" : ""} ${human ? "bg-primary/[0.05]" : ""}`}>
+    <article
+      ref={row}
+      className={`flex gap-3 px-4 py-3 ${previous ? "border-t border-foreground/8" : ""} ${human ? "bg-primary/[0.05]" : ""}`}
+    >
       <div className="w-6 shrink-0 pt-0.5">
         {author ? (
           <MentionAvatar name={author.name} onMention={onMention}>
@@ -823,15 +891,29 @@ function ChainLine({
         {detail && message.runId ? <RunTrail runId={message.runId} answer={message.text} /> : null}
         {message.text ? (
           <div className="mt-0.5">
-            <MessageBody text={shown(message, agents)} names={names} from={message.authorId} fold={fold} />
+            {sum.info ? (
+              <SummaryLine
+                summary={sum.info}
+                names={names}
+                from={message.authorId}
+                open={sum.open}
+                onToggle={() => sum.toggle(row.current)}
+              >
+                <MessageBody text={shown(message, agents)} names={names} from={message.authorId} fold={openFold()} />
+              </SummaryLine>
+            ) : (
+              <MessageBody text={shown(message, agents)} names={names} from={message.authorId} fold={fold} />
+            )}
           </div>
         ) : null}
-        {message.attachments?.length ? <MessageFiles files={message.attachments} folded={folded(fold)} /> : null}
+        {message.attachments?.length && !sum.folded ? (
+          <MessageFiles files={message.attachments} folded={sum.info ? undefined : folded(fold)} />
+        ) : null}
         {message.ask ? <AskCard message={message} /> : null}
         <Reached message={message} />
         <Calls message={message} />
         <div className="mt-0.5 -ml-1 flex items-center gap-1">
-          <FoldButton fold={fold} />
+          {sum.info ? <SummaryButton state={sum} node={() => row.current} /> : <FoldButton fold={fold} />}
           {message.runId && !detail ? (
             <button
               type="button"
@@ -923,6 +1005,8 @@ function MessageRow({
 }) {
   const [watching, setWatching] = useState(false)
   const fold = useFold(message.text)
+  const sum = useSummary(message, detail)
+  const row = useRef<HTMLElement>(null)
 
   if (message.recalled) return <RecalledLine message={message} />
 
@@ -1046,6 +1130,7 @@ function MessageRow({
 
   return (
     <article
+      ref={row}
       className={`flex gap-3 ${grouped ? "mt-0.5" : "mt-4"}`}
       onPointerEnter={() => setWatching(true)}
       onPointerLeave={() => setWatching(false)}
@@ -1081,15 +1166,29 @@ function MessageRow({
             className="bubble rounded-2xl rounded-tl-md bg-card/85 px-3.5 py-2"
             style={{ "--halo": look.color } as CSSProperties}
           >
-            <MessageBody text={shown(message, agents)} names={names} from={message.authorId} fold={fold} />
+            {sum.info ? (
+              <SummaryLine
+                summary={sum.info}
+                names={names}
+                from={message.authorId}
+                open={sum.open}
+                onToggle={() => sum.toggle(row.current)}
+              >
+                <MessageBody text={shown(message, agents)} names={names} from={message.authorId} fold={openFold()} />
+              </SummaryLine>
+            ) : (
+              <MessageBody text={shown(message, agents)} names={names} from={message.authorId} fold={fold} />
+            )}
           </div>
         ) : null}
-        {message.attachments?.length ? <MessageFiles files={message.attachments} folded={folded(fold)} /> : null}
+        {message.attachments?.length && !sum.folded ? (
+          <MessageFiles files={message.attachments} folded={sum.info ? undefined : folded(fold)} />
+        ) : null}
         {message.ask ? <AskCard message={message} /> : null}
         <Reached message={message} />
         <Calls message={message} />
         <div className="mt-1 flex items-center gap-1">
-          <FoldButton fold={fold} />
+          {sum.info ? <SummaryButton state={sum} node={() => row.current} /> : <FoldButton fold={fold} />}
           {message.runId && !detail ? (
             // How it got there: the tool calls of the wake that wrote this.
             <button

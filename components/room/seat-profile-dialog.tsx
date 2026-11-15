@@ -115,7 +115,7 @@ export function SeatProfileDialog({
           setWorkdir(data.workdir ?? "")
         })
         .catch((error) => {
-          if (reqId === activeReq) toast.error(error instanceof Error ? error.message : "没读到席位档案")
+          if (reqId === activeReq) toast.error(error instanceof Error ? error.message : "读取档案失败")
         })
         .finally(() => {
           if (reqId === activeReq) setLoading(false)
@@ -144,10 +144,10 @@ export function SeatProfileDialog({
         method: "POST",
         body: JSON.stringify({ as: "human", action: "profile", persona, memory }),
       })
-      toast.success(`${agent.name} 的席位档案与长期记忆已保存`)
+      toast.success("档案已保存")
       setTarget(null)
     } catch (error) {
-      toast.error(error instanceof Error ? error.message : "没存上")
+      toast.error(error instanceof Error ? error.message : "保存失败")
     } finally {
       setSaving(false)
     }
@@ -170,15 +170,10 @@ export function SeatProfileDialog({
           task: !target?.fromRunId && task.trim() ? task.trim() : undefined,
         }),
       })
-      const label = KINDS.find((item) => item.id === kind)?.label ?? kind
-      toast.success(
-        result.resumed
-          ? `${agent.name} 已切到 ${label}，职责、记忆和没做完的待办交给它了，已叫醒它接着做（不带旧会话的对话）`
-          : `${agent.name} 已切到 ${label}，下次 @ 它就会在那边回应`,
-      )
+      toast.success(result.resumed ? "已切换并接着做" : "已切换客户端")
       setTarget(null)
     } catch (error) {
-      toast.error(error instanceof Error ? error.message : "切换客户端没成功")
+      toast.error(error instanceof Error ? error.message : "切换失败")
     } finally {
       setSaving(false)
     }
@@ -193,30 +188,29 @@ export function SeatProfileDialog({
         body: JSON.stringify({ as: "human", action: "restore_binding", index }),
       })
       const label = KINDS.find((item) => item.id === res.restored.agentName)?.label ?? res.restored.agentName
-      toast.success(`${agent.name} 已切回原 ${label} 会话`)
+      toast.success(`已切回 ${label}`)
       setTarget(null)
     } catch (error) {
-      toast.error(error instanceof Error ? error.message : "切回原会话没成功")
+      toast.error(error instanceof Error ? error.message : "切回失败")
     } finally {
       setSaving(false)
     }
   }
-
-  const chosenInfo = KINDS.find((item) => item.id === kind)
 
   return (
     <Dialog open={Boolean(target && agent)} onOpenChange={(open) => !open && close()}>
       <DialogContent className="sm:max-w-lg">
         <DialogHeader>
           <DialogTitle className="flex items-center gap-2">
-            <span>{agent?.name}</span>
+            <span>席位设置</span>
             <span className="text-xs font-normal text-muted-foreground">
-              {agent?.agentName ? `${KINDS.find((k) => k.id === agent.agentName)?.label ?? agent.agentName} · ` : ""}
-              {agent?.model}
+              {agent?.name}
+              {agent?.agentName ? ` · ${KINDS.find((k) => k.id === agent.agentName)?.label ?? agent.agentName}` : ""}
+              {agent?.model ? ` · ${agent.model}` : ""}
             </span>
           </DialogTitle>
           <DialogDescription>
-            席位身份、负责待办和长期记忆记在房间里，不跟着客户端走。换另一家 AI 顶替时，新客户端拿到一张交接单（职责、长期记忆、名下没做完的待办、被打断的消息），拿不到旧会话里的对话。
+            职责、待办与长期记忆留在席位上；换客户端只交接这些，不带旧会话聊天记录。
           </DialogDescription>
         </DialogHeader>
 
@@ -231,7 +225,7 @@ export function SeatProfileDialog({
             onClick={() => setTab("profile")}
           >
             <BookOpen className="size-3.5" />
-            席位档案与长期记忆
+            档案与记忆
           </button>
           <button
             type="button"
@@ -243,7 +237,7 @@ export function SeatProfileDialog({
             onClick={() => setTab("rebind")}
           >
             <ArrowRightLeft className="size-3.5" />
-            切换客户端 / 顶替接力
+            换客户端
           </button>
         </div>
 
@@ -252,37 +246,37 @@ export function SeatProfileDialog({
             {loading ? (
               <p className="flex items-center gap-2 py-6 text-xs text-muted-foreground">
                 <Loader2 className="size-3.5 animate-spin" />
-                正在读取席位档案…
+                读取中…
               </p>
             ) : (
               <>
                 <div className="space-y-1.5">
-                  <Label htmlFor="seat-persona">职责与规范（每次新会话或换客户端时自动注入）</Label>
+                  <Label htmlFor="seat-persona">职责与规范（新会话或换客户端时自动注入）</Label>
                   <Textarea
                     id="seat-persona"
                     value={persona}
                     onChange={(event) => setPersona(event.target.value)}
-                    placeholder="比如：负责后端与数据库，改动前先跑单测，保持零外部依赖…"
+                    placeholder="如：负责后端与数据库，改动前先跑单测，保持零外部依赖…"
                     className="min-h-20 text-xs leading-5"
                     maxLength={2000}
                   />
                 </div>
                 <div className="space-y-1.5">
                   <Label htmlFor="seat-memory">
-                    长期记忆与踩坑备忘（AI 可通过 bench_memory 自主追加，你也可直接修订）
+                    长期记忆（AI 可用 bench_memory 追加，也可手改）
                   </Label>
                   <Textarea
                     id="seat-memory"
                     value={memory}
                     onChange={(event) => setMemory(event.target.value)}
-                    placeholder="暂无长期记忆。工作中学到的关键约定和踩坑结论会记在这里。"
+                    placeholder="工作中学到的约定与踩坑结论会记在这里。"
                     className="min-h-28 font-mono text-xs leading-5"
                     maxLength={4000}
                   />
                 </div>
                 {markdownPath ? (
                   <p className="truncate text-[11px] text-muted-foreground" title={markdownPath}>
-                    写出的 Markdown 副本（只供查看，改它不会改回房间）：<span className="font-mono">{shortPath(markdownPath)}</span>
+                    只读副本（直接改它无效）：<span className="font-mono">{shortPath(markdownPath)}</span>
                   </p>
                 ) : null}
               </>
@@ -293,7 +287,7 @@ export function SeatProfileDialog({
               </Button>
               <Button type="button" disabled={saving || loading} onClick={() => void saveProfile()}>
                 {saving ? <Loader2 className="animate-spin" /> : null}
-                保存档案
+                保存
               </Button>
             </DialogFooter>
           </div>
@@ -301,12 +295,12 @@ export function SeatProfileDialog({
           <div className="min-w-0 space-y-3.5">
             {target?.fromRunId ? (
               <div className="rounded-xl border border-amber-500/30 bg-amber-500/[0.08] px-3 py-2 text-xs leading-5 text-amber-900 dark:text-amber-200">
-                新客户端会接过刚才被额度打断的消息、席位名下的待办步骤以及长期记忆，建好会话后立刻接着做。
+                新客户端会接过被打断的消息、未完待办与长期记忆，建好会话立刻接着做。
               </div>
             ) : null}
 
             <div className="space-y-1.5">
-              <Label>换哪一家客户端顶上</Label>
+              <Label>换哪家客户端</Label>
               <div className="grid grid-cols-4 gap-1.5 sm:grid-cols-4" role="radiogroup" aria-label="目标客户端">
                 {SPAWNABLE_KINDS.map((item) => {
                   const selected = kind === item.id
@@ -321,9 +315,9 @@ export function SeatProfileDialog({
                       aria-checked={selected}
                       title={
                         missing
-                          ? `${item.label}（本机还没装命令行）`
+                          ? `${item.label} 未装命令行`
                           : isCurrent
-                            ? `${item.label}（当前客户端，选它会新开一个同客户端会话）`
+                            ? "当前客户端，选中会重开会话"
                             : `切到 ${item.label}`
                       }
                       className={`flex flex-col items-center gap-1 rounded-xl border px-2 py-2 text-xs transition-colors ${
@@ -361,13 +355,13 @@ export function SeatProfileDialog({
 
             <div className="space-y-1">
               <div className="flex items-center justify-between">
-                <Label className="text-xs">继承工作目录</Label>
+                <Label className="text-xs">工作目录</Label>
                 <button
                   type="button"
                   className="text-[11px] text-muted-foreground hover:text-foreground"
                   onClick={() => setEditDir((v) => !v)}
                 >
-                  {editDir ? "收起" : "修改目录"}
+                  {editDir ? "收起" : "修改"}
                 </button>
               </div>
               {editDir ? (
@@ -387,12 +381,12 @@ export function SeatProfileDialog({
 
             {!target?.fromRunId ? (
               <div className="space-y-1.5">
-                <Label htmlFor="rebind-task">切换后顺带交代一句（可不填）</Label>
+                <Label htmlFor="rebind-task">顺带交代一句（选填）</Label>
                 <Input
                   id="rebind-task"
                   value={task}
                   onChange={(event) => setTask(event.target.value)}
-                  placeholder="填了会立刻 @ 它开工；不填就先切过去，等你在群里点名"
+                  placeholder="填了会立刻 @ 它；不填则等你点名"
                   className="text-xs"
                 />
               </div>
@@ -402,7 +396,7 @@ export function SeatProfileDialog({
               <div className="space-y-1.5 rounded-xl border bg-muted/30 p-2.5">
                 <p className="flex items-center gap-1.5 text-[11px] font-medium text-muted-foreground">
                   <History className="size-3.5" />
-                  历史绑定会话（原账号额度恢复后可一键切回）
+                  历史会话（原额度恢复后可切回）
                 </p>
                 <div className="space-y-1">
                   {agent.previousBindings.map((b) => {
@@ -436,11 +430,7 @@ export function SeatProfileDialog({
               </Button>
               <Button type="button" disabled={saving || !kind} onClick={() => void doRebind()}>
                 {saving ? <Loader2 className="animate-spin" /> : <ArrowRightLeft className="size-3.5" />}
-                {saving
-                  ? `正在开 ${chosenInfo?.label ?? kind} 会话…`
-                  : target?.fromRunId
-                    ? `换 ${chosenInfo?.label ?? kind} 立刻接着做`
-                    : `切换到 ${chosenInfo?.label ?? kind}`}
+                {saving ? "切换中…" : target?.fromRunId ? "立即接手" : "切换"}
               </Button>
             </DialogFooter>
           </div>

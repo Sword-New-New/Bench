@@ -125,7 +125,7 @@ export function PushDialog() {
       })
       .catch((err: unknown) => {
         if (!cancelled) {
-          toast.error(err instanceof Error ? err.message : "读不到推送设置")
+          toast.error(err instanceof Error ? err.message : "读取推送设置失败")
           setOpen(false)
         }
       })
@@ -181,7 +181,7 @@ export function PushDialog() {
         body: JSON.stringify(buildPayload({ action: "save" })),
       })
       applyState(next)
-      toast.success(next.enabled ? "手机推送已保存并启用" : "推送设置已保存（当前关闭）")
+      toast.success(next.enabled ? "推送已启用" : "已保存（推送关闭）")
       setOpen(false)
     } catch (err) {
       toast.error(err instanceof Error ? err.message : "保存失败")
@@ -199,12 +199,12 @@ export function PushDialog() {
       })
       applyState(res.state)
       if (res.ok) {
-        toast.success("测试推送已发出，去手机看看")
+        toast.success("测试推送已发出")
       } else {
-        toast.error(`没发出去：${res.error || "发送失败"}`)
+        toast.error(`发送失败：${(res.error || "未知错误").slice(0, 10)}`)
       }
     } catch (err) {
-      toast.error(err instanceof Error ? err.message : "测试推送失败")
+      toast.error(err instanceof Error ? err.message : "测试发送失败")
     } finally {
       setTesting(false)
     }
@@ -218,7 +218,7 @@ export function PushDialog() {
         body: JSON.stringify({ as: "human", action: "clear" }),
       })
       applyState(next)
-      toast.success("推送地址和口令已清空并关闭")
+      toast.success("已清空并停用")
     } catch (err) {
       toast.error(err instanceof Error ? err.message : "清空失败")
     } finally {
@@ -247,20 +247,19 @@ export function PushDialog() {
             推送到手机
           </DialogTitle>
           <DialogDescription>
-            页面没开或不在前台时，有提问、待验收、或权限申请等满 30 秒没人点，推一条给你。同一项目 20
-            秒内的事合成一条。地址和口令只存本机 <code className="font-mono text-xs">data/push.json</code>，不回传到页面。
+            页面不在前台时，提问、待验收或权限满 30 秒未处理会外发推送（密钥只存本机 <code className="font-mono text-xs">data/push.json</code>）。
           </DialogDescription>
         </DialogHeader>
 
         {loading || !saved ? (
-          <div className="py-6 text-center text-sm text-muted-foreground">正在读取推送设置…</div>
+          <div className="py-6 text-center text-sm text-muted-foreground">读取中…</div>
         ) : (
           <div className="space-y-4">
             <label className="flex cursor-pointer items-center justify-between gap-3 rounded-xl border px-3 py-2.5">
               <div className="min-w-0">
                 <div className="text-sm font-medium">启用手机推送</div>
                 <div className="text-xs text-muted-foreground">
-                  {enabled ? "页面不在前台时有事会推" : "默认关闭，打开并填好地址后生效"}
+                  {enabled ? "不在前台时有事外发推送" : "填好地址并勾选后生效"}
                 </div>
               </div>
               <input
@@ -313,7 +312,7 @@ export function PushDialog() {
                       </Label>
                       {alreadyFilled && !val ? (
                         <span className="rounded-full bg-emerald-500/15 px-2 py-0.5 text-[10px] text-emerald-700 dark:text-emerald-300">
-                          已填写（留空保持不变）
+                          已填（留空不变）
                         </span>
                       ) : null}
                     </div>
@@ -322,7 +321,7 @@ export function PushDialog() {
                       type="password"
                       autoComplete="off"
                       value={val}
-                      placeholder={alreadyFilled ? "已保存，重新输入则覆盖" : spec.placeholder}
+                      placeholder={alreadyFilled ? "留空不变，重填则覆盖" : spec.placeholder}
                       className="font-mono text-xs"
                       onChange={(event) => handleSecretInput(key, event.target.value)}
                     />
@@ -339,7 +338,7 @@ export function PushDialog() {
                   checked={onEnd}
                   onChange={(event) => setOnEnd(event.target.checked)}
                 />
-                <span>有人说【本轮结束】也推</span>
+                <span>【本轮结束】也推</span>
               </label>
               <label className="flex cursor-pointer items-center gap-2">
                 <input
@@ -348,7 +347,7 @@ export function PushDialog() {
                   checked={titleOnly}
                   onChange={(event) => setTitleOnly(event.target.checked)}
                 />
-                <span>只推标题，不带正文（只写哪个项目、谁、什么事）</span>
+                <span>只推标题，不带正文</span>
               </label>
             </div>
 
@@ -359,14 +358,14 @@ export function PushDialog() {
               >
                 <AlertCircle className="mt-0.5 size-3.5 shrink-0" />
                 <div className="min-w-0 flex-1">
-                  <div className="font-medium">最近一次发送失败 · {formatClock(saved.lastError.at)}</div>
+                  <div className="font-medium">上次失败 · {formatClock(saved.lastError.at)}</div>
                   <div className="mt-0.5 break-words opacity-90">{saved.lastError.message}</div>
                 </div>
               </div>
             ) : saved.lastOkAt ? (
               <div className="flex items-center gap-1.5 px-1 text-xs text-emerald-700 dark:text-emerald-400">
                 <CheckCircle2 className="size-3.5 shrink-0" />
-                <span>上次发送成功：{formatClock(saved.lastOkAt)}</span>
+                <span>上次成功：{formatClock(saved.lastOkAt)}</span>
               </div>
             ) : null}
           </div>
@@ -376,12 +375,12 @@ export function PushDialog() {
           <div className="flex flex-wrap items-center gap-1.5">
             <Button type="button" variant="outline" size="sm" disabled={busy} onClick={() => void handleTest()}>
               <Send className="size-3.5" />
-              {testing ? "发送中…" : "测一下"}
+              {testing ? "发送中…" : "测试"}
             </Button>
             {hasStoredAnything ? (
               <Button type="button" variant="ghost" size="sm" disabled={busy} onClick={() => void handleClear()}>
                 <Trash2 className="size-3.5" />
-                清空并停用
+                清空
               </Button>
             ) : null}
           </div>

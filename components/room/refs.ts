@@ -24,7 +24,8 @@ export async function openFile(path: string, line: number | undefined, from: str
       body: JSON.stringify({ as: "human", path, line, from }),
     })
     const name = opened.file.split("/").pop() || opened.file
-    toast.success(`在 ${opened.editor} 里打开了 ${name}${opened.line ? ` 第 ${opened.line} 行` : ""}`)
+    const shortName = name.length > 10 ? `${name.slice(0, 9)}…` : name
+    toast.success(`已打开 ${shortName}`)
   } catch (error) {
     toast.error((error as Error).message)
   }

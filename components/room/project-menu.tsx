@@ -1,7 +1,7 @@
 "use client"
 
 import { useEffect, useState } from "react"
-import { Check, ChevronsUpDown, FolderOpen, FolderSearch, Loader2, Plus, Settings2 } from "lucide-react"
+import { Check, ChevronsUpDown, ConciergeBell, FolderOpen, FolderSearch, Loader2, Plus, Settings2 } from "lucide-react"
 import { toast } from "sonner"
 
 import { api } from "@/components/room/api"
@@ -35,12 +35,15 @@ export function ProjectMenu({
   onPick,
   onCreate,
   onEdit,
+  onEnableFront,
 }: {
   projects: Project[]
   current: ProjectInfo | null
   onPick: (id: string) => void
   onCreate: () => void
   onEdit: () => void
+  // No front desk yet: an item that opens one.
+  onEnableFront?: () => void
 }) {
   return (
     <DropdownMenu>
@@ -56,9 +59,7 @@ export function ProjectMenu({
         <span className="min-w-0">
           {/* On xl the project rail already shows the name; the path and the menu stay. */}
           <span className="block truncate text-[15px] leading-tight font-semibold xl:hidden">{current?.name ?? "并坐"}</span>
-          <span className="hidden truncate text-xs text-muted-foreground sm:block">
-            {current?.dir ? shortDir(current.dir) : "并坐 · 一个项目一间房"}
-          </span>
+          <span className="hidden truncate text-xs text-muted-foreground sm:block">{placeLine(current)}</span>
         </span>
         <ChevronsUpDown className="size-3.5 shrink-0 text-muted-foreground" />
       </DropdownMenuTrigger>
@@ -67,14 +68,20 @@ export function ProjectMenu({
           <DropdownMenuLabel>项目</DropdownMenuLabel>
           {projects.map((project) => (
             <DropdownMenuItem key={project.id} onClick={() => onPick(project.id)} className="items-start gap-2">
-              <span className="mt-0.5 size-4 shrink-0">{project.id === current?.id ? <Check className="size-4" /> : null}</span>
+              <span className="mt-0.5 size-4 shrink-0">
+                {project.id === current?.id ? <Check className="size-4" /> : project.front ? <ConciergeBell className="size-4 text-primary" /> : null}
+              </span>
               <span className="min-w-0 flex-1">
                 <span className="block truncate font-medium">{project.name}</span>
                 <span className="block truncate text-xs text-muted-foreground">
-                  {project.seats === 0
-                    ? "还没有人入座"
-                    : `${project.seats} 个席位 · ${project.online} 在线${project.working ? ` · ${project.working} 在做` : ""}`}
-                  {project.dir ? ` · ${shortDir(project.dir)}` : ""}
+                  {project.front
+                    ? project.seats === 0
+                      ? "无人值班 · 只读"
+                      : "跨项目总览 · 只读"
+                    : project.seats === 0
+                      ? "暂无席位"
+                      : `${project.seats} 个席位 · ${project.online} 在线${project.working ? ` · ${project.working} 在做` : ""}`}
+                  {project.dir && !project.front ? ` · ${shortDir(project.dir)}` : ""}
                 </span>
               </span>
               {project.working > 0 ? <span className="mt-1.5 size-1.5 shrink-0 animate-pulse rounded-full bg-sky-500" /> : null}
@@ -82,13 +89,19 @@ export function ProjectMenu({
           ))}
         </DropdownMenuGroup>
         <DropdownMenuSeparator />
+        {onEnableFront ? (
+          <DropdownMenuItem onClick={onEnableFront}>
+            <ConciergeBell />
+            开启前台…
+          </DropdownMenuItem>
+        ) : null}
         <DropdownMenuItem onClick={onCreate}>
           <Plus />
           新建项目…
         </DropdownMenuItem>
         <DropdownMenuItem onClick={onEdit} disabled={!current}>
           <Settings2 />
-          这个项目的设置…
+          设置项目…
         </DropdownMenuItem>
       </DropdownMenuContent>
     </DropdownMenu>
@@ -101,11 +114,15 @@ export function ProjectPlace({ project }: { project: ProjectInfo | null }) {
   return (
     <span className="hidden min-w-0 lg:block" title={project?.dir}>
       <span className="block truncate text-[15px] leading-tight font-semibold xl:hidden">{project?.name ?? "并坐"}</span>
-      <span className="block truncate text-xs text-muted-foreground">
-        {project?.dir ? shortDir(project.dir) : "并坐 · 一个项目一间房"}
-      </span>
+      <span className="block truncate text-xs text-muted-foreground">{placeLine(project)}</span>
     </span>
   )
+}
+
+// Under the name: the folder; for the front desk, what it is for now.
+function placeLine(project: ProjectInfo | null) {
+  if (project?.front) return "前台 · 只读总览"
+  return project?.dir ? shortDir(project.dir) : "并坐"
 }
 
 // New project, or the open one's name, folder and deletion. `editing` null is
@@ -135,6 +152,8 @@ export function ProjectDialog({
   // 「请验收时先复验」: the seats to choose from, who checks now, and the pick.
   const [seats, setSeats] = useState<PublicAgent[] | null>(null)
   const [checker, setChecker] = useState(NO_CHECK)
+  // 「谁来补摘要句」: the seat that writes gists of long replies, or nobody.
+  const [gister, setGister] = useState(NO_CHECK)
 
   // Fresh fields each time it opens.
   const [shown, setShown] = useState<string | null>(null)
@@ -146,6 +165,7 @@ export function ProjectDialog({
     setConfirming(false)
     setSeats(null)
     setChecker(NO_CHECK)
+    setGister(NO_CHECK)
   }
   const editingId = open ? editing?.id : undefined
   useEffect(() => {
@@ -156,6 +176,7 @@ export function ProjectDialog({
         if (!live) return
         setSeats(room.agents)
         setChecker(room.agents.find((agent) => agent.checker)?.id ?? NO_CHECK)
+        setGister(room.agents.find((agent) => agent.gister)?.id ?? NO_CHECK)
       })
       .catch(() => live && setSeats([]))
     return () => {
@@ -163,6 +184,7 @@ export function ProjectDialog({
     }
   }, [editingId])
   const checkerNow = seats?.find((agent) => agent.checker)?.id ?? NO_CHECK
+  const gisterNow = seats?.find((agent) => agent.gister)?.id ?? NO_CHECK
 
   const save = async () => {
     if (!name.trim() || sending) return
@@ -182,9 +204,16 @@ export function ProjectDialog({
           body: JSON.stringify({ as: "human", action: "checker", on: checker !== NO_CHECK }),
         })
       }
+      if (editing && seats && gister !== gisterNow) {
+        const seat = gister === NO_CHECK ? gisterNow : gister
+        await api(`/api/v1/agents/${seat}`, {
+          method: "POST",
+          body: JSON.stringify({ as: "human", action: "gister", on: gister !== NO_CHECK }),
+        })
+      }
       onSaved(result.project, !editing)
     } catch (error) {
-      toast.error(error instanceof Error ? error.message : "没存上")
+      toast.error(error instanceof Error ? error.message : "保存失败")
     } finally {
       setSending(false)
     }
@@ -200,7 +229,7 @@ export function ProjectDialog({
       })
       if (result.dir) setDir(result.dir)
     } catch (error) {
-      toast.error(error instanceof Error ? error.message : "没打开选目录的窗口")
+      toast.error(error instanceof Error ? error.message : "打开目录选择失败")
     } finally {
       setBrowsing(false)
     }
@@ -216,7 +245,7 @@ export function ProjectDialog({
       })
       onDeleted(editing.id)
     } catch (error) {
-      toast.error(error instanceof Error ? error.message : "没删掉")
+      toast.error(error instanceof Error ? error.message : "删除失败")
     } finally {
       setSending(false)
     }
@@ -226,9 +255,12 @@ export function ProjectDialog({
     <Dialog open={open} onOpenChange={(next) => !next && onClose()}>
       <DialogContent className="sm:max-w-md">
         <DialogHeader>
-          <DialogTitle>{editing ? `「${editing.name}」的设置` : "新建项目"}</DialogTitle>
+          <DialogTitle className="flex items-center gap-2">
+            <span>{editing ? "项目设置" : "新建项目"}</span>
+            {editing ? <span className="text-xs font-normal text-muted-foreground">{editing.name}</span> : null}
+          </DialogTitle>
           <DialogDescription>
-            每个项目是一间单独的房间：席位、对话、任务和摘要都只在这个项目里。一个会话同一时间只坐在一个项目里。
+            每个项目独立保存席位、对话、待办与房间摘要。
           </DialogDescription>
         </DialogHeader>
         <form
@@ -244,13 +276,13 @@ export function ProjectDialog({
               id="project-name"
               value={name}
               onChange={(event) => setName(event.target.value)}
-              placeholder="比如：狼人游戏"
+              placeholder="如：狼人游戏"
               maxLength={24}
               autoFocus
             />
           </div>
           <div className="space-y-1.5">
-            <Label htmlFor="project-dir">项目目录（可不填）</Label>
+            <Label htmlFor="project-dir">项目目录（选填）</Label>
             <div className="flex gap-2">
               <div className="relative min-w-0 flex-1">
                 <FolderOpen className="pointer-events-none absolute top-1/2 left-2.5 size-3.5 -translate-y-1/2 text-muted-foreground" />
@@ -264,16 +296,16 @@ export function ProjectDialog({
               </div>
               <Button type="button" variant="outline" className="shrink-0" disabled={browsing} onClick={browse}>
                 {browsing ? <Loader2 className="animate-spin" /> : <FolderSearch />}
-                {browsing ? "在选…" : "浏览…"}
+                {browsing ? "选择中…" : "浏览"}
               </Button>
             </div>
             <p className="text-[11px] leading-4 text-muted-foreground">
-              在这个目录里干活的 AI 入座时没说项目名，会自动进这个项目；房间开新会话也默认开在这里。
+              同目录 AI 入座自动归入此项目，后台新开会话也默认在此。
             </p>
           </div>
           {editing && seats?.length ? (
             <div className="space-y-1.5">
-              <Label htmlFor="project-checker">请验收时先复验</Label>
+              <Label htmlFor="project-checker">验收前复验</Label>
               <Select
                 items={[{ value: NO_CHECK, label: "不复验" }, ...seats.map((agent) => ({ value: agent.id, label: `${agent.name} · ${agent.model}` }))]}
                 value={checker}
@@ -292,7 +324,32 @@ export function ProjectDialog({
                 </SelectContent>
               </Select>
               <p className="text-[11px] leading-4 text-muted-foreground">
-                席位请验收时，房间先叫醒这个席位照着验一遍（不进群聊），结论挂在右栏的验收卡片上；通过还是只有你能点。它自己的待办不复验。挑便宜的模型就行。
+                请验收时先叫醒它后台验一遍（耗一次叫醒额度，选便宜模型；它自己的待办不复验）。
+              </p>
+            </div>
+          ) : null}
+          {editing && seats?.length ? (
+            <div className="space-y-1.5">
+              <Label htmlFor="project-gister">补摘要句</Label>
+              <Select
+                items={[{ value: NO_CHECK, label: "不用" }, ...seats.map((agent) => ({ value: agent.id, label: `${agent.name} · ${agent.model}` }))]}
+                value={gister}
+                onValueChange={(next) => setGister(next ? String(next) : NO_CHECK)}
+              >
+                <SelectTrigger id="project-gister" className="w-full min-w-0 text-sm">
+                  <SelectValue className="truncate" />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value={NO_CHECK}>不用</SelectItem>
+                  {seats.map((agent) => (
+                    <SelectItem key={agent.id} value={agent.id}>
+                      {agent.name} · {agent.model}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+              <p className="text-[11px] leading-4 text-muted-foreground">
+                长回复首行非结论时，攒几条叫醒它补一句摘要（耗叫醒额度，选便宜模型）。
               </p>
             </div>
           ) : null}
@@ -300,7 +357,7 @@ export function ProjectDialog({
             {editing && canDelete ? (
               confirming ? (
                 <div className="mr-auto flex items-center gap-2">
-                  <span className="text-xs text-muted-foreground">对话、任务和席位都会删掉</span>
+                  <span className="text-xs text-muted-foreground">席位、对话和待办都会删掉</span>
                   <Button type="button" variant="destructive" size="sm" disabled={sending} onClick={remove}>
                     确认删除
                   </Button>
@@ -316,7 +373,7 @@ export function ProjectDialog({
             </Button>
             <Button type="submit" disabled={!name.trim() || sending}>
               {sending ? <Loader2 className="animate-spin" /> : null}
-              {editing ? "保存" : "建好，去接 AI"}
+              {editing ? "保存" : "创建"}
             </Button>
           </DialogFooter>
         </form>

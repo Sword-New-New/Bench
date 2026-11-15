@@ -17,12 +17,12 @@ async function post(body: Record<string, unknown>) {
     await api("/api/v1/permit", { method: "POST", body: JSON.stringify({ as: "human", ...body }) })
     return true
   } catch (error) {
-    toast.error(error instanceof Error ? error.message : "没发出去")
+    toast.error(error instanceof Error ? error.message : "发送失败")
     return false
   }
 }
 
-function PermitCard({ item }: { item: PermitRequest }) {
+export function PermitCard({ item }: { item: PermitRequest }) {
   const [busy, setBusy] = useState(false)
   const [denying, setDenying] = useState(false)
   const [note, setNote] = useState("")
@@ -39,7 +39,7 @@ function PermitCard({ item }: { item: PermitRequest }) {
         <span className="min-w-0 flex-1">
           <span className="font-medium">{item.agentName}</span>
           <span className="text-muted-foreground">
-            {full ? " 请求这次唤起的临时完整权限" : ` 想用 ${item.tool}，等你允许`}
+            {full ? " 请求本轮完整权限" : ` 想用 ${item.tool}`}
           </span>
         </span>
       </p>
@@ -58,7 +58,7 @@ function PermitCard({ item }: { item: PermitRequest }) {
             autoFocus
             value={note}
             onChange={(event) => setNote(event.target.value)}
-            placeholder="告诉它为什么（可不写）"
+            placeholder="拒绝原因（选填）"
             aria-label="拒绝的原因"
             className="h-7 min-w-0 flex-1 rounded-full border bg-background/70 px-3 outline-none focus:border-primary"
           />
@@ -86,17 +86,17 @@ function PermitCard({ item }: { item: PermitRequest }) {
               className="rounded-full border px-3 py-1 font-medium hover:bg-muted disabled:opacity-50"
               onClick={() => void answer("once")}
             >
-              允许这一次
+              允许一次
             </button>
           )}
           <button
             type="button"
             disabled={busy}
             className="rounded-full bg-amber-500 px-3 py-1 font-medium text-white hover:bg-amber-600 disabled:opacity-50"
-            title="这次唤起剩下的工具调用都不用再确认，唤起结束自动收回"
+            title="本轮剩余操作免确认，结束收回"
             onClick={() => void answer("full")}
           >
-            {full ? "允许，这次唤起完整权限" : "这次唤起全部允许"}
+            {full ? "允许" : "本轮全允"}
           </button>
         </div>
       )}
@@ -125,21 +125,21 @@ export function FullAccessToggle({ agent }: { agent: PublicAgent }) {
   // 「默认开启全部权限」: it can be taken back for this wake; the next one
   // has it again.
   const auto = Boolean(agent.autoFull)
-  const label = auto ? (on ? "默认全部权限 · 这次收回" : "这次已收回 · 恢复") : on ? "完整权限中 · 收回" : "给完整权限"
+  const label = auto ? (on ? "默认全权 · 收回" : "已收回 · 恢复") : on ? "完整权限 · 收回" : "给全权"
   const hint = auto
     ? on
-      ? "这次唤起先收回：之后的工具调用又要你逐条确认；下次叫醒它自动恢复。要一直关，在左栏它的「…」菜单里取消「默认开启全部权限」"
-      : "恢复这个席位默认的全部权限"
+      ? "本轮收回，下次恢复；长关去菜单取消"
+      : "恢复默认全部权限"
     : on
-      ? "收回：之后的工具调用又要你逐条确认"
-      : "这次唤起剩下的工具调用都不用再确认，唤起结束自动收回"
+      ? "收回后操作需逐条确认"
+      : "本轮免确认，结束自动收回"
   const done = auto
     ? on
-      ? `这次唤起先收回了 ${agent.name} 的全部权限，下次叫醒自动恢复`
-      : `${agent.name} 的默认全部权限恢复了`
+      ? "本轮已收回，下次恢复"
+      : "已恢复默认全权"
     : on
-      ? `收回了 ${agent.name} 的完整权限`
-      : `${agent.name} 这次唤起有完整权限了`
+      ? "已收回完整权限"
+      : "本轮已给完整权限"
   return (
     <button
       type="button"

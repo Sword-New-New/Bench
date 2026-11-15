@@ -76,7 +76,7 @@ export function TasksPanel({
       <div className="space-y-3 px-3">
         {tasks.length === 0 ? (
           <div className="rounded-2xl border border-dashed border-foreground/15 px-3 py-4 text-xs leading-5 text-muted-foreground">
-            还没有待办。在对话里让 AI 做新功能时，它会先在这里建一条，拆成几步，做一步勾一步。
+            暂无待办。让 AI 做新功能时会自动建单并分步推进。
           </div>
         ) : null}
         {active.map((task) => (
@@ -165,7 +165,7 @@ function TaskCard({
         </span>
       </div>
       <p className="mt-0.5 pl-4 text-[11px] text-muted-foreground">
-        {task.ownerName ? task.ownerName : "还没有负责人"}
+        {task.ownerName ? task.ownerName : "未设负责人"}
         <span className="opacity-60"> · {task.id}</span>
         {task.createdByName !== task.ownerName ? ` · ${task.createdByName} 建` : ""}
         {task.forkedFrom ? ` · 复制自「${task.forkedFrom.title}」` : ""}
@@ -213,13 +213,13 @@ function TaskCard({
             type="button"
             size="xs"
             variant="outline"
-            title="已完成的待办不能再改；复制出一条新的，标题和步骤照抄，步骤重新开始"
+            title="复制标题与步骤新建一条"
             disabled={busy}
             onClick={() => onFork(task)}
           >
-            复制一份
+            复制
           </Button>
-          <span className="text-[10px] text-muted-foreground">已完成的不能再改</span>
+          <span className="text-[10px] text-muted-foreground">已完成不可改</span>
         </div>
       ) : null}
       {task.status !== "done" ? (
@@ -289,7 +289,7 @@ function ReviewBox({
       <p className="font-medium text-amber-800 dark:text-amber-200">
         等你验收
         <span className="font-normal text-muted-foreground">
-          {asked ? ` · ${asked.by} ${clock(asked.at)} 请验收${asked.note ? `：${asked.note}` : ""}` : " · 其余步骤都做完了"}
+          {asked ? ` · ${asked.by} ${clock(asked.at)}${asked.note ? `：${asked.note}` : ""}` : " · 步骤已做完"}
         </span>
       </p>
       {asked && task.check ? <CheckLine check={task.check} onOpenRun={onOpenRun} /> : null}
@@ -308,7 +308,7 @@ function ReviewBox({
             autoFocus
             value={reason}
             onChange={(event) => setReason(event.target.value)}
-            placeholder={`哪里不对？会转给 ${task.ownerName ?? "负责人"}，它照着改`}
+            placeholder={`哪里不对？发给 ${task.ownerName ?? "负责人"} 重改`}
             aria-label="打回原因"
             rows={2}
             className="min-h-0 resize-none bg-background/60 text-xs"
@@ -326,7 +326,7 @@ function ReviewBox({
         <div className="flex gap-1">
           <Button type="button" size="xs" disabled={busy} onClick={() => onReview(true, "")}>
             <Check className="size-3" />
-            验收通过
+            通过
           </Button>
           <Button
             type="button"
@@ -463,7 +463,7 @@ function StepDrawer({
                         ? "border-sky-500"
                         : "border-foreground/25 hover:border-foreground/50"
                   }`}
-                  title={locked ? `${STEP_LABEL[step.state]}（已完成的待办不能再改）` : `${STEP_LABEL[step.state]}，点一下改成${STEP_LABEL[NEXT[step.state]]}`}
+                  title={locked ? `${STEP_LABEL[step.state]}（已完成不可改）` : `${STEP_LABEL[step.state]}，点改${STEP_LABEL[NEXT[step.state]]}`}
                   aria-label={locked ? `第 ${index + 1} 步${STEP_LABEL[step.state]}` : `第 ${index + 1} 步${STEP_LABEL[step.state]}，改成${STEP_LABEL[NEXT[step.state]]}`}
                   disabled={busy || locked}
                   onClick={() => onStep(index + 1, NEXT[step.state])}

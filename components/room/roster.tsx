@@ -25,6 +25,7 @@ import {
 import { toast } from "sonner"
 
 import { api } from "@/components/room/api"
+import { nudgeSeat } from "@/components/room/nudge"
 import { openSeatProfileFor } from "@/components/room/seat-profile-dialog"
 import { Button } from "@/components/ui/button"
 import {
@@ -89,14 +90,14 @@ type Props = {
 function reach(kind: Kind, seats: PublicAgent[], adapters: AdapterInfo[] | null) {
   const adapter = adapters?.find((item) => item.name === kind.id)
   const online = seats.filter((agent) => agent.status !== "offline").length
-  if (adapters && !adapter) return { text: "没配唤起命令", tone: "warn" as const }
-  if (adapter && !adapter.installed) return { text: "本机没装", tone: "warn" as const }
-  if (seats.length === 0) return { text: "还没接入", tone: "muted" as const }
+  if (adapters && !adapter) return { text: "缺唤起命令", tone: "warn" as const }
+  if (adapter && !adapter.installed) return { text: "未安装", tone: "warn" as const }
+  if (seats.length === 0) return { text: "未接入", tone: "muted" as const }
   const standby = seats.filter((agent) => agent.standby && agent.status !== "offline").length
   if (standby > 0) return { text: `${standby} 个待命`, tone: "ok" as const }
   if (online > 0) return { text: `${online} 个在线`, tone: "ok" as const }
-  if (seats.some((agent) => agent.callable)) return { text: "离线 · 点名会唤起", tone: "ok" as const }
-  return { text: "离线 · 没报会话", tone: "warn" as const }
+  if (seats.some((agent) => agent.callable)) return { text: "离线 · 点名可叫醒", tone: "ok" as const }
+  return { text: "离线 · 未报会话", tone: "warn" as const }
 }
 
 const WARN = "text-amber-700 dark:text-amber-400"
@@ -243,7 +244,7 @@ function KindStub({
       <button
         type="button"
         className="group/stub flex w-full items-center gap-3 rounded-xl px-3 py-1 text-left transition-colors hover:bg-sidebar-accent/70"
-        title={`把 ${kind.label} 接进来`}
+        title={`接入 ${kind.label}`}
         aria-expanded={open}
         onClick={onToggle}
       >
@@ -260,7 +261,7 @@ function KindStub({
             <button
               type="button"
               className="-ml-1.5 flex items-center gap-1.5 rounded-lg px-1.5 py-0.5 text-xs text-muted-foreground transition-colors hover:bg-sidebar-accent/70 hover:text-foreground"
-              title={`让房间在后台开一个新的 ${kind.label} 会话并入座`}
+              title="后台新建会话并入座"
               onClick={() => onSpawn(kind.id, null)}
             >
               <Plus className="size-3.5" />
@@ -270,7 +271,6 @@ function KindStub({
           <button
             type="button"
             className="-ml-1.5 flex items-center gap-1.5 rounded-lg px-1.5 py-0.5 text-xs text-muted-foreground transition-colors hover:bg-sidebar-accent/70 hover:text-foreground"
-            title={`把已经开着的 ${kind.label} 会话接进来`}
             onClick={() => onJoin(kind.id)}
           >
             <Plug className="size-3.5" />
@@ -318,7 +318,7 @@ function KindGroup({
           type="button"
           className="flex min-w-0 flex-1 items-center gap-3 rounded-lg text-left"
           onClick={() => (primary ? props.onMention(primary.name) : props.onJoin(kind.id))}
-          title={primary ? `@${primary.name}` : `把 ${kind.label} 接进来`}
+          title={primary ? `@${primary.name}` : `接入 ${kind.label}`}
         >
           <Avatar name={kind.label} color={kind.color} kind={kind} size="lg" status={best} hover={hover} />
           <span className="truncate text-sm font-semibold hover:underline">{kind.label}</span>
@@ -344,7 +344,7 @@ function KindGroup({
               className="grid size-6 shrink-0 place-items-center rounded-lg text-muted-foreground transition-colors hover:bg-sidebar-accent hover:text-foreground"
               aria-expanded={open}
               aria-label={open ? `收起 ${kind.label}` : `展开 ${kind.label}`}
-              title={open ? "收起" : "展开：客户端、额度、速度、开新会话"}
+              title={open ? "收起" : "看额度、速度或开新会话"}
               onClick={toggle}
             >
               <ChevronRight className={`size-4 transition-transform duration-200 ${open ? "rotate-90" : ""}`} />
@@ -366,7 +366,7 @@ function KindGroup({
             <button
               type="button"
               className="-ml-1.5 mt-1 flex items-center gap-1.5 rounded-lg px-1.5 py-0.5 text-left text-xs text-muted-foreground transition-colors hover:bg-sidebar-accent/70 hover:text-foreground"
-              title={`让房间在后台开一个新的 ${kind.label} 会话并入座`}
+              title="后台新建会话并入座"
               onClick={() => props.onSpawn(kind.id, null)}
             >
               <Plus className="size-3.5" />
@@ -402,7 +402,7 @@ function SeatRow({ agent, ...props }: Props & { agent: PublicAgent }) {
   const tip = [
     `@${agent.name}`,
     `${agent.model} · ${agent.role}`,
-    agent.hasProfile ? "已设席位档案/长期记忆" : "",
+    agent.hasProfile ? "已设档案/记忆" : "",
     agent.status === "offline" ? `最后在线 ${ago(agent.lastSeenAt, props.now)}` : STATUS_LABEL[agent.status],
     busy ? "" : agent.doing,
   ]
@@ -415,9 +415,9 @@ function SeatRow({ agent, ...props }: Props & { agent: PublicAgent }) {
         method: "POST",
         body: JSON.stringify({ as: "human", action: "auto_full", on }),
       })
-      toast.success(on ? `${agent.name} 以后被叫醒都有全部权限` : `${agent.name} 以后要权限会再问你`)
+      toast.success(on ? "以后叫醒默认给全权" : "以后要权限会问你")
     } catch (error) {
-      toast.error(error instanceof Error ? error.message : "没改成")
+      toast.error(error instanceof Error ? error.message : "修改失败")
     }
   }
 
@@ -427,9 +427,9 @@ function SeatRow({ agent, ...props }: Props & { agent: PublicAgent }) {
         method: "POST",
         body: JSON.stringify({ as: "human", action: pause ? "queue_pause" : "queue_resume" }),
       })
-      toast.success(pause ? `已暂停唤起 ${agent.name}，新消息会先排着` : `已恢复唤起 ${agent.name}`)
+      toast.success(pause ? "已暂停叫醒，新消息排队" : "已恢复叫醒")
     } catch (error) {
-      toast.error(error instanceof Error ? error.message : "操作没成功")
+      toast.error(error instanceof Error ? error.message : "操作失败")
     }
   }
 
@@ -439,30 +439,13 @@ function SeatRow({ agent, ...props }: Props & { agent: PublicAgent }) {
         method: "POST",
         body: JSON.stringify({ as: "human", action: "queue_drop", messageId }),
       })
-      toast.success(messageId ? "已从队列剔除这条消息" : `已清空 ${agent.name} 的排队消息`)
+      toast.success(messageId ? "已剔除排队消息" : "已清空排队消息")
     } catch (error) {
-      toast.error(error instanceof Error ? error.message : "没能剔除")
+      toast.error(error instanceof Error ? error.message : "剔除失败")
     }
   }
 
-  // One click instead of typing it: said in the room as the user, so it is
-  // an ordinary call, seen by everyone and answered where it was asked.
-  const nudge = async () => {
-    if (!owes) return
-    const tasks = owes.tasks.map((task) => `${task.id}「${task.title}」${task.step ? `（到「${task.step}」这一步）` : ""}`)
-    const parts = [
-      tasks.length > 0 ? `你名下还有没做完的待办：${tasks.join("；")}。接着做；要等别的事才能动，就把它标成卡住，写明在等什么` : "",
-      owes.calls.length > 0 ? `之前有 ${owes.calls.length} 条叫你的消息没送到，这次一起看` : "",
-    ].filter(Boolean)
-    try {
-      await api("/api/v1/say", {
-        method: "POST",
-        body: JSON.stringify({ as: "human", text: `@${agent.name} ${parts.join("。")}。` }),
-      })
-    } catch (error) {
-      toast.error(error instanceof Error ? error.message : "没发出去")
-    }
-  }
+  const nudge = () => nudgeSeat(agent)
 
   const queuedCount = agent.queuedCount ?? 0
   const showQueueBar = Boolean(agent.queuePaused || queuedCount > 0)
@@ -487,7 +470,7 @@ function SeatRow({ agent, ...props }: Props & { agent: PublicAgent }) {
           {agent.standby && agent.status !== "offline" ? (
             <span
               className="shrink-0 rounded-full bg-emerald-500/12 px-1.5 text-[10px] font-medium text-emerald-700 dark:text-emerald-300"
-              title="正挂在 bench_wait 里，点它会立刻收到"
+              title="守候中，点名立刻收到"
             >
               待命
             </span>
@@ -501,10 +484,10 @@ function SeatRow({ agent, ...props }: Props & { agent: PublicAgent }) {
           >
             <Ellipsis className="size-4" />
           </DropdownMenuTrigger>
-          <DropdownMenuContent align="end" className="w-auto min-w-44">
+          <DropdownMenuContent align="end" className="w-auto min-w-40">
             <DropdownMenuItem onClick={() => props.onMention(agent.name)}>
               <AtSign />
-              点名 {agent.name}
+              点名
             </DropdownMenuItem>
             {agent.callable && !agent.demo ? (
               <DropdownMenuItem onClick={() => props.onWhisper(agent)}>
@@ -513,20 +496,20 @@ function SeatRow({ agent, ...props }: Props & { agent: PublicAgent }) {
               </DropdownMenuItem>
             ) : null}
             {kindOf(agent)?.spawn && !agent.demo ? (
-              <DropdownMenuItem onClick={() => props.onSpawn(kindOf(agent)!.id, agent)}>
+              <DropdownMenuItem title="在它所在目录开新会话" onClick={() => props.onSpawn(kindOf(agent)!.id, agent)}>
                 <Plus />
-                在同目录开新会话…
+                开新会话…
               </DropdownMenuItem>
             ) : null}
             {agent.runId ? (
               <DropdownMenuItem onClick={() => props.onStop(agent)}>
                 <Square />
-                停下这次唤起
+                停下这次
               </DropdownMenuItem>
             ) : agent.retry ? (
               <DropdownMenuItem onClick={() => props.onStop(agent)}>
                 <Square />
-                不再自动重试
+                取消重试
               </DropdownMenuItem>
             ) : null}
             {compactable ? (
@@ -549,18 +532,18 @@ function SeatRow({ agent, ...props }: Props & { agent: PublicAgent }) {
             ) : null}
             {agent.demo ? null : (
               <>
-                <DropdownMenuItem onClick={() => openSeatProfileFor(agent.id, { tab: "profile" })}>
+                <DropdownMenuItem title="编辑席位职责与长期记忆" onClick={() => openSeatProfileFor(agent.id, { tab: "profile" })}>
                   <BookOpen />
-                  席位档案与记忆…
+                  编辑档案…
                 </DropdownMenuItem>
-                <DropdownMenuItem onClick={() => openSeatProfileFor(agent.id, { tab: "rebind" })}>
+                <DropdownMenuItem title="切到别的客户端或顶替此席位" onClick={() => openSeatProfileFor(agent.id, { tab: "rebind" })}>
                   <ArrowRightLeft />
-                  切换客户端 / 顶替…
+                  换客户端…
                 </DropdownMenuItem>
                 {agent.callable ? (
                   <DropdownMenuItem onClick={() => void togglePause(!agent.queuePaused)}>
                     {agent.queuePaused ? <Play /> : <Pause />}
-                    {agent.queuePaused ? "恢复自动唤起" : "暂停自动唤起"}
+                    {agent.queuePaused ? "恢复叫醒" : "暂停叫醒"}
                   </DropdownMenuItem>
                 ) : null}
                 {/* Only Claude Code's and Codex's permission prompts come to the page (lib/kinds.ts PERMIT_KINDS). */}
@@ -568,15 +551,15 @@ function SeatRow({ agent, ...props }: Props & { agent: PublicAgent }) {
                   <DropdownMenuCheckboxItem
                     checked={Boolean(agent.autoFull)}
                     onCheckedChange={(on) => void toggleAutoFull(on)}
-                    title="勾上后它每次被叫醒都直接有全部权限，不再一条条问你"
+                    title="每次叫醒直接给全权，不再逐条确认"
                   >
-                    默认开启全部权限
+                    默认给全权
                   </DropdownMenuCheckboxItem>
                 ) : null}
               </>
             )}
             <DropdownMenuItem onClick={() => props.onFocus(focused ? null : agent.id)}>
-              {focused ? "看全部对话" : "只看和他有关的"}
+              {focused ? "看全部对话" : "只看它相关"}
             </DropdownMenuItem>
             {agent.hasSession && !agent.demo && (agent.agentName === "claude" || agent.agentName === "codex") ? (
               <>
@@ -584,11 +567,11 @@ function SeatRow({ agent, ...props }: Props & { agent: PublicAgent }) {
                 <DropdownMenuGroup>
                   <DropdownMenuLabel>高级</DropdownMenuLabel>
                   <DropdownMenuItem
-                    title="把它自己的界面开在网页里，你能看着它做、直接打字接管"
+                    title="在网页终端打开，可直接打字接管"
                     onClick={() => openTerminalFor(agent.id, agent.name)}
                   >
                     <SquareTerminal />
-                    <span className="whitespace-nowrap">{agent.terminal ? "看终端" : "在终端里打开…"}</span>
+                    <span className="whitespace-nowrap">{agent.terminal ? "看终端" : "打开终端…"}</span>
                     <BetaTag />
                   </DropdownMenuItem>
                 </DropdownMenuGroup>
@@ -596,7 +579,7 @@ function SeatRow({ agent, ...props }: Props & { agent: PublicAgent }) {
             ) : null}
             <DropdownMenuSeparator />
             <DropdownMenuItem variant="destructive" onClick={() => props.onLeave(agent)}>
-              请离席
+              移出席位
             </DropdownMenuItem>
           </DropdownMenuContent>
         </DropdownMenu>
@@ -612,7 +595,6 @@ function SeatRow({ agent, ...props }: Props & { agent: PublicAgent }) {
             <button
               type="button"
               className="ml-auto shrink-0 rounded-full bg-amber-500/15 px-1.5 text-[10px] font-medium leading-4 hover:bg-amber-500/25"
-              title="让它压缩自己的上下文"
               onClick={() => props.onCompact(agent)}
             >
               压缩
@@ -625,7 +607,7 @@ function SeatRow({ agent, ...props }: Props & { agent: PublicAgent }) {
         <button
           type="button"
           className="flex items-center gap-1 pl-4 text-left text-xs leading-5 text-emerald-700 hover:underline dark:text-emerald-300"
-          title="它的会话开在房间的终端里，点名会打进那里。点开看"
+          title="点名会发进终端，点开查看"
           onClick={() => openTerminalFor(agent.id, agent.name)}
         >
           <SquareTerminal className="size-3 shrink-0" />
@@ -639,14 +621,14 @@ function SeatRow({ agent, ...props }: Props & { agent: PublicAgent }) {
       {agent.retry && !agent.runId ? (
         <div data-retry className="flex items-center gap-1 pl-4 text-[11px] leading-5 text-amber-700 dark:text-amber-300">
           <RotateCw className="size-3 shrink-0" />
-          <span className="truncate" title="唤起因为网络断了没成功，房间会带着同样的消息自己再叫一次">
+          <span className="truncate" title="网络断了，到点自动重叫">
             网络断了 · {new Date(agent.retry.at).toLocaleTimeString("zh-CN", { hour12: false })} 再叫（{agent.retry.n}/{agent.retry.of}）
           </span>
           <button
             type="button"
             className="ml-auto grid size-5 shrink-0 place-items-center rounded-full text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
-            title="不再自动重试"
-            aria-label={`不再自动重试 ${agent.name}`}
+            title="取消重试"
+            aria-label={`取消重试 ${agent.name}`}
             onClick={() => props.onStop(agent)}
           >
             <X className="size-3" />
@@ -658,13 +640,13 @@ function SeatRow({ agent, ...props }: Props & { agent: PublicAgent }) {
         <div className="flex items-center gap-1 pl-4 text-[11px] leading-5 text-amber-700 dark:text-amber-300">
           { queuedCount > 0 ? (
             <DropdownMenu>
-              <DropdownMenuTrigger className="truncate text-left hover:underline" title="点开查看或单条剔除排队中的消息">
+              <DropdownMenuTrigger className="truncate text-left hover:underline" title="查看或剔除排队消息">
                 {agent.queuePaused ? `已暂停 · 排队 ${queuedCount} 条` : `排队 ${queuedCount} 条`}
               </DropdownMenuTrigger>
               <DropdownMenuContent align="start" className="w-64">
                 {/* A label only works inside a group: Base UI throws without one. */}
                 <DropdownMenuGroup>
-                  <DropdownMenuLabel>等待唤起的消息（点 × 单独剔除）</DropdownMenuLabel>
+                  <DropdownMenuLabel>排队消息（点 × 剔除）</DropdownMenuLabel>
                   {(agent.queuedItems ?? []).map((item) => (
                     <DropdownMenuItem
                       key={item.id}
@@ -678,18 +660,18 @@ function SeatRow({ agent, ...props }: Props & { agent: PublicAgent }) {
                 </DropdownMenuGroup>
                 <DropdownMenuSeparator />
                 <DropdownMenuItem variant="destructive" onClick={() => void dropQueued("*")}>
-                  清空全部排队
+                  清空排队
                 </DropdownMenuItem>
               </DropdownMenuContent>
             </DropdownMenu>
           ) : (
-            <span className="truncate">已暂停自动唤起</span>
+            <span className="truncate">已暂停叫醒</span>
           )}
           <button
             type="button"
             className="ml-auto grid size-5 shrink-0 place-items-center rounded-full text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
-            title={agent.queuePaused ? "恢复自动唤起" : "暂停后续唤起"}
-            aria-label={agent.queuePaused ? `恢复 ${agent.name} 唤起` : `暂停 ${agent.name} 唤起`}
+            title={agent.queuePaused ? "恢复叫醒" : "暂停叫醒"}
+            aria-label={agent.queuePaused ? `恢复 ${agent.name} 叫醒` : `暂停 ${agent.name} 叫醒`}
             onClick={() => void togglePause(!agent.queuePaused)}
           >
             {agent.queuePaused ? <Play className="size-3" /> : <Pause className="size-3" />}
@@ -704,7 +686,7 @@ function SeatRow({ agent, ...props }: Props & { agent: PublicAgent }) {
             <button
               type="button"
               className="flex min-w-0 flex-1 items-center gap-1 text-left text-xs leading-5 text-sky-700 hover:underline dark:text-sky-300"
-              title="看它这次在做什么"
+              title="查看运行过程"
               onClick={() => agent.runId && props.onOpenRun(agent.runId)}
             >
               <Loader2 className="size-3 shrink-0 animate-spin" />
@@ -713,9 +695,9 @@ function SeatRow({ agent, ...props }: Props & { agent: PublicAgent }) {
           ) : unsure ? (
             <span
               className="min-w-0 flex-1 truncate pl-1 text-xs leading-5 text-muted-foreground"
-              title={`它 ${ago(agent.unsure ?? 0, props.now)}说在做「${agent.doing || "…"}」，之后没再报过。客户端还开着，是不是还在做，房间看不出来`}
+              title={`${ago(agent.unsure ?? 0, props.now)}说在做，之后无动静`}
             >
-              不确定在不在做 · {ago(agent.unsure ?? 0, props.now)}说在做
+              可能停了 · {ago(agent.unsure ?? 0, props.now)}说在做
             </span>
           ) : (
             <span
@@ -730,8 +712,8 @@ function SeatRow({ agent, ...props }: Props & { agent: PublicAgent }) {
               <button
                 type="button"
                 className="grid size-5 shrink-0 place-items-center rounded-full text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
-                title="插话：单独对它说一句，先停下手上的事回你，回完接着做"
-                aria-label={`和 ${agent.name} 插话`}
+                title="单独说：先停下回你，回完接着做"
+                aria-label={`和 ${agent.name} 单独说`}
                 onClick={() => props.onWhisper(agent)}
               >
                 <MessageCircle className="size-3" />
@@ -739,7 +721,7 @@ function SeatRow({ agent, ...props }: Props & { agent: PublicAgent }) {
               <button
                 type="button"
                 className="grid size-5 shrink-0 place-items-center rounded-full text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
-                title="停止：停掉这次唤起，排在后面的也一起取消"
+                title="停下这次，排队的也取消"
                 aria-label={`停下 ${agent.name}`}
                 onClick={() => props.onStop(agent)}
               >
@@ -756,7 +738,7 @@ function SeatRow({ agent, ...props }: Props & { agent: PublicAgent }) {
           <DropdownMenu>
             <DropdownMenuTrigger
               className="flex min-w-0 items-center gap-1 truncate text-left hover:underline"
-              title="它停着，名下还有没着落的事。点开看是哪些"
+              title="停着未完的事，点开查看"
             >
               <Hourglass className="size-3 shrink-0" />
               <span className="truncate">停着 · 还欠 {owed} 件</span>
@@ -786,10 +768,10 @@ function SeatRow({ agent, ...props }: Props & { agent: PublicAgent }) {
             <button
               type="button"
               className="ml-auto shrink-0 rounded-full bg-amber-500/15 px-1.5 text-[10px] font-medium leading-4 hover:bg-amber-500/25"
-              title="以你的名义在群里 @ 它，带上这几件事"
+              title="发消息 @ 它接着做"
               onClick={() => void nudge()}
             >
-              叫它接着做
+              接着做
             </button>
           ) : null}
         </div>

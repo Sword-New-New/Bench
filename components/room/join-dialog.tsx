@@ -51,7 +51,7 @@ function CopyLine({ text }: { text: string }) {
             setDone(true)
             window.setTimeout(() => setDone(false), 1500)
           } catch {
-            toast.error("没复制成功，选中文本再复制一次")
+            toast.error("复制失败，请手动复制")
           }
         }}
       >
@@ -73,13 +73,13 @@ function PromptBox({ prompt }: { prompt: string }) {
           onClick={async () => {
             try {
               await navigator.clipboard.writeText(prompt)
-              toast.success("接入说明已复制")
+              toast.success("说明已复制")
             } catch {
-              toast.error("没复制成功，选中文本再复制一次")
+              toast.error("复制失败，请手动复制")
             }
           }}
         >
-          复制说明
+          复制
         </Button>
       </div>
     </>
@@ -103,7 +103,7 @@ function Results({ results }: { results: RegisterResult[] }) {
             )}
             <span className="w-20 shrink-0 font-medium">{kind?.label ?? result.kind}</span>
             <span className="min-w-0 flex-1 text-muted-foreground" title={result.output}>
-              {result.ok ? "已注册，重开它的会话后生效" : last || "没成功"}
+              {result.ok ? "已注册，重开会话生效" : last || "没成功"}
             </span>
           </li>
         )
@@ -238,7 +238,7 @@ export function JoinDialog({
       })
       setResults(data.results)
     } catch (error) {
-      toast.error(error instanceof Error ? error.message : "没运行成功")
+      toast.error(error instanceof Error ? error.message : "运行失败")
     } finally {
       setRunning(false)
     }
@@ -248,19 +248,19 @@ export function JoinDialog({
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent className="max-h-[calc(100dvh-2rem)] grid-cols-[minmax(0,1fr)] overflow-y-auto sm:max-w-2xl">
         <DialogHeader>
-          <DialogTitle>把 AI 接进「{projectName}」</DialogTitle>
+          <DialogTitle>接入 AI</DialogTitle>
           <DialogDescription>
-            选好要接的 AI，在终端里运行一次给出的命令，再在它的会话里说一句话入座。注册是每个 AI 一次，所有项目共用；进哪个项目看那句话。
+            给选中的客户端写入一次 bench 配置，再在它会话里发一句即可入座「{projectName}」。
           </DialogDescription>
         </DialogHeader>
         <section className="space-y-2" data-tour="j-pick">
           <div className="flex items-center gap-2">
-            <h3 className="shrink-0 text-sm font-medium">1. 接哪几个？</h3>
+            <h3 className="shrink-0 text-sm font-medium">1. 选客户端</h3>
             <div className="relative ml-auto w-44">
               <Search className="pointer-events-none absolute top-1/2 left-2 size-3.5 -translate-y-1/2 text-muted-foreground" />
               <Input
                 value={query}
-                placeholder="搜名字或软件"
+                placeholder="搜客户端"
                 aria-label="搜 agent"
                 className="h-7 pl-7 text-xs"
                 onChange={(event) => setQuery(event.target.value)}
@@ -280,20 +280,20 @@ export function JoinDialog({
           </div>
           {joined.length ? (
             <p className="text-[11px] leading-4 text-muted-foreground">
-              已经接进来的没列出来：{joined.map((kind) => kind.label).join("、")}。要再开一个，去席位栏那一家底下点「开新会话」。
+              已入座：{joined.map((kind) => kind.label).join("、")}（要加开去左栏点「开新会话」）。
             </p>
           ) : null}
           {shown.length === 0 && words && !joined.some((kind) => matches(kind, words)) ? (
             <div className="rounded-xl border px-3 py-2.5">
               <p className="text-xs leading-5 text-muted-foreground">
-                列表里没有「{query.trim()}」。它也能接：把下面这段说明复制给它，它会用房间的接口自己入座、收发消息，只是别人 @ 它时房间叫不醒它。
+                列表里没有「{query.trim()}」：把下面说明贴给它即可入座（点名不会自动叫醒）。
               </p>
               <PromptBox prompt={prompt} />
             </div>
           ) : null}
         </section>
         <section className="space-y-2" data-tour="j-register">
-          <h3 className="text-sm font-medium">2. 运行一次注册命令</h3>
+          <h3 className="text-sm font-medium">2. 写入客户端配置（每家一次）</h3>
           {chosen.length > 0 ? (
             <>
               <div className="flex items-center gap-2">
@@ -302,51 +302,48 @@ export function JoinDialog({
                 </div>
                 <Button type="button" size="sm" className="shrink-0" disabled={running} onClick={runHere}>
                   {running ? <Loader2 className="animate-spin" /> : <Play />}
-                  {running ? "正在运行" : "替我运行"}
+                  {running ? "运行中…" : "运行"}
                 </Button>
               </div>
               {results ? <Results results={results} /> : null}
-              <p className="text-xs leading-5 text-muted-foreground">以后不用再做，换项目也不用重跑。</p>
+              <p className="text-xs leading-5 text-muted-foreground">会向对应客户端配置注册 bench 工具，所有项目共用。</p>
             </>
           ) : (
-            <p className="rounded-lg border border-dashed px-3 py-2.5 text-xs text-muted-foreground">先在上面选要接的 AI，可以多选。</p>
+            <p className="rounded-lg border border-dashed px-3 py-2.5 text-xs text-muted-foreground">先在上面选客户端（可多选）。</p>
           )}
         </section>
         <section className="space-y-2" data-tour="j-say">
-          <h3 className="text-sm font-medium">3. 在它的会话里说</h3>
+          <h3 className="text-sm font-medium">3. 在它会话里发这句</h3>
           <CopyLine text={ask} />
           <p className="text-xs leading-5 text-muted-foreground">
             {project?.dir
-              ? `它的工作目录在 ${project.dir} 里面的话，不说项目名也会进这个项目。`
-              : "给项目设一个目录后，在那个目录里干活的 AI 不说项目名也会自动进来。"}
-            它原来坐在别的项目里的话，会离开那边。
+              ? `工作目录在 ${project.dir} 内的会话可省略项目名；`
+              : "项目设好目录后，同目录会话可省略项目名；"}
+            原在别的项目会自动转来。
           </p>
         </section>
         {spawnable.length > 0 ? (
           <section className="space-y-2">
-            <h3 className="text-sm font-medium">或者让房间直接开一个新会话</h3>
+            <h3 className="text-sm font-medium">或后台直接开新会话</h3>
             <div className="flex flex-wrap gap-1.5">
               {spawnable.map((id) => {
                 const kind = kindById(id)
                 return (
                   <Button key={id} type="button" variant="outline" size="sm" className="rounded-full" onClick={() => onSpawn(id)}>
                     <Plus />
-                    新的 {kind?.label ?? id} 会话
+                    {kind?.label ?? id}
                   </Button>
                 )
               })}
             </div>
             <p className="text-xs leading-5 text-muted-foreground">
-              房间在后台建好会话并入座{project?.dir ? `，默认开在项目目录 ${project.dir}` : ""}，不用你去打开它。
+              后台建好会话直接入座{project?.dir ? `（默认在 ${project.dir}）` : ""}。
             </p>
           </section>
         ) : null}
-        <p className="text-xs leading-5 text-muted-foreground">
-          接进来以后，AI 会有 bench_join、bench_inbox、bench_say 等工具。会话 id 由 AI 自己取，不用你提供：能自动识别的直接用，识别不到时 bench_join 会告诉它用哪条命令查。会话开着就显示在线，关了就离线，别人 @ 它时房间会去唤起。
-        </p>
         <details className="rounded-xl border px-3 py-2">
           <summary className="cursor-pointer text-sm">
-            列表里没有的 agent：复制这段说明贴给它
+            其他客户端：复制说明贴给它
           </summary>
           <PromptBox prompt={prompt} />
         </details>
@@ -354,14 +351,14 @@ export function JoinDialog({
           <span className="text-xs text-muted-foreground">房间地址 {origin}</span>
           {confirmReset ? (
             <div className="flex items-center gap-2">
-              <span className="text-xs text-muted-foreground">这个项目的席位、对话和任务都会删掉。</span>
+              <span className="text-xs text-muted-foreground">席位、对话和待办都会删掉</span>
               <Button type="button" variant="destructive" size="sm" disabled={busy} onClick={onReset}>
                 确认清空
               </Button>
             </div>
           ) : (
             <Button type="button" variant="ghost" size="sm" onClick={() => setConfirmReset(true)}>
-              清空这个项目的记录
+              清空记录
             </Button>
           )}
         </div>

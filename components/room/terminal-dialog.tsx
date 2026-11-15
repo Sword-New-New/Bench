@@ -79,7 +79,7 @@ export function TerminalDialog() {
         await send(id, { action: "open", cols: xterm.cols, rows: xterm.rows })
       } catch (err) {
         if (gone) return
-        setError(err instanceof Error ? err.message : "终端没开起来")
+        setError(err instanceof Error ? err.message : "终端启动失败")
         setState("failed")
         return
       }
@@ -161,7 +161,7 @@ export function TerminalDialog() {
 
   const close = async () => {
     if (!seat) return
-    if (!window.confirm(`关掉 ${seat.name} 的终端？它在做的事会停下。会话本身不丢，之后点名照常唤起。`)) return
+    if (!window.confirm(`关闭 ${seat.name} 的终端？正在做的事会停下，会话保留。`)) return
     try {
       await send(seat.id, { action: "close" })
     } catch {}
@@ -173,22 +173,23 @@ export function TerminalDialog() {
         <DialogHeader className="flex-row items-center gap-2 pr-8">
           <div className="min-w-0 flex-1">
             <DialogTitle className="flex items-center gap-2">
-              {seat?.name} 的终端
+              实时终端
+              <span className="text-xs font-normal text-muted-foreground">{seat?.name}</span>
               <BetaTag />
               {state === "starting" ? <Loader2 className="size-4 animate-spin text-muted-foreground" /> : null}
             </DialogTitle>
             <DialogDescription className="truncate">
               {state === "ended"
-                ? "终端已经关了。会话还在，点名会照常在后台唤起它。"
+                ? "终端已关，点名恢复后台叫醒。"
                 : state === "failed"
                   ? error
-                  : "它自己的界面，你可以直接打字接管。关掉这个窗口终端还开着；开着时点名它，话会打进这里。"}
+                  : "可直接打字接管；关窗口不断终端，点名消息会发进这里。"}
             </DialogDescription>
           </div>
           {state === "live" ? (
             <Button type="button" variant="outline" size="sm" onClick={close}>
               <Power />
-              关掉终端
+              关闭终端
             </Button>
           ) : null}
         </DialogHeader>

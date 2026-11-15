@@ -25,7 +25,7 @@ export function LimitedCard({ message }: { message: Message }) {
       await api(`/api/v1/runs/${limited.runId}`, { method: "POST", body: JSON.stringify({ as: "human", action }) })
       if (done) toast.success(done)
     } catch (error) {
-      toast.error(error instanceof Error ? error.message : "没成功")
+      toast.error(error instanceof Error ? error.message : "操作失败")
     } finally {
       setSending(false)
     }
@@ -41,7 +41,7 @@ export function LimitedCard({ message }: { message: Message }) {
     body = (
       <span className="inline-flex items-center gap-1">
         <Check className="size-3" />
-        已换 {limited.reboundTo ?? "其他客户端"} 顶替 {limited.agentName} 接着做了
+        已换 {limited.reboundTo ?? "其他客户端"} 接着做
         {limited.at ? ` · ${whenText(limited.at)}` : ""}
       </span>
     )
@@ -49,19 +49,19 @@ export function LimitedCard({ message }: { message: Message }) {
     body = (
       <span className="inline-flex items-center gap-1">
         <Check className="size-3" />
-        {limited.agentName} 已经叫醒，接着做了{limited.at ? ` · ${whenText(limited.at)}` : ""}
+        已叫醒 {limited.agentName} 接着做{limited.at ? ` · ${whenText(limited.at)}` : ""}
       </span>
     )
   } else if (limited.state === "dismissed") {
-    body = <span>不自动继续{limited.note ? `（${limited.note}）` : ""}</span>
+    body = <span>已忽略{limited.note ? `（${limited.note}）` : ""}</span>
   } else if (limited.state === "scheduled") {
     body = (
       <span className="inline-flex flex-wrap items-center justify-center gap-1.5">
         <Hourglass className="size-3" />
-        {limited.at ? `${whenText(limited.at)} 自动叫醒 ${limited.agentName} 接着做` : "等重置后自动接着做"}
+        {limited.at ? `${whenText(limited.at)} 自动叫醒接着做` : "到点自动继续"}
         <Button type="button" size="xs" variant="outline" disabled={sending} onClick={openRebind}>
           <ArrowRightLeft className="size-3" />
-          不等了，换别的 AI 顶替…
+          换客户端…
         </Button>
         <Button type="button" size="xs" variant="ghost" disabled={sending} onClick={() => void choose("cancel")}>
           取消
@@ -71,22 +71,22 @@ export function LimitedCard({ message }: { message: Message }) {
   } else {
     body = (
       <span className="inline-flex flex-wrap items-center justify-center gap-1.5">
-        {limited.state === "failed" ? <span className="text-destructive">自动叫醒没成功：{limited.note}</span> : null}
+        {limited.state === "failed" ? <span className="text-destructive">自动叫醒失败：{limited.note}</span> : null}
         {resets ? (
-          <Button type="button" size="xs" disabled={sending} onClick={() => void choose("schedule", `${whenText(resets)} 重置后自动叫醒 ${limited.agentName}`)}>
+          <Button type="button" size="xs" disabled={sending} onClick={() => void choose("schedule", "到点自动叫醒")}>
             <Clock className="size-3" />
-            重置后自动继续 · {whenText(resets)}
+            到点继续
           </Button>
         ) : null}
-        <Button type="button" size="xs" variant={resets ? "outline" : "default"} disabled={sending} onClick={() => void choose("now", "叫醒了，会带着原来那些消息接着做")}>
+        <Button type="button" size="xs" variant={resets ? "outline" : "default"} disabled={sending} onClick={() => void choose("now", "已叫醒接着做")}>
           现在重试
         </Button>
         <Button type="button" size="xs" variant="outline" disabled={sending} onClick={openRebind}>
           <ArrowRightLeft className="size-3" />
-          换别的 AI 顶替…
+          换客户端…
         </Button>
         <Button type="button" size="xs" variant="ghost" disabled={sending} onClick={() => void choose("dismiss")}>
-          不用了
+          忽略
         </Button>
       </span>
     )

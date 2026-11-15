@@ -60,6 +60,7 @@ export function LeftPane({
   onPrefetch,
   onCreate,
   onEdit,
+  onEnableFront,
   roster,
 }: {
   projects: Project[]
@@ -70,6 +71,8 @@ export function LeftPane({
   onPrefetch: (id: string) => void
   onCreate: () => void
   onEdit: (project: Project) => void
+  // No front desk yet: the card at the top of the list opens one.
+  onEnableFront?: () => void
   // The room tier: the roster, with this at the top of it.
   roster: (head: ReactNode) => ReactNode
 }) {
@@ -250,6 +253,7 @@ export function LeftPane({
               onPrefetch={onPrefetch}
               onCreate={onCreate}
               onEdit={onEdit}
+              onEnableFront={onEnableFront}
             />
           </div>
         </nav>

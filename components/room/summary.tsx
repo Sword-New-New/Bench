@@ -219,7 +219,7 @@ export function SummaryNudge({
           <div className="flex items-center gap-2">
             <NotebookPen className="size-3.5 shrink-0 text-muted-foreground" />
             <p className="min-w-0 flex-1 leading-5">
-              {room.summary ? "上次摘要之后" : "到现在"}已经聊了 {count} 条（约 {Math.round(chars / 1000)} 千字），超出一次唤起能带的量了。找谁写一份摘要？
+              已聊 {count} 条（约 {Math.round(chars / 1000)} 千字），超出单次携带量。找谁写房间摘要？
             </p>
             <button
               type="button"
@@ -246,13 +246,13 @@ export function SummaryNudge({
                 </button>
               )
             })}
-            {writers.length === 0 ? <span className="text-muted-foreground">没有能唤起的席位</span> : null}
+            {writers.length === 0 ? <span className="text-muted-foreground">无可用席位</span> : null}
             <span className="ml-auto flex shrink-0 gap-0.5">
               <Button type="button" size="xs" variant="ghost" disabled={busy} onClick={snooze}>
                 稍后
               </Button>
               <Button type="button" size="xs" variant="ghost" disabled={busy} onClick={onSkip}>
-                这段不用
+                跳过
               </Button>
             </span>
           </div>
@@ -310,8 +310,8 @@ export function SummaryCard({
         <NotebookPen className="size-3.5 text-sky-600 dark:text-sky-400" />
         <span className="font-medium">房间摘要</span>
         <span className="min-w-0 flex-1 truncate text-muted-foreground">
-          {summary ? `${summary.by} · ${clock(summary.at)}` : "还没有"}
-          {room.sinceSummary.count > 0 ? ` · 之后又聊了 ${room.sinceSummary.count} 条` : ""}
+          {summary ? `${summary.by} · ${clock(summary.at)}` : "暂无"}
+          {room.sinceSummary.count > 0 ? ` · 新增 ${room.sinceSummary.count} 条` : ""}
         </span>
         <ChevronDown className="size-3.5 shrink-0 text-muted-foreground transition-transform group-open:rotate-180" />
       </summary>
@@ -329,11 +329,11 @@ export function SummaryCard({
             ) : null,
           )
         ) : (
-          <p className="text-muted-foreground">聊到一次唤起带不下的量时，房间会提醒你找人写。也可以自己先写一份。</p>
+          <p className="text-muted-foreground">消息超出单次携带量时会提醒找人写，也可手写。</p>
         )}
         <div className="flex justify-end pt-1">
           <Button type="button" size="xs" variant="ghost" onClick={() => setDraft(summary?.text ?? "## 结论\n\n## 进行中\n\n## 待定\n")}>
-            {summary ? "修改" : "自己写"}
+            {summary ? "修改" : "手写"}
           </Button>
         </div>
       </div>

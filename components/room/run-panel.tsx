@@ -43,7 +43,7 @@ export function RunPanel({ runId, onClose }: { runId: string | null; onClose: ()
         setNow(Date.now())
         if (data.run.state === "running") timer = window.setTimeout(load, POLL_MS)
       } catch (err) {
-        if (!stop) setError(err instanceof Error ? err.message : "没读到这次的过程")
+        if (!stop) setError(err instanceof Error ? err.message : "读取过程失败")
       }
     }
     void load()
@@ -68,15 +68,15 @@ export function RunPanel({ runId, onClose }: { runId: string | null; onClose: ()
       <DialogContent className="flex max-h-[calc(100dvh-2rem)] flex-col sm:max-w-2xl">
         <DialogHeader>
           <DialogTitle className="flex items-center gap-2">
-            {run ? `${run.agentName} 的过程` : "过程"}
+            {run ? `${run.agentName} · 过程` : "过程"}
             {state === "running" ? <Loader2 className="size-4 animate-spin text-muted-foreground" /> : null}
           </DialogTitle>
           <DialogDescription>
             {run
-              ? `${run.purpose === "summary" ? "写房间摘要" : run.purpose === "private" ? "单独说" : run.purpose === "compact" ? "压缩上下文" : run.purpose === "goal" ? "按目标干活" : run.purpose === "check" ? "复验待办" : "回复点名"} · ${
+              ? `${run.purpose === "summary" ? "写房间摘要" : run.purpose === "private" ? "单独说" : run.purpose === "compact" ? "压缩上下文" : run.purpose === "goal" ? "按目标干活" : run.purpose === "check" ? "复验待办" : run.purpose === "gist" ? "补摘要句" : "回复点名"} · ${
                   state === "running" ? "进行中" : state === "done" ? "完成" : "没成功"
-                } · ${took} · ${tools} 次工具调用`
-              : error || "正在读取…"}
+                } · ${took} · ${tools} 次工具`
+              : error || "读取中…"}
           </DialogDescription>
         </DialogHeader>
         <div
@@ -90,7 +90,7 @@ export function RunPanel({ runId, onClose }: { runId: string | null; onClose: ()
           {run?.steps.map((step) => <StepRow key={step.id} step={step} start={run.startedAt} />)}
           {run && run.steps.length === 0 ? (
             <p className="py-6 text-center text-xs text-muted-foreground">
-              {state === "running" ? "还没有动静…" : "这次没有记下步骤（这家客户端只给最终回答）"}
+              {state === "running" ? "暂无动静…" : "无步骤记录（该客户端只返回最终结果）"}
             </p>
           ) : null}
         </div>

@@ -56,7 +56,7 @@ Next.js 16.4 App Router，React 19，Tailwind CSS v4，shadcn/ui 的 base-nova�
 
 页面是客户端组件，`app/page.tsx` 只渲染 `RoomApp`。三列 `300px 1fr 300px`：左栏（两档，房间档是按 agent 分组的席位 `roster.tsx`，项目档是项目卡片，见下面「左栏两档」和「左栏：平时每个席位只占一行」）、群聊、分工。窄于 1024px 时用底部「入口 / 对话 / 分工」三个标签。输入框下面的「发给」一排是快捷 @：在线或叫得醒的席位每个一枚，同一家只有一枚时写家名（DeepSeek），有几枚时写各自的席位名。深浅色跟随系统，右上角可以切换。
 
-外观：浅色主题底下一层五家品牌色的慢速流光（`ambient.tsx`）。深色主题（2026-11-12 暗色氛围升级，`globals.css` 末尾「Dark ambience」一段）不显示这些流光（它们在黑底上叠成黄绿发浑），也不显示点阵，换成 GPU 现画的深冷调极光（`components/room/aurora.ts` 的着色器，`ambient.tsx` 的 `useAurora`，2026-11-12）：深色底，一道蓝青极光斜着划过上半部分，输入框后面是一片深蓝，±1 级色阶的抖动防色带。按屏幕自己的分辨率（devicePixelRatio，最多 2）在一个虚拟的 2560×1600 画框里画，像 `background-size: cover` 那样铺满，所以和原来那张图构图一样；平时只画一次，窗口尺寸变了才重画，不占资源。设置菜单里「深色背景缓慢流动」（localStorage `bench-aurora-flow`，默认关）打开后光带慢慢飘（波沿光带走，三条各自上下起伏，约 30 秒一个来回；第一版速度只有现在的四分之一，10 秒才变两级色阶，用户以为开关没反应），每秒 24 帧，标签页不在前台、浅色主题、减少动态效果时都不画；它有自己的时钟，开关、切走再回来都从光带当时的位置接着走。实测开着流动帧间隔仍是 16.7ms。没有 WebGL 时（`data-gl="off"`）退回 `public/wallpapers/deep-aurora.webp`，同一张画，存成无损 webp（1.6 MB）：有损 webp 哪怕质量 0.98 也会把这么暗的渐变压成 8×8 的方块和一道道台阶，用户一眼看出「精细度差」。坑：`dispose` 里别调 `WEBGL_lose_context`，开发模式 React 会挂两次，第二次拿到的是丢了的上下文，就退回图片了；GLSL 里 `half` 是保留字。调颜色、光带位置宽窄都在着色器顶上的几个数里。中间试过两种都被用户否了：#090c12 加两处冷光，还有纯黑。不用 `filter: blur`（大图层加模糊、再让它动，是这页最贵的重绘）。面板外圈的 `--panel-glow` 深色下也换成冷色。深色下输入框（`.composer`）平时只有一圈 `rgba(255,255,255,.08)` 的细边，去掉了 `.raised` 的高光边和聚焦环，聚焦时泛一圈淡蓝光；下面的 @ 胶囊（`.ghost-chip`）是幽灵暗底，悬停变亮。「还有 N 个问题在等你回答」横幅（`.ask-banner`，`PinnedAsks`）深色下是同一套深色毛玻璃，只靠左边一颗呼吸的琥珀小圆点（`.breathe`，减少动态效果时不动）提醒，浅色保持原来的琥珀样式。这个横幅只在等回答的提问不在当前画出的那段消息里时才出现（截图验它要先在副本里提问，再发十几条把它挤上去）。坑：用脚本整份重写 `globals.css` 时，开发服务器偶尔在写到一半时读到旧内容，之后就不再重编，页面还是旧样式；再往文件末尾追加一个换行就会重编。面板是毛玻璃（`.frost`，模糊放在 `::before` 上，免得隔断里面元素的背景），顶栏和输入框是浮起来的毛玻璃（`.raised`），输入框上方浮在对话上的提示卡（权限确认、摘要提醒）用 `.notice`：自带模糊，边框颜色用 `[--notice-ring:…]` 设（别用 `.pill`，它不带模糊，后面滚过的消息会直接透出来；`.pill` 只给放在已经是毛玻璃的东西上面的小控件用），输入框浮在对话上面，对话底部按输入框的高度留白：`composer.tsx` 用 ResizeObserver 量输入框，把高度直接写到带 `data-dock` 的几个元素上（`data-dock="padding-bottom 1rem"` 就是 `padding-bottom: calc(高度 + 1rem)`，群聊和流程视图用；刻度尺用 `bottom 1.25rem`），后挂上的（流程视图、换项目）由一个 MutationObserver 补上。别改回在外层容器上设 CSS 变量：回复条、@ 列表展开时输入框每帧都在长，变量一变它下面的节点全要重算样式（群聊约 2000 个，每帧 10～17ms；改成不继承的 `@property` 也一样，刻度尺那 160 个也要 3ms），点「回复」时就只剩五六十帧（2026-11-12 实测：动画期间每帧 11～17ms → 2～5ms）。刻度尺跟着变高变矮时，横线的位置是刻度尺高度的百分比，自己跟着走；重新排横线（React 重画每一根）等尺寸停下 150ms 再做。五家的头像是会动的角色（`bot.tsx`，底层是 `lib/vendor/grokbot.js`，MIT，来源和本地改动写在文件头）：形状在 `BOT_SHAPE`，状态跟席位走（干活、出错、离线睡觉），鼠标进到那一行才盯着鼠标看，入口栏里还会压成胶囊。
+外观：浅色主题底下一层五家品牌色的慢速流光（`ambient.tsx`）。深色主题（2026-11-12 暗色氛围升级，`globals.css` 末尾「Dark ambience」一段）不显示这些流光（它们在黑底上叠成黄绿发浑），也不显示点阵，换成 GPU 现画的深冷调极光（`components/room/aurora.ts` 的着色器，`ambient.tsx` 的 `useAurora`，2026-11-12）：深色底，一道蓝青极光斜着划过上半部分，输入框后面是一片深蓝，±1 级色阶的抖动防色带。按屏幕自己的分辨率（devicePixelRatio，最多 2）在一个虚拟的 2560×1600 画框里画，像 `background-size: cover` 那样铺满，所以和原来那张图构图一样；平时只画一次，窗口尺寸变了才重画，不占资源。设置菜单里「深色背景缓慢流动」（localStorage `bench-aurora-flow`，默认关）打开后光带慢慢飘（波沿光带走，三条各自上下起伏，约 30 秒一个来回；第一版速度只有现在的四分之一，10 秒才变两级色阶，用户以为开关没反应），每秒 24 帧，标签页不在前台、浅色主题、减少动态效果时都不画；它有自己的时钟，开关、切走再回来都从光带当时的位置接着走。实测开着流动帧间隔仍是 16.7ms。没有 WebGL 时（`data-gl="off"`）退回 `public/wallpapers/deep-aurora.webp`，同一张画，存成无损 webp（1.6 MB）：有损 webp 哪怕质量 0.98 也会把这么暗的渐变压成 8×8 的方块和一道道台阶，用户一眼看出「精细度差」。坑：`dispose` 里别调 `WEBGL_lose_context`，开发模式 React 会挂两次，第二次拿到的是丢了的上下文，就退回图片了；GLSL 里 `half` 是保留字。调颜色、光带位置宽窄都在着色器顶上的几个数里。中间试过两种都被用户否了：#090c12 加两处冷光，还有纯黑。不用 `filter: blur`（大图层加模糊、再让它动，是这页最贵的重绘）。面板外圈的 `--panel-glow` 深色下也换成冷色。深色下输入框（`.composer`）平时只有一圈 `rgba(255,255,255,.08)` 的细边，去掉了 `.raised` 的高光边和聚焦环，聚焦时泛一圈淡蓝光；2026-11-17 试过照 Antigravity 的输入框在外面加一圈浮雕托盘（`box-shadow` 叠出来的色带和亮边，t_50a32776），用户看了说和整体不搭：那种样子适合纯色背景，毛玻璃上做不出浮雕感，当天换回，别再试；下面的 @ 胶囊（`.ghost-chip`）是幽灵暗底，悬停变亮。「还有 N 个问题在等你回答」横幅（`.ask-banner`，`PinnedAsks`）深色下是同一套深色毛玻璃，只靠左边一颗呼吸的琥珀小圆点（`.breathe`，减少动态效果时不动）提醒，浅色保持原来的琥珀样式。这个横幅只在等回答的提问不在当前画出的那段消息里时才出现（截图验它要先在副本里提问，再发十几条把它挤上去）。坑：用脚本整份重写 `globals.css` 时，开发服务器偶尔在写到一半时读到旧内容，之后就不再重编，页面还是旧样式；再往文件末尾追加一个换行就会重编。面板是毛玻璃（`.frost`，模糊放在 `::before` 上，免得隔断里面元素的背景），顶栏和输入框是浮起来的毛玻璃（`.raised`），输入框上方浮在对话上的提示卡（权限确认、摘要提醒）用 `.notice`：自带模糊，边框颜色用 `[--notice-ring:…]` 设（别用 `.pill`，它不带模糊，后面滚过的消息会直接透出来；`.pill` 只给放在已经是毛玻璃的东西上面的小控件用），输入框浮在对话上面，对话底部按输入框的高度留白：`composer.tsx` 用 ResizeObserver 量输入框，把高度直接写到带 `data-dock` 的几个元素上（`data-dock="padding-bottom 1rem"` 就是 `padding-bottom: calc(高度 + 1rem)`，群聊和流程视图用；刻度尺用 `bottom 1.25rem`），后挂上的（流程视图、换项目）由一个 MutationObserver 补上。别改回在外层容器上设 CSS 变量：回复条、@ 列表展开时输入框每帧都在长，变量一变它下面的节点全要重算样式（群聊约 2000 个，每帧 10～17ms；改成不继承的 `@property` 也一样，刻度尺那 160 个也要 3ms），点「回复」时就只剩五六十帧（2026-11-12 实测：动画期间每帧 11～17ms → 2～5ms）。刻度尺跟着变高变矮时，横线的位置是刻度尺高度的百分比，自己跟着走；重新排横线（React 重画每一根）等尺寸停下 150ms 再做。五家的头像是会动的角色（`bot.tsx`，底层是 `lib/vendor/grokbot.js`，MIT，来源和本地改动写在文件头）：形状在 `BOT_SHAPE`，状态跟席位走（干活、出错、离线睡觉），鼠标进到那一行才盯着鼠标看，入口栏里还会压成胶囊。
 
 头像多久画一次（`grokbot.js` 的「Shared ticker」，本地改动）：每只按它在做的事定节奏，画完一次在 `_update` 末尾定下一次。什么都没动（弹簧都到位、没在翻滚、没有粒子）就不算也不写 DOM，只看一眼定时器；睡着的每秒约 10 次（呼吸和飘的 z）；只有眼睛在动、自己玩（眨眼、蹦一下）、或一直在干活的，每秒约 30 次；鼠标悬停或状态变化引起的身体动作（`morph()`、`setState()` 里的 `_hurry`）两秒内每帧都画。除了最后一种，大家共用同一批帧（节拍）：这个页面上只要有一只 bot 的几何属性变了，那一帧就要多付大约 1ms 的布局，和改了几只、改了多少关系不大（给容器加 `contain`、`overflow` 都没用，实测过），所以让每只各走各的节奏反而更费。属性只在值变了时才写（`put`）；呼吸在头像这种尺寸下不到半个设备像素，就不画了（`_measure` 按尺寸和屏幕密度算，睡着的在高分屏上还会呼吸）。弹簧到了肉眼看不出的距离就直接停在目标上（`Spring` 的第四个参数是各自的容差）。2026-11 在 1680 宽、14 只头像（9 只发呆、5 只睡觉）的房间里量：头像占主线程从约 8.8% 降到约 4.1%，每秒写 SVG 属性从约 1.1 万次降到约 700 次。剩下的主要是「每秒有约 25 帧里有头像在动」乘上那笔固定的布局开销，再降就得少让它们动。
 
@@ -97,6 +97,7 @@ Next.js 16.4 App Router，React 19，Tailwind CSS v4，shadcn/ui 的 base-nova�
 - 待办列表（右栏，原来叫「分工」）：任务可以带 `steps`，每步「待做 / 在做 / 做完」，记谁、几点改的和一句说明（`lib/store.ts` 的 `stepsFrom`、`actOnTask` 的 `step`；MCP `bench_task` 的 `steps`、`bench_step`）。唤起提示要求 agent 接到新功能先建待办、做一步标一步，验收也照着步骤走。待办卡片里的 `StepDrawer`（`tasks-panel.tsx`）平时一行「步骤 2/5 · 正在：…」加进度条，点开是每一步和时间；点步骤前的圆点在 待做 → 在做 → 做完 → 待做 之间切。右栏不再有手写待办的表单（2026-11 删了）：待办由 AI 在对话里被叫到做新功能时自己建，表单和 @ 是重复的；`POST /api/v1/tasks` 还在，`bench_task` 和测试脚本用它。
 - 用户的名字（`store.ts` 的 `userName` / `setUserName`，`/api/v1/user`）：存在 `data/user.json`，全部项目共用；没有这个文件时沿用房间里最近一条用户消息的署名（老房间就是 jinbao），全新安装叫「用户」。快照带 `userName`。改名只许 `as: "human"`，名字规则和席位一样，不能和任何项目里的席位重名（409）；改名会把所有项目里用户消息的 `authorName`、用户的待办、待办记录和验收里的旧名一起改掉。唤起提示、入座说明（`joinPrompt` 第三个参数，网页上的接入页也用它，所以 `lib/prompt.ts` 不能 import store）、报错都读它；`bench-mcp.mjs` 的工具说明是静态的，统一写「用户」。新手引导第 1 步的 `NameField` 是引导里唯一会存盘的地方。测试只试拒绝的情况，真改名会改到所有项目。
 - 左栏两档（`components/room/left-pane.tsx`，2026-11-12，取代原来单独的项目栏和 `lg`～`xl` 的头像列）：一栏 300 宽，同一时间只显示一档。房间档是当前项目的席位栏（`roster.tsx`，标题行左端是「← 项目」和项目名，`Roster` 的 `head`）；项目档是每个项目一张卡片加「新建项目」（`project-rail.tsx` 的 `ProjectList`）。页面打开在房间档；点卡片进那个项目的房间，点「← 项目」或焦点在左栏时按 Esc 回项目档；点当前项目的卡片只是回房间。中间和右栏始终是当前项目，在项目档里翻看不动它们。「← 项目」上带别的项目里等你的总数（红），别的项目有人在做时带一个青点。窄屏底部「席位」页里是同一套两档。新手引导第 2 步切到项目档、「看它有没有入座」那步切回房间档（`tour.tsx` 的 `tier`，发 `LEFT_TIER` 事件），引导结束回房间档。
+  - 标题行只放三样（2026-11-16，t_d9cd56cd；AverageJoe：这一排太挤，项目名被截成「bench…」）：返回、项目名、「接入」。返回按钮只画箭头，不写「项目」两个字；别的项目里有等他处理的事时箭头后面跟红色件数，没有件数、别处有人在做时才画青色小点（以前两个叠在一起）。说明都还在悬停提示和 `aria-label` 里。文档和注释里说的「← 项目」就是这个箭头。「全部展开 / 全部收起」用 `hidden` 加 `group-hover/head`、`group-focus-within/head`、`[@media(hover:none)]` 三个变体显示。坑：无头 Chrome 默认算 `hover: none`，截图里这个按钮会一直在；要验「平时不在」得加启动参数 `--blink-settings=primaryHoverType=2,availableHoverTypes=2,primaryPointerType=4,availablePointerTypes=4`。
   - 过渡（`globals.css`「Left column tiers」）：进房间：点下去其它卡片 120ms 内背着它淡出、挪 8px（`.tier-leaving`，纯 CSS），`LEAD`（110ms）后一次 `startTransition`（类型 `tier-enter`）换档：被点的卡片和房间面板同名 `tier-pane`，两张快照都按原尺寸钉在左上角、由变大的框裁出来（`object-fit: none`），所以不拉伸文字；项目名和小圆点同名 `tier-title` 滑到标题；凳子上的小人用原来的 `seatFlight` 飞到各自那一行的状态灯，按座位错开 25ms（`left-pane.tsx` 现写一段 `<style>`）；席位栏的行从 120ms 起逐行淡入（`.tier-in .tier-rows > *`，错开 20ms，最多 8 行），「← 项目」从左 8px 滑入。回项目（`tier-leave`）：面板旧图 90ms 淡出，框缩回卡片，小人 240ms 飞回凳子，其它卡片从它往外依次淡入（`data-motion="in"`，`--far` 每格 30ms）；`useLayoutEffect` 先把列表滚到那张卡片、把焦点放上去，再截新画面。只动 transform 和 opacity，框的大小交给 ViewTransition 自己的快照。别的项目：`LEAD` 期间顺手 `prefetch`，`openProject(id, then)` 在快照到了的那次 `startTransition` 里一起换档，所以小人有地方可飞；中途点了返回会 `openProject(当前)` 把还在路上的那次作废（`turn` 计数）。打断：新的一次开始前 `document.activeViewTransition?.skipTransition()`，直接跳到新的那次。减少动态效果：框和标题不动，只做 120ms 淡入淡出。坑：`Bot`（小克）现在在 `useLayoutEffect` 里建：视图过渡期间 React 把 `useEffect` 压到过渡结束才跑，原来进房间时各家头像要等动画完了才冒出来。只有锚点卡片（被点的那张，或当前项目）带 `tier-pane` / `tier-title` 名字，别的卡片不进过渡图层。
 - 点项目卡片进房间的速度（2026-11-12 用户问「为什么有延迟」）：实测（开发模式、真显卡）拉快照只要 7～11ms，不是网络。时间花在：卡片先淡出的 `LEAD` 110ms、React 画新房间（视图过渡开始前一次 55～70ms 的长任务）、过渡本身 300ms 加席位错开。改法：鼠标左键按下就开始（`pointerdown`，触屏和键盘仍按 click，随后的 click 当重复忽略，`left-pane.tsx` 的 `pickingRef`）；`LEAD` 降到 16ms（只为让被点的卡片先挂上 `tier-pane` 再截旧画面）；面板和标题 300→240ms，席位 320→260ms、延迟 40→20ms、每个错开 25→18ms，行的淡入整体提前 40ms。结果从按下算：新房间上屏 ~290→~190ms，过渡结束 ~720→~530ms，同项目 175→59ms。剩下的大头是开发模式下 React 渲染房间，`next build && next start` 会再快。测法：`~/.cache/bench-copies/probe/lag.mjs`（只读，打开 4399 不带口令，点卡片，用 PerformanceObserver 和 `document.activeViewTransition` 记时间线）。
 - 项目卡片（`components/room/project-rail.tsx`）：名字下面一条长凳（「并坐」），右边写几个席位、几个在做、「当前」。凳子上坐 `listProjects` 的 `bench`：最多三个席位，在干活的排前面，其次有权限或提问在等用户的（头上红色「!」），再按最后说话的时间；剩下的写「+N」；在干活的在凳子上像海浪一样跳（`bench-turn`：每 2.4 秒一波，按座位顺序一个比一个晚 0.12 秒快速跳完，然后歇着等下一波；减少动态效果时不跳），离线的变灰。表情用小克的 `mood`（`moodOf`）：等用户 worried、干活 busy、手上有待办等验收 happy（`bench[].review`）、离线 asleep，其余不给 mood 照常发呆。当前项目的凳子上也坐着人（两档以后房间档和项目档不同时出现，小人在两档之间飞）。`lg` 以下顶上的下拉也能切项目。切项目时席位会飞：凳子上的 bot 和席位栏里那一行的状态灯用同一个 `<ViewTransition name>`（`seatFlight(id)`），`room-app.tsx` 切项目时先留着旧房间，新项目的快照到了再在 `startTransition` 里一次换掉，凳子和席位栏在同一次提交里变，React 就把同名的配成一对飞过去（`bench-in` / `bench-out`，0.3 秒，回凳子的先走、出发的晚 0.1 秒；减少动态效果时只淡入淡出）。坑：新项目的第一份快照往往拉取和推送流各来一次，只要屏幕上还是旧项目，每一份都要走 `startTransition`，否则普通更新先把它提交了，就飞不起来。切项目要快（2026-11 优化）：点下去先拉新项目的快照（`/api/v1/room?project=…`），到了才在同一个 `startTransition` 里改 `projectId` 和 `room`；以前点下去先改 `projectId`，整个旧房间同步重画一遍（开发模式 130～460ms，页面卡住）才开始拉。鼠标在卡片上停 120ms 或按下时就预先拉（`prefetch`，4 秒内有效）；连点几个只认最后一个（`wanted`）。新开的对话先只画最后 12 条（`FIRST`），下一帧再在后台补到 40 条（`PAGE`）；待办的步骤列表只在展开时才建（`StepDrawer`），`clock` 共用一个 `Intl.DateTimeFormat`，`useFold` 不再挂上就同步量一次（`ResizeObserver` 自己会报第一次）。测法：测试副本里用 CDP 点项目卡片，量到 `aria-current` 换过来；无头 Chrome 要带 `--use-angle=gl --ignore-gpu-blocklist`（用真显卡，不开窗口），swiftshader 下视图过渡截旧画面要 200ms 以上，真显卡 20～35ms。录过渡：CDP `Page.startScreencast` 加 `Animation.setPlaybackRate`（0.25 就是慢 4 倍，视图过渡也跟着慢）。2026-11-10 实测（开发模式）：点下去到新房间上屏 318/602/608/702ms → 262/383/340/362ms，点中反馈 8～13ms。剩下的大头是开发模式的 React（`jsxDEV` 记调用栈）；用 `next build && next start` 跑会再快几倍，但改代码就要重新构建。凳子上的 bot 在这个页面打开以后说过话（`bench[].saidAt`）会跳一下（`bench-hop`，按 saidAt 做 key，每条新消息跳一次）。红色数字是 `listProjects` 的 `waiting`（待批的权限 + 没回答的提问 + 等验收的待办），小圆点是有新消息：`lastOtherAt`（最后一条不是用户说的、不是系统通知的消息）晚于这个浏览器记的「上次打开」（localStorage `bench-project-seen`）。从没记过的项目按已读算，免得第一次打开满屏小圆点。项目列表每 5 秒轮询一次，标记跟着更新。
@@ -105,9 +106,9 @@ Next.js 16.4 App Router，React 19，Tailwind CSS v4，shadcn/ui 的 base-nova�
 - 提问（`bench_ask`，`lib/store.ts` 的 `askUser` / `awaitAnswer`，`POST /api/v1/ask`）：agent 的问题是一条带 `ask`（选项、`multi`、`state`、答案）的消息，页面在它下面画 `AskCard`（`components/room/ask-card.tsx`）：点选项（多选时勾完点「选好了」）或自己写一句，发出去就是回复这条问题，`say` 里的 `answerAsk` 把它记成答案。提问后席位显示「卡住 · 等 jinbao 回答：…」。桥接先 `action: "ask"` 再 `action: "wait"` 长轮询（默认 10 分钟，最多 13 分钟；唤起本身没有时间上限，等不到就再等一次）；等着的时候问题 id 在房间的 `asking` 里，回答时记 `ask.handed`，`summonCandidates` 见到它就不再唤起提问者（等待在 `setImmediate` 的唤起之前就结束了，所以不能临时查 `asking`）。没人在等时回答就是普通的「人回复 agent」，照常唤起它。接管自带提问：`claude-code.sh` 唤起时加 `--disallowedTools AskUserQuestion`，唤起提示和 MCP 说明里都写了「要问 jinbao 用 bench_ask」。其他家 exec 模式本来就没有提问工具，靠提示。已经开着的 MCP 桥接是旧进程，要等那个会话下次启动（唤起每次都是新进程）才有 `bench_ask`。
 - 权限确认接管（`lib/permits.ts`，`POST /api/v1/permit`，`components/room/permits.tsx`）：唤起 Claude 时 `claude-code.sh` 加 `--permission-prompt-tool mcp__bench__bench_permit`，`claude -p` 每次要确认都调桥接的 `bench_permit`（参数 `tool_name`、`input`），桥接问房间、挂起等，按 Claude Code 要的格式回 `{"behavior":"allow","updatedInput":…}` 或 `{"behavior":"deny","message":…}`；出错一律拒绝。请求只在内存（`globalThis.__benchPermits`），快照的 `permits` 给页面，输入框上方 `PermitBar` 一张卡一个请求：允许这一次 / 这次唤起全部允许 / 拒绝（可写原因，原因转回给它）。10 分钟没人点按拒绝。临时完整权限按唤起记（席位 id → run id），那次唤起结束自然失效；有它时 `bench_permit` 直接放行。agent 自己可以 `bench_elevate`（`action: "full"` + 理由）请求，唤起提示（只给 Claude 席位）让它被拦时先这么做；用户也能在「正在做」卡片上的「给完整权限 / 完整权限中 · 收回」随时切。「默认开启全部权限」（2026-11-12，用户要的：每次叫出来都要点太麻烦）：席位上的 `autoFull` 标记，存在席位数据里，重启不丢。开新会话时可勾（只对 Claude 显示，上次的选择记在浏览器 `bench-spawn-auto-full`，第一次默认不勾），已有的 Claude 席位在「…」菜单里勾选或取消（`POST /api/v1/agents/<id>` `action: "auto_full"`）。勾上后 `hasFull` 一直为真：`bench_permit` 和 `bench_elevate` 都当场放行；「正在做」卡片上是「默认全部权限 · 这次收回」按钮（2026-11-12 用户要的临时收回）：点了只收这一次唤起（`permits.ts` 的 `held`，席位 → 那次唤起 id，`hasFull` 在 id 相同时不算默认权限），按钮变「这次已收回 · 恢复」，下次唤起 id 不同就自动恢复；再给完整权限或批准 `bench_elevate` 也会清掉收回。要一直关还是去「…」菜单。副本里验过：收回后工具确认挂起等人、恢复后放行、收回后新唤起自动放行、唤起中途收回又挂起。唤起提示也换成「你有默认的全部权限，不用 bench_elevate；改动、删除、对外发送照样以用户说的为准；sudo 只能他输」。注意：窗口本来就是 bypassPermissions 的会话不会弹任何确认；只对 Claude Code 和 Codex 有效（Codex 见「Codex 的权限接到房间」），其他家 exec 模式没有这种接口。用真实 `claude -p` 验过：`ls /opt` 弹到房间，点允许后拿到输出继续答完。自己在某个 Claude 会话里起 `claude -p` 做这种测试时，要 `env -u CLAUDE_CODE_SESSION_ID -u CLAUDECODE claude -p …`：不然子进程的 bench 桥接继承了外层的会话 id，把它当成外层那个会话，bench_join 会把外层的席位搬进测试项目（删测试项目时席位就跟着没了）。
 - 撤回（`lib/store.ts` 的 `recall`，`POST /api/v1/recall`，`lib/summon.ts` 的 `forgetMessage`）：只有 jinbao 能撤回，而且只能撤回自己发的。消息留在原位，`recalled: {at}`，`text` 清空、附件和点名去掉，原文只在这次请求的响应里带回给页面（`original`），房间里不存。页面在群聊和回复链里都画成「你撤回了一条消息 · 时间」，这个页面撤回的还有「重新编辑」（`EDIT_EVENT` 把原文放回输入框）。agent 那边：唤起转发（`catchUp`）、收件箱、摘要原文都略去它，`bench_messages` 里只标 `recalled: true`；`summonCandidates` 不再因它叫人；排队里还没开始的唤起由 `forgetMessage` 拿掉这一条（lane 的 `pending` 记着消息 id），已经开跑的唤起已经读到了，收不回。
-- 群聊右上角「摘要 / 详细」（记在这台浏览器的 localStorage `bench-thread-detail`）：详细模式下，每条带 `runId` 的回复上面展开那次唤起的步骤（`components/room/run-trail.tsx`，结束的 run 每页只取一次，跑着的每 1.5 秒刷新），和回复重复的最后那段话不再显示；正在跑、还没贴回复的席位在群聊底部单独一行，步骤边来边长。这些只在页面上画，不是房间消息，任何 agent 的收件箱和唤起提示里都没有。过程记录只留最近 80 次，更早的回复上面就什么都不显示。
+- 群聊以前右上角有「摘要 / 详细」：详细模式下每条回复上面展开那次唤起的步骤（`run-trail.tsx`）。2026-11-16 拿掉了（t_d196dffc）：特大字号下顶上那一排挤不下，用户也不常看。现在群聊固定按摘要显示，唤起的过程点回复下面的「查看过程」或正在做的那一行，在过程面板里看；`run-trail.tsx` 一并删了，`useSummary` 不再收「详细」参数。浏览器里旧的 `bench-thread-detail` 不再读。
 
-「摘要」档里 agent 的回复只显示一句结论，点一下在原地展开全文，再点收起（`components/room/gist.tsx`，在 `MessageRow` 和回复链的 `ChainLine` 里用；t_7e73c54f）。「详细」档不变，还是全文加过程。
+「摘要」档里 agent 的回复只显示一句结论，点一下在原地展开全文，再点收起（`components/room/gist.tsx`，在 `MessageRow` 和回复链的 `ChainLine` 里用；t_7e73c54f）。
 - **那一句从哪来**：先用消息自带的 `Message.gist`（作者写的第一行，或摘要席位补的；房间那一侧是 t_83c6fcc9），没有就用 `lib/text.ts` 的 `gistOf` 现算（老消息），规则也取不到时用正文开头去掉标记符号后的前 80 字。`Message.gist` 的类型进 `lib/types.ts` 之前，页面里用本地的 `Gisted` 读它，类型有了就把那个转换去掉。
 - **哪些不折**：人说的话、带 `ask` 的提问卡、撤回的、系统提示、交接卡片、限额卡片本来就走别的分支，不经过这里；回复短到本身就是那一句、也没有附件时，也照原样画，不加展开记号。
 - **提示**：摘要下面一行小字，`展开`加上 `附 N 个`、`待办 xxxx`、`约 N 字`（正文满 200 字才写，取整到十或百）、`摘要由 X 补`（gist 的 `by` 不是 `author` 时）。折着时附件也收起，展开后才显示。
@@ -115,7 +116,7 @@ Next.js 16.4 App Router，React 19，Tailwind CSS v4，shadcn/ui 的 base-nova�
 - **展开收起的动画**用 `Reveal`（高度过渡），一边收摘要行一边放全文；每次点都调 `keepTopInView`，展开后消息顶部不会跑出视野，收起也不会把人甩到别处。
 - **跳转**：点消息 id、搜索结果都走 `GOTO_EVENT`，`Thread` 收到后先 `expandMessage(id)` 再滚过去、闪一下，所以跳到折着的那条会自动展开。回复链中间折着的那些，`ReplyChain` 自己会先展开整条链。
 
-群聊的视图切换现在是「进展 / 对话 / 流程」三个，默认「进展」（`components/room/progress.tsx`，`Thread` 里画，`room-app.tsx` 算数据；t_bf01e8d8）。原来按时间排的群聊是「对话」，右上角「摘要 / 详细」只在「对话」里起作用。前台房间（`project.front`）没有待办可排，仍然只有「对话」和「流程」，也默认「对话」。
+群聊的视图切换现在是「进展 / 对话 / 流程」三个，默认「进展」（`components/room/progress.tsx`，`Thread` 里画，`room-app.tsx` 算数据；t_bf01e8d8）。原来按时间排的群聊是「对话」。前台房间（`project.front`）没有待办可排，仍然只有「对话」和「流程」，也默认「对话」。
 - **数据**：`lib/digest.ts` 的 `digestOf`（Opus2，t_5de117f4）给出 `you / stuck / doing / done / talk` 五组行和顶上的计数，页面不自己猜状态。只在「进展」显示时才算（`room-app.tsx` 里 `digest` 的 `useMemo`），别的视图不花这份算力。
 - **页面**：顶上四个数字，点一个跳到那一组；一组一组往下，空的不显示；「今天做完」和「对话」默认折成一行，点开才列；同组超过 4 行，后面的折成「还有 N 件：…」。一行一件事：左边一道颜色（等你琥珀、停着红、在做天蓝、做完绿、对话灰，和右栏、流程视图同一套），中间标题和「谁 · 一句话结果」，右边进度条和按钮。
 - **按钮直接办事**（都走现成的接口，没有新接口）：等验收的「通过 / 打回」（打回要填原因，`POST /api/v1/tasks/<id>` 的 `pass` / `reject`，和右栏一样）；提问直接把 `AskCard` 放在行里；权限直接放 `PermitCard`（从 `permits.tsx` 导出），行里有的权限，输入框上方的 `PermitBar` 不再重复画，没挂在任何一行上的才留在那里；停着的「叫它接着做」和左栏共用 `components/room/nudge.ts` 的 `nudgeSeat`（只有席位有 `owes` 且叫得醒才出现）；在做的「过程 / 停止」。
@@ -190,17 +191,33 @@ Next.js 16.4 App Router，React 19，Tailwind CSS v4，shadcn/ui 的 base-nova�
 
 **测法**：`scripts/test-room.mjs` 里「Network failures are tried again」一段：前两次 ECONNRESET、第三次成功的假客户端（retrying → answered，群里没有中间报错，回答里带着原来的消息）；一直失败的（两次后 failed，只报一次）；非网络错误不重试；等重试时点停止（retryCancelled，之后不再跑）；关掉开关后不重试；提示里带上还欠的待办 id、不重复消息里提到的、没有欠的不加。副本要用 `BENCH_RETRY_MS=400,800` 起（`test-copy.sh` 会把它传下去），否则这段要等 80 秒。重启对账要重启服务，手动测过：等重试（`BENCH_RETRY_MS=60000,60000`）时重启副本，去向从 `retrying` 变 `queued`、lane 暂停，恢复后接着叫。
 
-## 请验收时先复验（2026-11-14，t_f08a0c78）
+## 请验收时先复验（2026-11-14，t_f08a0c78；2026-11-16 扩充补跑、自动挑人与类别，t_ab05661d）
 
-用户要的：每条待办都靠他自己看太累。席位请验收时，先让另一个席位照着验一遍，他只看结论和没验到的部分。通过还是只有他能点。
+用户要的：每条待办都靠他自己看太累。席位请验收时，先让另一个席位照着验一遍，他只看结论和没验到的部分。通过还是只有他能点（或开启代签后由前台代签「跑得出」类，见前台代签一节）。
 
-- **设置**：项目设置（项目卡片右键或「…」→设置）里「请验收时先复验」：不复验（默认），或选这个项目的一个席位。存在席位上（`Agent.checker`，和 `autoFull` 一样进席位数据，重启不丢），一个项目最多一个，选了新的就清掉旧的（`setChecker`，`POST /api/v1/agents/<id>` `action: "checker"`, `on`）。只有在编辑已有项目时才出现，下拉的席位是打开对话框时现拉的 `/api/v1/room?project=…`。
-- **触发**：`actOnTask` 的 review。同一次请验收只复验一次：还在等验收时再请一次，保留原来的结果；打回后再请验收，重新复验。复验人就是这条的负责人时直接记「跳过」。要复验时往 `Task.check` 写 `queued`，存好后发 bus 事件 `check`，`lib/summon.ts` 的 `requestCheck` 接（`__benchCheckHandler` 间接一层，热更新换得到）：复验人叫不醒（没有会话或唤起命令）、正挂在 `bench_wait` 里，记「跳过」并写原因；否则排进它的 lane（`Lane.checks`，排在摘要、压缩之后，回复之前）。
-- **那一轮**：`checkTask`，像写摘要一样单独一种唤起（`Run.purpose = "check"`，查看过程里叫「复验待办」），不进群聊。提示里给待办标题、说明、每一步和说明、请验收时写的「怎么看效果」、负责人、项目目录，要求只读（不改工作区、不提交、不重启、不用 bench_say、不改待办）、要跑就按本文起隔离副本、只写真验到的。结论从输出里读：最后一个「复验结论：通过 / 没过 / 没验到」，后面的话全记成依据（2000 字以内）。没这一行记「没跑成：复验没交结论」，附它最后 200 字。所以没改 `bench-mcp.mjs`，常驻客户端不用重启桥。开跑前再看一眼：待办已经被打回、通过或又请了一次验收，这次就不跑了。
-- **结果**：`Task.check {state, by, name, note, at, runId}`，`state` 是 queued / running / passed / failed / unverified / skipped / error。只认它被创建的那一次（`setTaskCheck` 比对 `at`），旧的那轮回来不会盖掉新的。没过不自动打回，只是摆给用户看。唤起失败、被停下、复验人叫不醒的排着的复验（`dropChecks`）记 error「复验没跑成：原因」；服务器重启时还排着或在跑的（`abandonChecks`）同样记 error。都不在群里发系统消息。
-- **界面**：只在有 `check` 的待办「等你验收」框里多一行（不加常驻的东西）：复验排着 / 复验中（转圈）/ 复验通过 / 复验没过 / 复验没验到 / 没复验 / 复验没跑成。有结论的「依据」点开展开，「过程」打开那次唤起；跳过和没跑成直接写原因（两行内）。
-- **测法**：`scripts/test-room.mjs` 里「请验收时先复验」一段，用假复验人（`mockcheck_*`，按待办标题里的【没过】【没验到】【乱答】给不同回答）：没设不触发、通过并记依据且不进群聊、没打回再请不重复、没过不自动打回、打回后重新复验、没验到、没交结论、复验人是负责人跳过、只能有一个复验人、复验人唤起失败、关掉后不再触发。重启时的 `abandonChecks` 没在测试里跑（要重启服务）。
-- 注意：复验跑在复验人自己的会话上，这一轮会留在它的上下文里（写摘要也是这样）。挑一个便宜的模型、专门复验的席位最合适。
+- **设置**：项目设置（项目卡片右键或「…」→设置）里「请验收时先复验」：不复验（默认）、**自动挑**（`ProjectInfo.check = "auto"`，存 SQLite `meta` 的 `project.check.<id>`），或选这个项目的一个席位（`Agent.checker`，存席位数据）。自动挑与指定席位严格二选一：`updateProject` 设 `check: "auto"` 时清掉该项目所有席位的 `checker`；`setChecker(id, true)` 指定席位时自动清掉 `ProjectInfo.check`。
+  - **自动挑人规则**（`lib/summon.ts` 的 `pickAutoChecker`）：从这个项目里挑非演示、不是这条负责人、能叫醒（有会话与唤起命令）、没在守候（`bench_wait`）、队列未暂停且未开网页终端、客户端没正被限额拦着（`lib/store.ts` 的 `limitedAgentNames` + `lib/quota.ts` 的 `isKindQuotaBlocked`）的席位；按 **① 和负责人不同家客户端优先 → ② 没在跑（及队列空闲）优先 → ③ 最久没动优先** 排序。一个都没有就记 `skipped` 并写明原因。
+    - **先在干过活的席位里挑**（2026-11-16，t_50597554 合验时加的）：能挑的席位里，只要有在这个项目里当过待办负责人的（`snap.tasks` 里出现过它的 `ownerId`），就只在它们中间按上面的顺序排；一个都没有（小项目）才在全部能挑的里面排。起因：只按「不同家优先」，Bench-bot 等验收的 21 件会全部落到那个项目唯一不在 Claude 上的席位，也就是专门写摘要的 DeepSeek 席位。帮工席位从不当负责人，所以这条把它们排到了最后。
+    - **刚没跑成的席位半小时内不挑**（`FAILED_CHECKER_MS`）：它的一次复验在半小时内没跑成（唤起失败，或答了但没交结论；服务器重启打断的、被用户停下的不算），这次就跳过它，原因里写「XX 刚才复验没跑成」。记在内存里（`g().__benchCheckFailed`，`checkTask` 结束时写，下一次跑成了就清掉），重启就忘：不能从待办上读，因为再排一次复验时旧的那条 `check` 先被新的盖掉，挑人在那之后才跑。额度用完但房间还不知道的客户端靠这条避开；认得出是限额的那种，本来就有限额卡片拦着。
+- **触发与补跑**：
+  - 自动触发：`actOnTask` 的 `review`。同一次请验收只复验一次：还在等验收时再请一次，保留原来的结果；打回后再请验收，重新复验。
+  - 单条补跑：`POST /api/v1/tasks/<id>` `{as: "human", action: "check"}`（仅用户可调），等验收的待办可随时再排一次复验（`check.at` 取补跑当时的时间）；已经排着（`queued`）或在跑（`running`）的不重复排（返回 `{task, queued: false}`）。
+  - 整批补跑与前台工具：`POST /api/v1/check` `{as: "human", project?}` 与前台席位 MCP 工具 `bench_check(project?)`（`requireFrontSeat`）共用 `lib/store.ts` 的 `runBatchCheck(project?)`；不带 `project` 扫所有非前台项目，只排等验收且还没有结论的（没有 `check`，或是 `skipped` / `error`），已有结论或正在排队/运行的都不重复排，返回 `{queued, skipped: [{taskId, why}]}`。
+- **那一轮**：`checkTask`，像写摘要一样单独一种唤起（`Run.purpose = "check"`，查看过程里叫「复验待办」），不进群聊。提示里给待办标题、说明、每一步和说明、请验收时写的「怎么看效果」、负责人、项目目录，要求只读、起隔离副本验证、只写真验到的。输出要求：
+  1. 第一行「复验结论：通过 / 没过 / 没验到」；
+  2. 第二行必填「类别：跑得出 / 要人看 / 只能本人签」（提示里写明三类定义），解析进 `Task.check.kind`（`"run" | "look" | "you"`，没写就不存）；
+  3. 接着写依据，存入 `Task.check.note`（2000 字以内）；
+  4. 最后一段「没验到的：…」，解析进 `Task.check.gaps`（写「无」或「没有」就不存）。
+  没交结论行记 `error`「复验没交结论」，附最后 200 字。开跑前再看一眼：待办已被打回、通过或换了新 `check.at`，这次就不跑。
+- **连着复验压缩与跑完通知前台**：
+  - 同一席位每复验满 5 条（`CHECK_COMPACT_EVERY = 5`），若是 Claude Code 或 Codex（`CONTEXT_KINDS`），自动置 `queue.compact = true` 先压缩一次上下文再接着跑后续复验。
+  - 一个项目里排着的复验全部有了结论（该项目无任何 `queued` / `running` 复验且 `lane.checks` 已空）时，调 `lib/patrol.ts` 的 `noteChecksSettled`，走 `postRisk` 给前台记一条用户看不见的说明（哪个项目，通过、没过、没验到各几件）并立即叫醒值班 AI；没有前台或没人值班就不记。
+    - 一件有结论的都没有、但有没跑成的（`error`），也照样记、照样叫醒（2026-11-16，t_50597554 合验时改的；以前只在有通过/没过/没验到时才叫）。说明里多一句：没跑成的先用 `bench_check` 再排一次，房间会换一个席位，又没跑成就告诉用户。只有 `skipped` 的不叫。起因：一批复验全落在一个叫不动的席位上时，前台不知道，待办就一直挂着「复验没跑成」。
+  - `bench_overview` 与 `bench_peek`（`lib/front.ts`）中等验收的待办均带上复验状态、类别（`checkKind`）和有没有没验到的（`hasGaps` / `gaps`）。
+- **结果**：`Task.check {state, by, name, note, kind?, gaps?, at, runId}`，`state` 是 queued / running / passed / failed / unverified / skipped / error。只认它被创建的那一次（`setTaskCheck` 比对 `at`），旧的那轮回来不会盖掉新的。没过不自动打回，只是摆给用户看。唤起失败、被停下、复验人叫不醒的排着的复验（`dropChecks`）记 error「复验没跑成：原因」；服务器重启时还排着或在跑的（`abandonChecks`）同样记 error。都不在群里发系统消息。
+- **界面**：只在有 `check` 的待办「等你验收」框里多一行（不加常驻的东西）：复验排着 / 复验中（转圈）/ 复验通过 / 复验没过 / 复验没验到 / 没复验 / 复验没跑成，带上类别与有无没验到的。有结论的「依据」点开展开，「过程」打开那次唤起；跳过和没跑成直接写原因（两行内）。
+- **测法**：`scripts/test-room.mjs` 里「请验收时先复验」一段与前台工具段，用假复验人覆盖：没设不触发、通过/没过/没验到/乱答、不进群聊、没打回再请不重复、打回重验、复验人是负责人跳过、类别（run/look/you）与漏验读写、没写类别和写「无」不存、单条与整批补跑不重复排、自动挑人（不挑负责人、限额客户端不挑、同家与不同家都在时挑不同家、在跑与空闲挑没在跑、最久没动优先、与指定席位互斥）、连验 5 条触发上下文压缩、一批跑完通知并叫醒前台、`bench_check` / `overview` / `peek` 联动；并在 `scripts/test-faults.mjs` 加入 5 条故障注入（`recheck-duplicate-enqueue`、`autocheck-picks-owner`、`autocheck-ignores-diff-client`、`check-verdict-kind-gaps-broken`、`check-missing-kind-defaulted`）验证每条改坏均被当场抓到。
+- 注意：复验跑在复验人自己的会话上，这一轮会留在它的上下文里（写摘要也是这样）。挑一个便宜的模型、专门复验的席位或开「自动挑」最合适。
 
 ## Codex 的权限接到房间（2026-11-14，t_f6fea31b）
 
@@ -246,6 +263,7 @@ gist 只是给页面显示用的：转给 agent 的原文、搜索、待办都�
 用户觉得一条回复一句摘要还是不直观（m_217a913d），改成按事情归拢、先看状态。页面是 Sonnet 的 t_bf01e8d8，这里是它调的纯函数 `digestOf({ messages, tasks, agents, permits, userName, now })`：不读库、不发请求，状态全是房间记着的事实，不用模型。
 
 - **输出**：`counts`（等你、停着、在做、今天做完）和五组行 `you / stuck / doing / done / talk`。每行有 `id`（待办 id，talk 是那条回复链第一条消息的 id）、`kind`、`state`、`title`、`owner`、`line`（一句话：最新的结果）、`steps`（做完几步、共几步、当前步骤）、`need`（review / answer / permit，带 `askId` / `permitId`）、`at`、`since`、`messageIds`（从早到晚）、`attachments`、`check`（复验有结论时才有）。
+- **起头消息只用 `taskId` 挂上**（正文没写编号）时，这条回复链也算这条待办的（2026-11-18 补，GPT2 复验发现：以前链只按「最先在正文里点到 id 的消息」认，负责人在下面的回复和附件都丢了，最后动静也停在旧时间）；`taskId` 或验收消息比正文点名早就用它。负责人有没回答的提问加进 `messageIds` 时按时间排，仍从早到晚。
 - **消息归哪条待办**：消息上的 `taskId`；验收消息的 `verdict.taskId`；交接消息按待办标题对上；正文里点到的待办 id（点了两条就两条都算）。都没有的，看它所在的回复链：一条待办归最先点到它 id 的那条回复链（`lib/flow.ts` 的 `chainsOf` / `firstNamed`，这次从 `flowsOf` 里抽出来共用，流程视图的结果和原来一样：正式房间 39 条流程、66 个待办块）。链里只有一条待办就归它；有几条的，归作者自己负责的那条，不是任何一条待办负责人的就不归。系统消息、撤回的消息不算。
 - **状态，按顺序判断**：已完成 → done（只列本地日期是今天的）；等验收（`awaitingReview`）→ you/review；负责人有没回答的提问 → you/answer；负责人这次唤起有权限卡片在等 → you/permit；标了卡住 → stuck（line 写卡住的原因）；没人负责 → stuck；负责人停着、还欠着这条（`owes`）→ stuck（`since` 取 `owes.since`）；这件事里最后一次点负责人没叫成或中途断了 → stuck；负责人在跑（有 `runId`，或者自己报了在做）→ doing（line 写它在做什么）；其余算 stuck，line 写「还没开始」或「停着：到「某一步」」。
 - **line**：等验收取请验收说明的第一句；提问取问题本身；卡住取原因；在做取在做什么；做完写「已验收」；都没有就取这件事最新一条 agent 回复的摘要句（`gist`，没有就用 `gistOf` 现算）。粗体、代码引号这类标记会去掉，最长 80 字。
@@ -294,7 +312,7 @@ MCP 只管 agent → 房间：入座、发言、收件箱、任务、在线。�
 
 1. **常驻**：每家一行（头像、名字、额度圆环、展开箭头），每个席位一行（状态灯、名字、「待命」、上下文细条）。这一档要加东西得有很硬的理由。
 2. **有事才出现**：在那一行底下多一行，事情过去就消失。现在有：停了 3 分钟以上、名下还有没着落的事，写「停着 · 还欠 N 件」和「叫它接着做」（见「点名的去向和停着还欠着活」）；自己说在做很久没再报，写「不确定在不在做」；上下文到压缩点的 70%（`CONTEXT_WARN`）写「上下文 33万 / 40万」，能压就带「压缩」（和菜单里「压缩上下文」同一个条件）；在干活或卡住（working、blocked 或有 runId）写在做什么，有 runId 时点它看过程，右边两个图标是插话和停止；队列里有排队消息或已暂停自动唤起时显示可控队列条（点开可逐条点 `×` 剔除误发指令、或切换暂停/恢复）；终端开着。额度到 80% 在圆环左边写「每周 85%」，用完写「用完」并变红，读不到写黄色「读不到额度」。家名右边的状态字只在出问题时写（没装、没配唤起命令、没报会话）。
-3. **点了才有**：点额度圆环或箭头展开那一家（客户端 · 会话数、全部额度、速度、开新会话，`Reveal` 动画），展开的是哪几家按浏览器存在 localStorage `bench-roster-open`；右上角「接入」左边全部展开 / 全部收起；悬停圆环浮出各条额度、最紧那条的重置时间和速度（base-ui Tooltip，挂在 body 上，不挤动布局，也不被左栏的滚动裁掉）；悬停席位名字看模型 · 分工、状态或最后在线多久前、空闲时的 `doing`；「…」菜单平时不显示，鼠标移到那一行、键盘聚焦或菜单开着时才出现（触屏上半透明常显），里面包含「席位档案与记忆…」「切换客户端 / 顶替…」「暂停/恢复自动唤起」等低频操作。
+3. **点了才有**：点额度圆环或箭头展开那一家（客户端 · 会话数、全部额度、速度、开新会话，`Reveal` 动画），展开的是哪几家按浏览器存在 localStorage `bench-roster-open`；右上角「接入」左边全部展开 / 全部收起（2026-11-16 起平时不占位置，鼠标移到标题行或键盘聚焦在这一行时才出现，触屏上一直在）；悬停圆环浮出各条额度、最紧那条的重置时间和速度（base-ui Tooltip，挂在 body 上，不挤动布局，也不被左栏的滚动裁掉）；悬停席位名字看模型 · 分工、状态或最后在线多久前、空闲时的 `doing`；「…」菜单平时不显示，鼠标移到那一行、键盘聚焦或菜单开着时才出现（触屏上半透明常显），里面包含「席位档案与记忆…」「切换客户端 / 顶替…」「暂停/恢复自动唤起」等低频操作。
 
 **新功能默认放第三档。** 左栏每个席位平时只占一行，不要再往席位行下面加常驻的说明行。
 
@@ -314,7 +332,8 @@ MCP 只管 agent → 房间：入座、发言、收件箱、任务、在线。�
 - **Codex 也认**（2026-11 加）：Codex 撞额度时，错误只在事件流里：`{"type":"turn.failed","error":{"message":"You’ve hit your usage limit. Visit https://chatgpt.com/settings/usage to purchase more credits or try again at Nov 12th, 2026 7:42 PM."}}`（弯引号；时间没写时区，和额度读数 11/12 19:42 对得上，按本机时间算）。以前解析器把这行丢了，房间只说「退出码 1」；现在 `lib/events.ts` 把 `turn.failed` 留成一条失败的「过程」步骤（不算「答完」，进程会自己退），`limitOf` 看这条。2026-11-09 用真的 Codex 在测试副本里验过：卡片写「撞到了「使用额度」，11/12 19:42 重置」，定时和取消都对。
 - **Cursor、Antigravity 没接**：这两家的限额报错没见过（本机额度都没用完，也不为了测试去耗光它），不猜格式。碰到一次真的，把原话贴到这里再加。免费版 Cursor 的 `Model unavailable on Free` 是另一回事，已经单独说明。
 - 测试注意：从席位的终端里起测试副本，会继承这个席位的 `BENCH_MODEL` 等环境变量，传给 Codex 的唤起，用 `env -u BENCH_MODEL -u BENCH_EFFORT …` 起。Codex 的线程会记住上一次用的模型，被污染的线程要换新的。
-- **叫醒后又撞上**：会再出一张新卡片，要用户再点一次，不会自己循环。
+- **5 小时额度默认到点自动继续**（2026-11-16，t_51220c7e，用户要的）：`noteLimit` 出卡片前先问 `autoResumeAt`，条件都满足就直接出 `scheduled` 的卡片（重置 + 45 秒，和点「重置后自动继续」同一条路：`setLimited` 记 `resumeAt`、`armResume`），卡片上照样能「取消」。条件：开关开着；读出了重置时间；不是每周额度（标签里有「周」就不自动）；重置在 5.5 小时内（`SHORT_WINDOW_MS`，更远的多半是每周或读错）；这次唤起叫得回去（`rewakeable`，和 `rewake` 的要求一致：复验、回复摘要不自动）；这个席位 15 分钟内没被到点叫醒过（`REHIT_MS`，见下一条）。开关：设置菜单「5 小时额度到点自动继续」，默认开，所有项目一个设置，存 SQLite meta `limit_resume`（`off` 才是关），`POST /api/v1/retry` 带 `limit: true/false`（`on` 仍是网络重试），GET 多回一个 `limit`，快照里是 `limitResume`。test-room 里有「重置在一小时后 → 自己定好、能取消」「每周 → 不自动」「关掉 → open」。
+- **叫醒后又撞上**：会再出一张新卡片。到点叫醒（`fireResume`，自动定的和用户点的都算）后 15 分钟内同一席位又撞上，就不再自动定时，卡片等用户点，不会自己循环（记在内存 `__benchLimitAutoFired`，重启就忘）。
 - 只发给撞到额度的那一次唤起；写摘要和单独回话的失败也认，其余失败原因不变。
 - 测试别耗真额度：测试副本里把 `agents.json` 的 claude 命令换成一个假脚本，第一次输出 `You've hit your 5-hour limit · resets …`（`date` 要加 `LC_ALL=C`，中文环境会打出「下午」）并退出 1，之后输出正常回答。
 
@@ -423,11 +442,11 @@ MCP 只管 agent → 房间：入座、发言、收件箱、任务、在线。�
 
 ## 群聊的「流程」视图（只读）
 
-2026-11 加的（设计 Fable，数据 `lib/flow.ts`，画图 `components/room/flow.tsx`）。群聊右上角放大镜旁边一组「对话 / 流程」（`thread.tsx`），选了哪个记在 localStorage `bench-thread-view`（`room-app.tsx` 的 `viewSaved` / `showView`，和「摘要 / 详细」走同一个事件）。选「流程」时，群聊那块滚动区换成流程视图，「摘要 / 详细」那组藏起来，输入框照常在下面；`Thread` 不卸载，跳回对话不用重画。左边的刻度尺只在「对话」时画。
+2026-11 加的（设计 Fable，数据 `lib/flow.ts`，画图 `components/room/flow.tsx`）。群聊右上角放大镜旁边一组「对话 / 流程」（`thread.tsx`），选了哪个记在 localStorage `bench-thread-view`（`room-app.tsx` 的 `viewSaved` / `showView`，事件 `bench-thread-view`）。选「流程」时，群聊那块滚动区换成流程视图，「摘要 / 详细」那组藏起来，输入框照常在下面；`Thread` 不卸载，跳回对话不用重画。左边的刻度尺只在「对话」时画。
 
 - **数据只从 `flowsOf` 来**：一件事就是一条回复链（一条不回复谁的消息和它下面的全部），加上链里第一次写出 id 的待办。列、块、线、等你几处全在那里算好，页面不另推关系；算得不对去改 `lib/flow.ts`。只在「流程」显示时才算（`useMemo`），用的是房间快照里的消息（不受「只看和他有关的」过滤）。
 - **列表**：一件事一张卡，最新的在上面。默认只展开第一张，收起的那几张一行写标题、起始时间、「等你 N」、参与者的小圆点。顶上一行写一共等你几处。
-- **列**：人类那一列默认在中间，其余席位按 `lanes` 的先后轮流排到它右边、左边（`arrange`）；卡片右上角「你在中间 / 你在最左」切换，记在 `bench-flow-human`。列宽至少 150px，比群聊那栏宽就在卡片里横向滚动，人在中间时打开会先滚到人那一列（只在画出来那一次，之后来新消息不会把你自己的滚动拉回去）。流程视图外层带 `contain: inline-size`，否则图的最小宽度会把群聊那一栏撑宽，窄屏上直接出屏幕。
+- **列**：人类那一列默认在中间，其余席位按 `lanes` 的先后轮流排到它右边、左边（`arrange`）；卡片右上角「你在中间 / 你在最左」切换，记在 `bench-flow-human`。列宽至少 150px；席位多、放不下时列宽跟着卡片收窄，最窄 104px（`LANE_FLOOR`），超过 6 列时列间距从 12px 收到 8px。还放不下就在卡片里横向滚动，图上方多一行（只在真有列看不到时出现）：左右翻页按钮（一次翻半屏，原来看到的边上那列还在）、每列一个颜色点（看得到的列点大，点一下滚到那一列）、「13 列 · 看到第 7–12 列」，两边有看不到的列时边缘渐隐。以前席位一多只看得到四列多，横向滚动条在长图最底下被输入框挡住，用户以为「流程图显示不全」（2026-11-15，t_49ef26ee，12 个席位：图宽 2174 → 1524px，宽屏一屏 4.5 → 6 列）。卡片右上角的头像最多 12 个，再多是「+N」（以前只画前 8 个）。人在中间时打开会先滚到人那一列（只在画出来那一次，之后来新消息不会把你自己的滚动拉回去）。流程视图外层带 `contain: inline-size`，否则图的最小宽度会把群聊那一栏撑宽，窄屏上直接出屏幕。
 - **行**：一块一行，左边写时间，和上一块同一分钟就不再写。
 - **块**：小字种类（指令、派活、待办 t_…、提问、回答、卡住），标题最多两行，note 一行。等你（`you`）琥珀色描边加淡底，做完的内容变淡，卡住红边，等前一步虚线边透明底。点一块：切回「对话」，下一帧发 `GOTO_EVENT` 跳到那条消息。
 - **线**：SVG 垫在块下面，按 ResizeObserver 量到的块位置画（宽度变了、展开后都会重量）。同一列直线往下；跨列从朝向对方那一侧的中间出发，横走再圆角拐下去进对方顶上，这样不会从自己下面穿出来（每行只有一块，横的那段不会压到别的块）。call 实线、wait 虚线，都带箭头。
@@ -483,7 +502,7 @@ MCP 只管 agent → 房间：入座、发言、收件箱、任务、在线。�
 
 首次升级启动时，`lib/db.ts` 的 `migrateLegacyJsonIfNeeded` 会在单个 SQLite 事务内把旧版 `data/projects.json`、`data/projects/<id>.json`、`data/runs.json`、`data/user.json`（或热更新前的内存态）无损导入 `bench.db`，并将旧 JSON 原样备份到 `data/backup-json-v1/`。
 
-**可控持久化唤醒队列**（`lib/db.ts` 的 `lane_state` / `lane_queue`、`lib/summon.ts` 的 `pauseQueue` / `dropQueuedMessage`）：每个席位的待唤起排队消息实时落盘 SQLite，重启服务后未跑完的排队消息不会丢失，且重启后有积压项的队列默认处于暂停状态（避免排在后面的消息抢在被打断的那一轮之前自动跑掉），等用户点恢复或「重新叫醒」才继续。支持 `POST /api/v1/agents/<id>` 带 `action: "queue_pause" | "queue_resume" | "queue_drop"`：暂停期间点名消息安全积压在队列中，单条点 `×` 剔除会记录在 `lane.dropped` 中，恢复唤起时 `catchUp` 自动跳过被剔除的消息（无需撤回群聊原文）。
+**可控持久化唤醒队列**（`lib/db.ts` 的 `lane_state` / `lane_queue`、`lib/summon.ts` 的 `pauseQueue` / `dropQueuedMessage`）：每个席位的待唤起排队消息实时落盘 SQLite，重启服务后未跑完的排队消息不会丢失，且重启后有积压项的队列默认处于暂停状态（避免排在后面的消息抢在被打断的那一轮之前自动跑掉），启动一分钟后房间自己一个一个放开（见下面「重启接上被打断的唤起」），用户也可以先点恢复或「重新叫醒」。支持 `POST /api/v1/agents/<id>` 带 `action: "queue_pause" | "queue_resume" | "queue_drop"`：暂停期间点名消息安全积压在队列中，单条点 `×` 剔除会记录在 `lane.dropped` 中，恢复唤起时 `catchUp` 自动跳过被剔除的消息（无需撤回群聊原文）。
 
 **席位身份解耦、长期记忆与跨厂商换脑**（`SeatProfile`、`lib/spawn.ts` 的 `rebindSession` / `switchBackBinding`、`POST /api/v1/memory`、MCP `bench_memory`）：席位（`agentId`、名字、待办归属、工作目录、`SeatProfile` 职责规范与长期记忆）与底层某一家客户端的具体 `<agentName, session>` 解耦。每个席位的 `persona` 与 `memory` 存在 SQLite 并由房间单向导出到 `data/seats/<agentId>.md`（只从房间写出，直接改磁盘 `.md` 不会读回，防止其他 agent 改队友文件篡改职责；职责只能在网页上由用户改）。当某家客户端撞到额度或想换模型接力时，通过席位菜单「切换客户端 / 顶替…」或撞额度卡片「换别的 AI 顶替…」（`action: "rebind"`）即可在同一席位下切换到另一家客户端接力（席位正忙跑一轮时返回 409 拒绝，须先停下或等跑完再换；每次换脑或切回都会轮换席位 `token` 并清理旧 `bench-mcp` 凭证，旧会话再入座或报会话无法抢回席位）。新会话首次唤起时自动注入 `seatBriefing`（接力说明 + 职责规范 + 长期记忆 + 名下未完成待办）；原会话保存在 `previousBindings`（最多 5 条）中，原账号额度恢复后可一键切回（`action: "restore_binding"`）。
 
@@ -493,7 +512,7 @@ MCP 只管 agent → 房间：入座、发言、收件箱、任务、在线。�
 
 页面的每个请求都带当前项目（`components/room/api.ts`：读请求加 `?project=`，JSON body 加 `project` 字段），所以页面代码里大多数调用不用自己写。
 
-附件（`components/room/attachments.tsx`）：大家都在这台电脑上，所以附件只传路径。回形针菜单里「选文件… / 选文件夹…」调 `POST /api/v1/folder`（`pick: "files"` 或 `"dirs"`，可多选），拿到的是原文件的路径，不复制。粘贴、拖进来的东西浏览器给不出路径，就先 `POST /api/v1/files`（JSON 里放 base64，单个不超过 25 MB），房间存到 `data/uploads/<日期>/` 下，消息带的是那份副本的路径。`say` 收 `attachments`（最多 10 个），逐个查磁盘：路径不存在就拒绝，是文件夹、图片还是普通文件、多大，都按磁盘上的实际情况记。转给 AI 时（唤起的转发、bench_inbox、摘要原文）在正文后面加「附件（图片）：/路径」这样的行，AI 用自己的工具去读。页面上的图片走 `GET /api/v1/files?path=`，只给 `data/uploads` 里的、或这个项目某条消息附带的图片，不给 svg，响应带 `content-security-policy: sandbox`。`data/uploads` 不会自动清理。
+附件（`components/room/attachments.tsx`）：大家都在这台电脑上，所以附件只传路径。回形针菜单里「选文件… / 选文件夹…」调 `POST /api/v1/folder`（`pick: "files"` 或 `"dirs"`，可多选），拿到的是原文件的路径，不复制。粘贴、拖进来的东西浏览器给不出路径，就先 `POST /api/v1/files`（JSON 里放 base64，单个不超过 25 MB），房间存到 `data/uploads/<日期>/` 下，消息带的是那份副本的路径。`say` 收 `attachments`（最多 10 个），逐个查磁盘：路径不存在就拒绝，是文件夹、图片还是普通文件、多大，都按磁盘上的实际情况记。转给 AI 时（唤起的转发、bench_inbox、摘要原文）在正文后面加「附件（图片）：/路径」这样的行，AI 用自己的工具去读。页面上的图片走 `GET /api/v1/files?path=`，只给 `data/uploads` 里的、或这个项目某条消息附带的图片，不给 svg，响应带 `content-security-policy: sandbox`。「某条消息附带的」先查内存里最近 400 条，没有再查数据库里更早的（`hasAttachment` → `dbHasAttachment`，撤回的不算）；2026-11-17 之前只查那 400 条，往回翻到更早的消息，图片和视频一律 404（当时碎冠之地有 29 个、bench项目开发有 4 个文件还在却打不开）。`data/uploads` 不会自动清理。
 
 音频附件（`components/room/audio-card.tsx`）：扩展名在 `lib/media.ts` 的 `AUDIO_TYPES` 里（mp3、wav、ogg、opus、m4a、aac、flac、weba），附件记成 `kind: "audio"`，转给 AI 时写「附件（音频）：/路径」。页面上画成一张播放卡片：播放/暂停，进度条可以点、可以拖（pointer capture），聚焦后左右键跳 5 秒，时间、大小、倍速（1 / 1.25 / 1.5 / 2）、保存（同一个地址加 `&download`）。声音走 `GET /api/v1/files`，带 Range 才能拖进度，浏览器先发 `bytes=0-` 再按需取段。同时只放一个：开始播放时在 window 上发 `bench-media-playing`（视频卡片也用这个，detail 是正在放的元素），别的音频、视频卡片收到就暂停。`<audio>` 报错（文件没了、格式浏览器不认）时卡片显示红字，不再能点。`preload="metadata"`，页面上很多条音频也只读开头一点拿时长。测试里用一段手写的 WAV 验 audio 识别和 206。
 
@@ -513,13 +532,35 @@ AI 在汇报里带音视频：被唤起时调 MCP 的 `bench_attach`（`paths`�
 
 不要为每个请求新开一份状态。SSE 用同一份上的 EventEmitter。`GET /api/v1/stream` 不结束，所以不要对首页用 Chrome 的 `--dump-dom`，它会一直等页面空闲。
 
+**整间房只在页面看得出变化时才发（2026-11-17，t_13e1952e，起因是外部检查 `.bench/external-review-2026-11-17.md` 的 R1）**。原来有三处合起来让页面空转：桥每 20 秒一次的保活（`touch()`）每次都 `bumpRev()` + `commit()`（重写项目头和全部席位，再 `emit`）；`/api/v1/stream` 每 5 秒无条件把整份快照再发一遍，而保活改了 `lastSeenAt`，文本每次都不同，页面的「和上次一样就跳过」形同虚设；页面每 5 秒拉一次项目列表，拿到就 `setProjects`，没变也整页重画。在正式房间量过：bench项目开发 一份快照 1.37 MB，两个席位在线、没人干活的一分钟里版本号 +6，页面有 18 次 60–70 毫秒的长任务。现在：
+- `touch()` 只改内存里的 `lastSeenAt`。席位是从离线回来的（上次心跳在 `STALE_MS` 以前）才 `bumpRev()` + `commit()`，因为那是页面要显示的变化。`lastSeenAt` 跟着房间下一次写库落盘，房间一直没别的动静时每 5 分钟单行存一次（`dbSaveSeat`）。所以重启后某个席位的「最后在线」最多旧 5 分钟。
+- `/api/v1/stream` 每次要发之前先算一个「页面看得出的版本」（`shown()`）：在线席位的 `lastSeenAt` 和 `owes.since` 不算进去（页面只在席位离线时读前者；后者只拿来和时钟比三分钟）。和上次发的一样就只发一行 SSE 注释保活。5 秒一次的检查留着，席位掉线（没有心跳，也就没有事件）靠它发现。有在线席位带着 `owes` 时每 60 秒补发一次，免得页面手里的 `owes.since` 变旧、把还在线的席位误判成「停了」。
+- 页面的项目列表轮询：内容和上次一样就不 `setProjects`。
+- `sortAgents`：在线的席位同状态时按入座顺序排，不再按 `lastSeenAt`（原来每次心跳两个同状态的席位就可能换位置）；离线的仍是最后在线的在前。
+- 没改的：页面每 10 秒一次的时钟（`setNow`）仍会整页重画一次，在大房间里约 60 毫秒。要去掉它得给聊天列表做记忆化（`thread.tsx` 里 `threadItems` 等都没包 `useMemo`，消息行也没有 `memo`），留给以后。（2026-11-17 已去掉：时钟从 `RoomApp` 挪到要用它的小块里，见「两层页面」一节。）
+- 测法：`scripts/test-room.mjs`「在线席位的保活不该改房间版本号」；`scripts/test-faults.mjs` 的 `keepalive-bumps-rev`。量页面卡顿：无头 Chrome 开房间，`PerformanceObserver({ type: "longtask" })` 记一分钟。
+
 快照热窗口带最近 400 条消息（`totalMessages` 给总数），全量历史消息、任务和唤起过程均完整保存在 `data/bench.db`，不设条数截断上限。
+**做完超过 48 小时的待办不再进主快照（2026-11-17，t_9f1d7161）**：早先 `snapshotTasks` 把最多 200 条已完成的待办（连带全部步骤说明和历史记录）塞进每次推送的主快照里（正式房间 153 条已完成待办占 810 KB，占整份快照的 59%），而右栏「已完成」平时是折叠的。现在：
+- `lib/store.ts` 的 `snapshotTasks`：未完成的待办全带，已完成的只带最近 48 小时内完成的（`SNAPSHOT_DONE_WINDOW_MS = 48 * 3600_000`），快照另带 `doneTotal`（已完成总数）。150 条超 48 小时已完成待办下，单次快照从 460.1 KB 降到 28.2 KB（缩减 93.9%）。
+- 两个无需口令的只读接口：`GET /api/v1/tasks?project=&done=1&before=&limit=30`（按完成时间倒序分页拉已完成待办，`before` 支持传待办 id 或毫秒时间戳）；`GET /api/v1/tasks/<id>?project=`（按 id 拉任意状态的一条待办）。
+- 页面：右栏顶部「N 进行中 · M 完成」和折叠标题「已完成 M」用 `doneTotal`，展开后先显示快照里的近期完成项，底下一行「更早的（还有 K 条）」按页拉；群聊里点 `t_…` 引用或切到「流程」视图时，若目标待办不在主快照里，自动调 `GET /api/v1/tasks/<id>` 拉回并展开/补齐流程节点标题，不提示找不到；`lib/digest.ts` 遇到引用了旧待办 id 的对话链不误归为散聊。
+- 测法：`scripts/test-room.mjs` 归档待办段落（测 `GET /api/v1/tasks` 与 `GET /api/v1/tasks/<id>` 无口令接口和 `doneTotal`）+ `scripts/test-tasks-archive.mjs`（进程内冷加载临时库测超 48 小时已完成待办从快照剔除、分页与 `getTaskById`，`queryDoneTasks`/`getTaskById` 纯只读内存不回刷库）+ `scripts/test-faults.mjs` 的 `old-done-task-by-id-missing`。
+启动时项目的 `seq` 取「项目头里存的」和「消息、待办里最大的」两者的大值（`loadRoomFromDb`）：消息先落库、项目头后落库，两次写之间进程没了的话，头里的 `seq` 会比消息小 1，下一条消息会撞 `idx_messages_proj_seq`。
 
 名字：1 到 24 个字母、数字或中文，可带 `_` 和 `-`，不能有空格。保留字：`human`、`room`、`everyone`、`所有人`。重名入座必须带原来的 token，否则 409。
 
 交接会写一条 `kind:"handoff"` 的消息，并把任务的 `ownerId` 设成接收方、状态改成 `doing`。`note` 就是对方接着做需要的上下文。同一阶段已有别人负责时，`claim` 返回 409。
 
 离席会把这个席位名下还没完成的任务标成 `blocked`。
+
+### 热更新下的数据库连接（2026-11-16，t_f258d9fb）
+
+SQLite 连接挂在 `globalThis.__benchSqlite` 上，热更新不会重开它，所以开着的服务里，后来加进 `ensureSchemaColumns` 的列不会出现在这条连接上。2026-11-16 那天，运行中的 4399 没有 `projects.front`，于是每次保存项目都报 `no such column: front`。建前台时项目只进了内存（`createProject` 先 `unshift` 再 `saveProjects`），之后在前台里发言、开席位又撞上外键，结果都是「内部错误」。现在有两层处理：
+- `bundle()` 拿到缓存的连接时，每条连接补跑一次 `ensureSchemaColumns`（`columns` 标记），然后清掉预编译语句。
+- `store.ts` 的 `enter`（`inProject` / `inSeat` / `bindProject` 都走它）在每个进程里第一次进某个项目时查一次 `dbHasProject`，如果行不在，就从内存把项目行和席位写回去。
+
+以后加列不用重启服务，但新列也只能靠 `ensureSchemaColumns` 加，不要只写进 `SCHEMA_SQL`。
 
 ## 演示席位（2026-11 去掉了）
 
@@ -546,13 +587,15 @@ AI 在汇报里带音视频：被唤起时调 MCP 的 `bench_attach`（`paths`�
 - `m_xxxxxxxx`（消息）：在对话里滚到那条并闪一下边框，折起的回复链会自己展开，还没加载的早期消息先放宽加载数；实在找不到就提示。对话里每条消息外面有 `data-message`。
 - `t_xxxxxxxx`（待办）：打开待办详情（`room-app.tsx` 监听 `bench:goto`）。
 - 提交号：7–40 位十六进制，且同时有字母和数字（免得把 `1234567` 或 `deadbeef` 当提交）。点了弹 `CommitDialog`，读 `GET /api/v1/commit?hash=&from=`：在说话那个座位的工作目录（没有就用项目目录）里只读地跑 `git rev-parse --verify` 和 `git show --stat` / `--patch`，补丁超过 150KB 截断。
-- 文件路径：绝对路径只认 `/home`、`/tmp`、`/media`、`/mnt`、`/opt`、`/usr`、`/etc`、`/var`、`/srv`、`/root` 和 `~` 开头的（`/api/v1/open` 这种接口地址不算）；相对路径要带目录和扩展名（`lib/a.ts`），或者写在反引号里。行号写 `:12` 或 `#L12`。点了调 `POST /api/v1/open`（只有用户能调，要 human key），`lib/open-ref.ts` 先按说话座位的 `workdir`、再按项目目录找文件，找到才用编辑器打开。
+- 文件路径：绝对路径只认 `/home`、`/tmp`、`/media`、`/mnt`、`/opt`、`/usr`、`/etc`、`/var`、`/srv`、`/root` 和 `~` 开头的（`/api/v1/open` 这种接口地址不算）；相对路径要带目录和扩展名（`lib/a.ts`），或者写在反引号里。行号写 `:12` 或 `#L12`。点了调 `POST /api/v1/open`（只有用户能调，要 human key），`lib/open-ref.ts` 先按说话座位的 `workdir`、再按项目目录找文件，找到才打开：默认 `revealFile` 在文件管理器里显示（选中该文件，文件夹就直接打开它），Ctrl/⌘+点击时请求带 `in: "editor"`，走 `openFile` 用编辑器打开到那一行。
 
 编辑器：设了 `BENCH_EDITOR` 就用它（`BENCH_EDITOR_JUMPS=1` 时传 `-g 文件:行`），否则依次找 `code -g`、`cursor -g`，都没有就 `xdg-open`。进程脱离房间服务单独跑，带上桌面环境变量。自测时把 `BENCH_EDITOR` 指到一个只把参数写进日志的脚本，别在用户屏幕上开真窗口。
 
+文件管理器：Linux 先用 `dbus-send` 调 `org.freedesktop.FileManager1.ShowItems`（文件夹用 `ShowFolders`），哪家文件管理器占着这个名字就是谁（deepin 是 dde-file-manager，也可能是 Nautilus、Dolphin、Nemo）；调用失败就退回 `xdg-open` 打开文件所在的文件夹（不会选中文件）。macOS 用 `open -R`，Windows 用 `explorer /select,`。不想开真窗口时，只用 `org.freedesktop.DBus.Introspectable.Introspect` 看有没有 `ShowItems`。
+
 ## 改页面时不要踩的地方
 
-`cacheComponents` 打开时，客户端组件在渲染期间读 `Date.now()` 会把预渲染卡住，页面停在「正在打开」。时钟放在 `useEffect` 里。现在的 `now` 初值是 `0`，效果开始时再取当前时间。
+`cacheComponents` 打开时，客户端组件在渲染期间读 `Date.now()` 会把预渲染卡住，页面停在「正在打开」。时钟放在 `useEffect` 里。要显示相对时间的小块自己用 `components/room/bits.tsx` 的 `useTick(毫秒)`（左栏、前台值班栏、进展页在用）；`RoomApp` 里不要再放整页的时钟（见「两层页面」一节）。
 
 开发服务认为自己是 `localhost`。浏览器从 `127.0.0.1` 打开时，热更新 WebSocket 会被拒绝。`allowedDevOrigins` 里要留着 `127.0.0.1` 和 `localhost`。
 
@@ -603,6 +646,239 @@ Next 开发徽章用 `devIndicators: false` 关掉了，它以前挡住入口栏
 - 打开页面时，如果既没有链接指定项目、上次也没记下项目，默认进第一个普通项目。前台排在第一，以前会落进前台。
 - 测法：隔离副本、无头 Chrome 驱动、走一整遍。顺序是：没开启 → 点顶栏「前台」开启 → 弹窗预填 → 开出 Claude 席位 → 前台房间 → 回到 → 前台里有新发言时顶栏出现圆点 → 进去看过、回来后圆点消失 → 左栏卡片 → 窄屏菜单 → 通知胶囊点进前台。深浅两色都截了，录了一段进出的录屏。测的时候开出的会话会在真的 `~/.local/share/bench/scratch/` 下建 `前台-xxxx` 空文件夹，测完删掉。
 
+### 前台是一对一的聊天窗口（2026-11-16，t_31cd7f9e）
+
+AverageJoe 的要求：前台不要像群聊，要做成一个完整的聊天窗口，也不能让多个 bot 当前台。上面「前台房间里」那几条里，凡是讲左栏、@ 和群聊样子的，都以这一节为准。
+
+- **只坐一个**：`store.ts` 的 `checkFrontSeat`。前台里已经有一个非演示席位时，`join` 新入座和 `spawnSession` 开新会话都返回 409。开新会话时在创建客户端会话之前就检查，不会白建会话和临时目录。回座（带 token）和换客户端（`rebind`）用的还是同一个席位，不受影响。要换人，先请它离席。
+- **不用 @**：`say` 里，用户在前台说的话总会加上值班席位的 `mentions`，正文不补 `@`。前台不走「叫最后说话的 AI」那条。
+  - 坑：`summonCandidates` 原来只从正文里重新找 @，不看 `mentions`。第一版上线后，「再查一次」没叫醒前台（m_050f62f8）。现在它把 `message.mentions` 也算上；`mentions` 本来就是 @ 的子集，别处行为不变。test-room 有对应的用例，故意去掉这一行时会报错。
+- **没有「给全权」**：前台的「正在做」气泡（`LiveRun` 的 `desk`）不显示给全权。它只读，不需要；真要批的单条权限照常弹卡片。
+- **桥报 409**：`bench-mcp.mjs` 的 `bench_join` 只把「已经有人叫」翻成「名字被占」，别的 409（比如前台满了）原样转出房间给的原因。
+- 在被叫醒的席位里跑 test-room 时，要先 `env -u BENCH_UUID -u BENCH_AGENT -u BENCH_SESSION -u CLAUDE_CODE_SESSION_ID`。不然测试起的桥会用你自己的会话 id，读错席位文件（表现是前台调 overview 返回 403）。
+- **页面**（`room-app.tsx` 的 `desk`）：
+  - 不显示左栏（项目和席位）、右栏（待办和摘要）、窄屏底部的三格导航，也不显示「进展 / 对话 / 流程」切换和 Trajectory。
+  - 宽屏顶栏左边换成项目菜单（平时只在窄屏出现），用来去别的房间。`ProjectPlace` 不再画一遍。
+  - 对话上方是 `FrontBar`（`front.tsx`）：值班 AI 的头像、名字和在做什么。正在回时多出「过程」「停下」，平时有「换人」（走现成的请离席对话框）。
+  - `Thread` 的 `front`：消息按时间平铺，不归拢成回复链。`MessageRow` 的 `chat`：不用摘要句，也不折叠（`openFold()`），不显示「回复」、引用和「送到了谁」。
+  - 示例问题和输入框占位语都不带 @。
+
+#### 前台没人值班时，和值班栏上的席位菜单（2026-11-16，t_7e9d31df）
+
+AverageJoe（m_bb8312aa）：点「换人」让值班 AI 离席后，没有地方再挑一个。原因是前台没有左栏，值班栏没人时只写一句「还没有人值班」，而「挑一个 AI 来值班」的欢迎卡只在一句话都没说过时出现。上面那条里「平时有『换人』」以这一节为准。
+
+- **没人值班时**：`FrontBar` 带「挑一个 AI」按钮（`onStaff`，就是 `room-app.tsx` 的 `staffFront`）。这时在输入框里发话不会发出去：提示「还没有人值班，先挑一个 AI」，弹出挑人，字留在输入框里。以前这句话会发进一个没人的房间，没有任何反应。
+- **换人**：收进值班栏的「⋯」菜单。确认框在前台里写的是「换掉 XX」「它会离开前台，聊天记录留着」；离席成功后直接弹出挑人（`setTimeout(staffFront, 0)`，不等下一份快照）。不想重新开始、只想换一家来接着聊，用同一个菜单里的「换客户端…」，席位和聊天都留着。
+- **值班栏上的上下文和菜单**：前台席位在房间这一侧就是普通席位，压缩上下文、换模型、换客户端、档案本来都有效，只是这些入口都在左栏的席位菜单里，前台看不到。现在 `FrontBar` 自己读上下文（`useContexts`，换了人或一轮开始、结束时重读），宽屏显示「上下文 用量 / 上限」（`ContextLine`），离自动压缩 70% 以上时多一个「压缩」；菜单里有压缩上下文、换模型、编辑档案、换客户端、换人。能不能压缩和左栏是同一条规则（读得到上下文、能叫醒、没在跑、没在守候），所以只有 Claude Code 和 Codex 有。
+- **斜杠命令不用 @**：`Composer` 的 `sole` 是前台值班席位的名字。`/compact`、`/stop`、`/goal` 没写 @ 时发给它（`sendSlash`），输入框下的提示也照这个写；「没 @ 人，发给 @XX」那行在前台不显示。
+- 整个前台项目被删掉后，顶栏的「前台」按钮回到「开启前台」，点了重新建一个并弹出挑人，这条路本来就是通的，这次在副本里也走了一遍。
+- 测法：隔离副本，把 `claude` 的唤起命令换成假的，入座一个种类是 `claude`、会话 id 借一份现成记录的席位（只为了读得到上下文；唤起和压缩都走假命令，不会动那份会话）。无头浏览器走：值班栏有上下文 → 菜单五项 → 点压缩 → `/compact` 不带 @ → 换人 → 弹出挑人 → 关掉后值班栏有按钮 → 没人时发话被拦 → 新席位用同名「前台」入座后发话有回。
+
+### 前台的转达、催一下和等验收卡片（2026-11-16，t_e8af4882）
+
+值班 AI 只起草，用户点了才算。逻辑在 `lib/front-relay.ts`，卡片在 `components/room/relay-card.tsx`，消息上的字段是 `Message.relay`（`RelayDraft`）。
+
+- **起草**：三件 MCP 工具 `bench_relay`、`bench_nudge`、`bench_review_card` 都调 `POST /api/v1/relay`，由 `requireFrontSeat` 把关，普通项目的席位会得到 403。
+  - 起草的结果是前台里一条带 `relay` 的消息，`mentions` 为空，不叫醒任何人。
+  - 原话开头写的 `@某人` 会被去掉，发出时由房间统一加。
+  - 不能转达回前台自己。
+  - 等验收卡片只给 `awaitingReview` 的待办出。
+- **用户点卡片**：同一个接口，带 `as: "human"`（`readBody` 要页面口令）、`messageId`、`action`。
+  - `send`：可带改过的 `text`。在目标项目里以用户的名义 `say`，正文是 `@席位 （经前台）原话`，照常叫醒那个席位。卡片记下 `sentId` 和改后的字。
+  - `drop`：不发。
+  - `pass`：在目标项目里 `actOnTask` 验收通过，和用户在那个房间里点通过是同一条路。
+  - 一张卡片只能处理一次，再点返回 409。席位自己调这个接口只会被当成起草。
+- **去看**：`refs.ts` 的 `openProjectAt` 发 `bench:open-project`，`room-app.tsx` 切到那个项目，并打开卡片上的待办。
+- **署名**：发进项目的话只标「经前台」，不写值班 AI 或巡查的名字。用户的要求是，前台对他来说就是一个人，内部怎么分工不展示。
+- **测试**：`scripts/test-relay.mjs`，只在隔离副本里跑，有 27 项检查，正式房间 4399 上会拒绝运行。
+
+#### 前台代签的页面：整批卡片、代签标记与重开、项目设置（2026-11-16，t_1d6bfa5a）
+
+按总单 `t_50597554` 落地前台代签与首批整批通过的页面侧：
+
+- **整批卡片（`components/room/batch-card.tsx`）**：在前台对话里当 `Message.relay.kind === "batch"` 时由 `thread.tsx` 渲染，按 `lane` 分三组展示：
+  - **「可以整批通过」（`batch`）**：每行默认勾选（可取消单条勾选），显示项目名、标题、`taskId`、前台写的一句话说明 `line`；右侧「依据」点开看复验人的结论说明（若卡片条目未内联携带，组件自动按项目拉取对应 `Task.check.note` 补齐）、「去看」切到原项目打开该待办；底部按钮「这 N 件都通过」调 `POST /api/v1/relay`（`{ as: "human", messageId, action: "pass", taskIds }`）只通过当前勾着的条目。
+  - **「你看一眼」（`look`）**：每行显示说明、「通过」（单条调同一个结算接口）和「去看」。
+  - **「只能你签」（`you`）**：每行显示不能代签的原因（如标题碰保险词、复验未过等）和「去看」。
+  - 已结算的行原地显示「✓ 已通过」或「没通过：原因」，整张卡片可分多次点完；任一组超过 6 行时默认折叠尾部为「还有 N 件」。
+- **代签标记与重开（`components/room/tasks-panel.tsx`、`components/room/progress.tsx`、`lib/digest.ts`）**：
+  - 代签通过的待办（`task.review?.deputy`）在右栏待办卡与进展视图「今天做完」行上均标「前台代签」，点开显示前台写的原因（`deputy.why`）和复验人（`deputy.checkName`），旁边带「重开」按钮（调 `POST /api/v1/deputy` `{ as: "human", action: "reopen", taskId }` 退回等验收）。
+  - 等验收的待办卡复验行（`CheckLine`）显示复验类别标签（`run` → 跑得出、`look` → 要人看、`you` → 只能本人签）及琥珀色「有没验到的」提示（展开依据时附上 `check.gaps`）。
+- **前台顶上「今天代你通过 N 件」（`components/room/front.tsx` 的 `DeputyTodayBar`）**：挂在 `FrontBar` 下方，读 `GET /api/v1/deputy?since=今天零点`；有记录时显示「今天代你通过 N 件」，点开列出每件的项目名、标题、原因、复验人及「去看」「重开」按钮；0 件时不显示。
+- **项目设置（`components/room/project-menu.tsx` 的 `ProjectDialog`）**：普通项目的「请验收时先复验」下拉框增加「自动挑」（`check: "auto"`）。原来下方的「让前台代签」开关 2026-11-17 去掉了，改成全房间一个开关，见「前台代签」一节。
+
+### 前台的主动提醒：巡查和值班 AI 是一个人的两面（2026-11-16，t_8c888d57）
+
+AverageJoe 的设计：贵的模型负责决策、察觉用户意图、分析；便宜的负责盯着别的模型干活、报风险。他又补了一句（m_2dab84ab）：在用户看来，这两个最好是同一个人的两面，内部怎么实现、怎么沟通，都不要给用户看。
+
+- **巡查**（`lib/patrol.ts`）：
+  - 在房间进程里跑。`boot()` 里调用 `ensurePatrol`，定时器挂在 `globalThis`，热更新不会重复起。
+  - 每 3 分钟扫一遍各普通项目（`look`），用的都是 `snapshot()` 现成的数据：
+    - 停着还欠活的席位（`owes`）
+    - 没叫成的点名（`brokenCallsInRoom`）
+    - 卡住的待办
+    - 超过 15 分钟没批的权限
+    - 超过 30 分钟没回答的提问
+    - 超过 2 小时没验收的待办
+    - 超过 4 小时没动、负责人也没在做的待办
+  - 只有一种情况要读懂内容才能判断：某个席位一轮跑了超过 40 分钟。这时才叫便宜模型，用 `dsh-agent exec` 一次性跑，不占席位，在临时目录里，最多两次。
+    - 给它的只有点名那几行（`★`）和最近 30 步。坑：别把整段唤起文字给它，那里面大半是房间积压的消息，会把它带偏。
+    - 一步都还没有的，直接算卡住，不用问模型。
+    - 它判断「推进」的就不报。
+    - 每次读完往日志写一行「巡查读了…」。
+- **只说新的**：报过的事用稳定的 key 记在 `meta` 的 `patrol.seen` 里，保留 3 天，重启也不会重复报。第一次扫只记下已有的事，不说。
+- **用户看不到巡查**：
+  - 新情况写成一条 `Message.risk`，作者是「巡查」（不是席位）。页面上 `MessageRow` 遇到它直接不画；`talked` 不算它；`listProjects` 的 `lastAt`、`lastOtherAt` 也跳过它，所以不会亮未读点。
+  - 值班 AI 下次被叫醒时，会在「房间里的全部消息」里读到它，消息里写明了「用户看不到这条」。
+  - 有【要紧】的、而且离上次叫醒超过 30 分钟（`patrol.wokeAt`）时，会 `mentions` 值班 AI，马上叫醒它。消息里叫它先用 bench_peek 核实，再用自己的话跟用户说一两句，不要提巡查。
+  - 不要紧的就等用户下次找它时再顺带提。
+- **开关**：前台值班栏的「主动提醒」（`PatrolToggle`，`/api/v1/patrol` 的 on / off；`sweep` 是立刻扫一遍，测试用）。默认关着（`meta` 的 `patrol.off` 不是 `"0"` 就算关）。
+- **定时器闭包版本号**：`ensurePatrol` 维护 `PATROL_VERSION`，改了 `sweep` 规则记得把版本号加一，热更新后第一次请求会自动清掉旧定时器闭包、挂上新代码。
+- 每次读都会在 dsh 那边新建一个会话。如果哪天嫌多，可以给 `dsh-agent exec` 加不留会话的参数。
+
+#### 前台盯着一个项目：全停了且额度还有时直接叫统筹接着做（2026-11-17，t_0fefb44c）
+
+- **盯防表（`lib/watch.ts`、`app/api/v1/watch/route.ts`、MCP `bench_watch`）**：
+  - 存在 SQLite `meta` 的 `front.watch`（项目 id → 统筹席位 id/名、谁让盯的、开始时刻、上次直接催时刻）。不加页面开关，没设过的老项目不管。
+  - 前台席位调 `bench_watch(project, seat, on?)` 可给任意普通项目设统筹；普通项目的席位调 `bench_watch(on?)` 只能设自己所在的项目、统筹固定是调用者自己（传别的项目或别的席位一律 403）。`frontOverview` 和 `frontPeek` 会显示 `盯防：统筹 <名字>`。
+- **巡查规则（`lib/patrol.ts` 的 `lookWatched`，不受「主动提醒」开关管）**：
+  - 「主动提醒」关着时，`sweep` 只对 `front.watch` 里的项目跑这一条（且盯防条目带 `watch: true`，不会被首次扫描的 `first` 静默吞掉）。
+  - 同时满足四条时报一条 `【要紧】` 走 `postRisk` 叫醒前台（受 `WAKE_GAP` 限制）：① 项目里没有任何席位在干活或排队/重试，持续满 10 分钟（`BENCH_WATCH_IDLE_MS` 可缩短测试门槛）；② 还有未交完的待办（非 `done` 且非 `awaitingReview`）；③ 统筹那家客户端没撞限额（`limitedAgentNames` / `isKindQuotaBlocked`）；④ 不是用户自己点停（`isSeatStoppedByUser`）或暂停了队列。
+  - **同一次停下只报一次**（2026-11-17，t_67bd9812）：键是 `watch:<projectId>:<这次停下的起点>`。起点取最晚的一次动作：席位跑过或走过一步（`activityAt`）、有人说话（前台自己的催促也算，巡查的记录不算）、待办有变动、`lastNudgeAt`。停多久都是同一个键；有了新动作、又停满 10 分钟，才是新的一次。以前按半小时一档（`BENCH_WATCH_SLOT_MS`，已删），停一晚上前台被叫十几次。席位的 `lastSeenAt` 不算动作：那是客户端的心跳，挂住时也一直在刷。
+  - **一轮开着却没动静的也算停了**（同上，起因：一个席位一轮开了 6 小时，前台一直当它在干活）：`runId` 还在、但最近 30 分钟（`BENCH_WATCH_HANG_MS`）没动静的席位不算「在干活」。动静取最晚的：这一轮最后一步（`stepAt`）、它说的话、它名下待办的更新、跑到一半收到的消息（`Message.reached`）；几家客户端的步骤记录不全（Antigravity），所以不只看步骤。这时报给前台的话点名是谁：「哈基米 这一轮开了 6 小时，最近 372 分钟没动静」，并交代只有用户能停下一轮：先 `bench_peek` 看是不是真卡住，真卡住了用 `bench_nudge` 告诉统筹、用自己的话请用户点它的「停止」。前台自己停不了，也不能替用户批权限、答问题。判断「活都交了、不用盯了」时仍按原样，挂住的席位算在干活。
+  - 巡查规则改了要加 `PATROL_VERSION`（这次 2 → 3），热更新才会换掉旧的定时器。
+- **前台直接催统筹（`lib/front-relay.ts`、`lib/store.ts` 的 `postFrontNudge`）**：
+  - **只有 `bench_nudge` 且目标正是盯着的项目里记下的那个统筹席位**时，不出草稿卡片，直接发进该项目并叫醒统筹；`bench_relay`（转达用户原话）、非统筹席位或没盯的项目一律照旧出 `draft` 草稿卡片等用户点。
+  - **署名红线**：发进目标项目的消息 `authorId: "front"`、`authorName: "前台"`（**绝不能是 `"human"`**，正文 `@统筹 前台来看了一眼：…`，**绝不带 `（经前台）`**），被叫醒的统筹收到的是其他 AI 发言而非用户授权指令。
+  - 同一项目 30 分钟内（`BENCH_WATCH_NUDGE_GAP_MS`）最多直接发一次，超了返回 429 说明；前台聊天里留一张 `state: "sent"`（「已发出」）的记录卡片供用户回来查看。
+- **什么时候自动不盯了**：项目里未交完待办清零（全 `done` 或全在 `awaitingReview` 等用户验收）时，给前台留一条不急的记录（`level: "low"`，不唤醒）`<项目> 的活都交了，在等用户` 并从表里去掉；盯满 24 小时（`BENCH_WATCH_EXPIRE_MS`）还没完也自动去掉并记一笔；用户说不用盯了则调 `bench_watch(on: false)`。
+- **测试**：`scripts/test-watch.mjs`（同时跑隔离副本 HTTP/MCP 端到端与进程内虚拟时钟全周期，并在 `scripts/test-room.mjs` 调用；联网那段建的前台席位在 `finally` 里请走，中途失败也不会留下「前台已有别的席位占座」）。虚拟时钟里：同一次停下过 40 分钟、2 小时都不再报，前台催过、统筹跑过之后 8 分钟不报、11 分钟再报；一轮开着 20 分钟前还有动静不报、31 分钟没动静报并点名。`scripts/test-faults.mjs` 四条故障注入（`watch-nudge-as-human`、`watch-nudge-unwatched-direct`、`watch-reports-every-sweep`、`watch-hung-counts-as-working`）。
+
+### 前台给用户发通知（2026-11-16，t_d82796d3）
+
+AverageJoe：允许前台调用通知接口，给用户发一句摘要。
+
+- **工具**：MCP 的 `bench_notify(text)`，对应 `POST /api/v1/notify` 和 `lib/front.ts` 的 `frontNotify`。只有前台席位能用（`requireFrontSeat`）。
+  - 一句话，80 字以内。
+  - 5 分钟内只能推一条，超了返回 429。
+  - 最新一条存在 `meta` 的 `front.notice` 里。
+- **手机**：走现有推送，`enqueuePushEvent` 的 `kind: "front"`，1 秒后发出。标题是「「前台」提醒你」，`actor` 留空，这样就是前台自己在说话。和别的推送一样，页面开在前面时不推，手机也就不会响。
+- **页面**：`listProjects` 给前台项目带上 `notice`。`components/room/notify.ts` 看到新的 id，就和「某某做完了」一样弹页面提示；桌面通知打开、且页面在后台时，再弹桌面通知。点一下进前台。
+- **什么时候发**：前台守则里写的是「有要紧的事要他知道时，说完再推一句 40 字内的摘要，别的时候不推」。巡查叫醒前台的那条说明里也写了「核实要紧，说完再推」。
+- 测试时注意：开着的无头 Chrome 页面会一直报「页面在前」，推送就全被跳过。测完记得按 pid 关掉，不然 test-room 里的推送用例会失败。
+
+## 前台代签（2026-11-16，t_96e9a794；2026-11-17 改成全房间一个开关、房间自己收，t_491538da）
+
+一部分待办可以不等用户点就通过，但每道关都由房间按事实判断，不信前台的话，也不信负责人的说明。
+
+**开关：「查过没问题的，自动替我收下」**（2026-11-17，用户定的：不再每个项目设两项）
+
+- 全房间一个，默认关，只有用户页面能改：`POST /api/v1/deputy` `{as:"human", action:"auto", on}`（`lib/deputy.ts` 的 `setAutoAccept`）。`GET /api/v1/deputy` 多回一个 `auto`，快照里是 `autoAccept`。页面上只有一处：前台值班栏「主动提醒」左边的「自动收下」按钮。
+- 存在 meta `auto_accept`，值是**打开的时刻**（毫秒，空就是关）；再开一次不改这个时刻，关掉就清空。`store.autoAcceptSince()` 读它。
+- 开着时，每个普通项目请验收都先复验：项目设置里指定了复验人的用指定的，没指定的按「自动挑」（`store.autoCheckHere`，`prepareTaskCheck` 和 `summon.ts` 的 `requestCheck` 都用它）。
+- **房间自己收**：复验结论写入那一刻（`summon.ts` 的 `checkTask` 里 `setTaskCheck(... verdict)` 后面一行 `autoAcceptChecked`），闸门全过就直接 `deputyPass`，不叫醒前台 AI，不花额度。依据由房间按事实写：「<复验人> 复验通过，跑得出结果，没有没验到的」；`deputy.seatId` 是 `"room"`，`seatName` 是「前台」，用户看到的还是「前台代签」「今天代你通过 N 件」。
+- **开关打开之前就在等的不自动收**（`review.at <= 打开时刻`），前台的 `bench_accept` 也收不了，留给用户整批点。前台 peek 里这种标「可整批（开关打开前就在等，留给用户）」。
+- **打开那一下**给所有普通项目里等验收、还没复验结论的待办排一次复验（`runBatchCheck`），跑完照原路通知前台出整批卡片。
+- **用户重开过的不再自动收**（2026-11-17，Fable 合验时补的）：`deputyReopen` 给 `task.review` 记 `reopened: true`，`signLane` 见到就归「只能你签」（「你重开过，等负责人改完再请验收」）。
+  - 原因：重开后旧复验已经删了，前台的 `bench_check`（`runBatchCheck`）会给它补排一次复验；复验一过，房间就会把没改过的活原样再收一遍，用户的重开等于白点。
+  - 负责人再请验收会写一条新的 `review`，标记自然没了；这次也不算「还在等时又请一次」，一律重新复验（`actOnTask` 里的 `again`）。不然中间补跑的那次复验会被留用，它早于新的请验收，这条就永远落在「复验是上一次请验收的」。
+  - `test-deputy.mjs` 里「重开后补跑的复验过了：房间和前台都不再收」和「重开后再请验收：排上新的复验」各守一处；两处分别去掉时都会失败。
+- 原来的 meta `project.deputy.<id>` 不再读，`ProjectInfo.deputy` 和 `updateProject` 的 `deputy` 都删了。
+
+**车道：`lib/review.ts` 的 `signLane(task)`**
+
+这是唯一一处判断。闸门、整批卡片和页面都用它，返回 `{ lane, why }`。按顺序判断，先命中的说了算：
+
+1. 标题里有保险词（`GUARD_WORDS`）→ you。只看标题，大小写不敏感。
+2. 复验有问题 → you：没跑复验、还在跑、没过、没验到、没跑成。
+3. 复验时间或人不对 → you：
+   - 没有请验收的记录；
+   - 复验早于这次请验收（`check.at < review.at`）；
+   - 不知道是谁复验的；
+   - 复验人就是负责人；
+   - 复验人把类别写成只能本人签。
+4. 复验通过，但留了口子 → look：有没验到的、类别是要人看、没写类别。
+5. 都不是 → batch。
+
+why 写的是具体哪条原因，不是兜底那条。测试也会核对原因。
+
+**代签：`lib/deputy.ts`，`POST /api/v1/deputy`**
+
+房间自己收（`autoAcceptChecked`）和前台席位发 `{action:"accept", project, taskId, why}`（`acceptDeputy`，平时用不上，补漏用）走同样的闸门，全过才通过：
+
+1. 开关开着（`autoAcceptSince() > 0`）。
+2. 待办正在等验收，而且是开关打开之后才请的验收。
+3. 车道是 batch。
+4. 有 why（房间自己收时由房间写；前台调用时要前台写）。
+5. 当天整间房代签不超过 30 件（`DAILY_CAP`）。
+
+1、2 的时间部分和 5 在 `gateRefusal` 一处。
+
+通过时：
+
+- `store.deputyPass` 写入 `review.deputy`（前台席位、依据、复验人），并把验收那一步标完成。
+- 历史记一条「代签通过」。
+- 房间以自己的名义在那个项目里发一句话，带 `verdict.deputy`，不点名任何人。
+
+代签不会提交、推送、批权限或回答提问。
+
+**重开和清单**
+
+- 用户发 `{as:"human", action:"reopen", project, taskId}` 可以重开，只对代签通过的待办有效。
+- 重开后回到等验收，请验收的时间也重新算，**旧复验直接去掉**（`deputyReopen` 里 `delete task.check`）。不去掉的话，负责人再请验收时（还在等着的待办再请一次会沿用已有复验）会一直挂着那次旧复验，车道永远是「复验是上一次请验收的」，再也收不了。去掉之后，负责人再请验收就排新的复验，过了才会再收。用户刚重开的，房间不会马上又收一次。
+- `GET /api/v1/deputy?since=` 列出各项目代签通过、还没被重开的待办。
+
+**整批卡片：`RelayDraft.kind = "batch"`，在 `lib/front-relay.ts`**
+
+- 前台调 `bench_review_batch(items)` 起草。房间对每一件用 `signLane` 重算车道，前台给的车道只能更严（`stricterLane`）。
+- 不在等验收的条目会被丢掉，在 `left` 里告诉前台。
+- 用户点「都通过」时，走 `relay` 的 `{as:"human", action:"pass", taskIds}`，逐条按用户自己的通过处理，不受开关和车道限制。
+- 已经处理不了的条目记成 skipped 并写原因。卡片可以分几次点完，每一件都处理了才结算。
+
+**测试：`scripts/test-deputy.mjs`**
+
+- 在进程里直接跑房间代码，数据放在临时目录（`BENCH_DATA_DIR`），不用起服务，也碰不到真实房间。
+- 复验结论由测试自己用 `setTaskCheck` 写入。
+- `BENCH_ROOT=<仓库副本>` 可以拿一份改坏的代码来跑：23 处闸门和规则逐一改坏过，每次测试都报了错。
+- `ts-alias.mjs` 为此补了一条：`next/server` 这类没有 exports 的子路径，自动加 `.js` 再找。
+
+**前台怎么知道哪件能签（2026-11-16，t_50597554 合验时补的）**
+
+- 起因：合验时看值班 AI 被叫醒收到的全文，守则还写着「不能替他验收」，没提三个新工具；一览和 peek 里也看不出项目开没开代签、房间把每件算在哪一档，前台只能挨个试 `bench_accept` 再被拒。
+- `lib/front.ts`：
+  - `bench_overview` 每个普通项目那一行末尾、`bench_peek` 第一行都带「复验：自动挑 / 指定 XX / 没开 ｜ 代签：开着 / 没开」（`signSettings`）。前台自己那一块不写。
+  - 每件等验收的待办后面带房间算的车道（`laneText`，用的就是 `signLane`）：「可代签」（batch 且项目开着代签）、「可整批（项目没开代签）」、「要 用户 看（原因）」、「只能 用户 签（原因）」。原因是给用户卡片写的，里面的「你」在这里换成用户的名字；复验人写的「没验到的」原样不动。
+  - 一览有 4500 字的总预算（`OVERVIEW_TEXT_BUDGET`），所以一览里只写车道、不写原因（「→ 可代签 / 可整批 / 要 用户 看 / 只能 用户 签」），原因在 peek 里。
+  - 一览超预算时先去掉各项目的「摘要开头」再排一遍，开头写明没列；还超才从末尾截断。以前直接截断，排在后面的项目连等验收的几件都看不到。这个预算在项目多、等验收多的时候很容易超：合验用的副本里 12 个项目就超了，`test-room` 里查一览内容的那条因此在用过的副本上会挂，换干净副本就过。
+  - 返回的数据里 `waitingReviews[].lane`、`waiting.reviews[].lane` 也带上。
+- 守则（`lib/summon.ts` 的 `frontDuty`）：第一句没动（`test-room` 卡着它 200 字以内）；后面加了两句：好几件等验收用 `bench_review_batch`、没复验的先 `bench_check`；「不能替他验收」只有一个例外，标着「可代签」的用 `bench_accept`，被拒就留给用户，不要换办法。短版（`brief`）同步。
+- 一批复验跑完叫醒前台的那句（`lib/patrol.ts` 的 `noteChecksSettled`）点名了做法：先 peek，「可代签」的逐件 `bench_accept`，其余的 `bench_review_batch` 出一张卡片。
+- **前台聊天里只留一张开着的清单**（`lib/front-relay.ts` 的 `carryOpenBatches`）：
+  - 起因：每个项目的复验一跑完前台就被叫醒一次，每次都会出一张清单；旧的没点完还开着，同一件待办会在好几张上重复。
+  - 现在起草新的整批卡片时，前台聊天里还开着的旧清单（热消息里 `relay.kind === "batch"` 且 `state === "draft"`）上还没处理、还在等验收的条目并进新的一张，车道重新算；前台改严过的（`why` 以「前台改严了」开头）保持改严。旧清单记 `state: "dropped"`、`replacedBy: <新卡片 id>`。
+  - 并进来会超过 80 件（`BATCH_MAX`）的那张旧清单不并，原样开着。
+  - 接口多回 `replaced`（收起了几张）和 `carried`（并进来几件），`bench_review_batch` 的结果里告诉前台。
+  - 旧清单上再点通过回 409「这张清单换成新的了，看最新的那张」。页面上（`batch-card.tsx`）收起的清单只剩一行：「验收清单 · 通过了 N 件，剩下的并进了新的一张」。
+  - 测试在 `test-deputy.mjs` 的整批卡片一段：并进来几件、旧的收起并记着换成哪张、旧的点不了、改严的保持、只剩一张开着。
+- 没改的一处，知道就行：没正式请过验收、只是步骤都做完的待办（`review` 是空的），`signLane` 记「没有请验收的记录」，落在「只能你签」。原因是没有请验收的时间，就没法判断复验是不是这一轮的。2026-11-16 四个项目 47 件等验收里有 7 件是这种。
+- 测试：`test-deputy.mjs` 多了「前台读到的」一段（设置行、三种车道的写法、开关关掉后的写法、数据里的 lane）；`test-room.mjs` 在前台守则那条后面加了一条，卡三个工具名和「只有一个例外」。
+- 合验用的走查脚本不在仓库里（`~/.cache/fable-eval/sign-walk/walk.mjs`）：在隔离副本里用假客户端把首批流程从头走一遍，11 项。假客户端的命令是 `node -e '<脚本>' {text} {uuid}` 时，叫醒的全文在 `process.argv[1]`，不是 `[2]`；整批卡片结算要带前台项目的 `project`。
+
+## 第一次打开只问一句话（2026-11-17，t_594f3118，总单 t_19662204）
+
+全新的房间（所有项目里一个真席位都没有、用户一句话都没说过：`lib/first-open.ts` 的 `isFresh`）打开时，页面不出三栏，只出 `components/room/first-open.tsx`：「你想做点什么？」、一个输入框、「谁来做 / 放在哪」两行（各带「换一个」）、「开始」，右上角「更多设置」回到完整页面（原来的弹窗都在）。`room-app.tsx` 里只有决定显示它的那几行：本项目快照里没有真席位、没有用户的话才去问服务器；有了席位或消息之后不再出现，不加开关。
+
+- **接口**：`GET /api/v1/first` → `{fresh, kinds, pick, parent, parentLabel, install?}`；`POST /api/v1/first` `{as:"human", text, kind?, dir?}` 就是「开始」，要用户口令。
+- **谁来做**：按 Claude → GPT → Gemini → DeepSeek → Grok（`FIRST_ORDER`）挑第一家装了的。「装了」看的是客户端自己的命令行（`CLIENT_BINS`：claude、codex、agy、dsh-agent、cursor-agent；Claude 桌面端自带的也算），不看唤起命令，因为 Claude 的唤起命令是我们自己的脚本，永远在。
+- **接好**：点「开始」时，那家的配置文件里还没有 `bench-mcp.mjs` 就替用户跑一次 `register`（和「接入 AI」里「运行」同一个动作）；已经有了（这份或别的副本）就不动。没跑成就原地说「没能把并坐接到 X 上（最后一行输出）」，叫用户去「更多设置」手动运行。
+- **放在哪**：默认在桌面（`xdg-user-dir DESKTOP`；没有桌面就 `~/并坐`）新建文件夹，名字取那句话第一句的前十个字，去掉标点和不能当文件名的字（`lib/first-name.ts`，页面也用它先显示），重名加 2、3…。「换一个」走现有的 `/api/v1/folder` 选已有文件夹，就用它，不新建。
+- **开始之后**：用「默认项目」（没有就用第一个普通项目），改名为那几个字、设好文件夹；在里面 `spawnSession` 开一个席位，名字就是客户端名（「Claude」，不带数字），分工「开发」，模型、思考强度、权限都用默认值（不给全权）；那句话以用户身份 `@Claude …` 发出去，叫醒它。页面随后切到这个项目。
+- **不重复建**：同时点两次，第二次说「正在准备」；做完之后房间不再全新，再点就 409。中途失败再点「开始」，同一句话会接着用上次建的文件夹。
+- **中途失败**（2026-11-18 补，GPT2 复验发现）：`spawnSession` 先建席位，再写入座文件、发那句话；后两步失败时席位已经在了，房间不再算全新，再点「开始」被 409 挡住，第一屏也没了。现在 `startFirst` 在失败时，只要房间里还没有用户的话，就把这次新建的席位收回（`removeAgent(id, true)`），房间仍是全新的，再点能接着建（文件夹沿用）。测法：`test-first.mjs` 的 `FIRST_PART=fail` 子进程，把入座文件夹的位置先占成一个文件；故障注入 `first-open-stuck-after-failure`。
+- **一家都没装**：说「这台电脑上还没装能用的 AI」，给装 Claude Code 的一句话和链接，「装好了，再看一次」重新问。
+- **测试替身**：`BENCH_FIRST_KINDS`（如 `claude,dsh`，或 `none`）代替本机装了哪几家，设了它就**不会**去改客户端的真配置；`BENCH_FIRST_PARENT` 代替桌面。`scripts/test-copy.sh` 放行这两个变量。
+- **测法**：`node scripts/test-first.mjs`（进程内，不起服务，不碰真桌面和客户端配置）：取名、一家都没装、推荐顺序、各种拒绝、同时点两次、建文件夹重名加号、项目改名设目录、席位名不带数字且不给全权、第一条消息点名它、开始后不再全新、再点不重复建、「换一个」用已有文件夹（子进程里另起一间全新房间）。`scripts/test-faults.mjs` 的 `first-open-starts-twice` 用它（故障可以用 `test` 指定跑哪份测试）。页面是在副本里用无头浏览器真点过的（截图在 `~/.cache/fable-eval/simple-audit/50`–`53`）。
+
 ## 没 @ 人的话叫最后说话的 AI（2026-11-15，t_bd01d3c1，用户说先临时加上）
 
 - 在 `lib/store.ts` 的 `say()` 里：用户发的话没有 @（`@所有人` 也算 @），也不是在回复哪条时，在正文开头补上 `@<lastSpeaker()>`，然后照常走 `lockMentions`。叫醒的逻辑一点没改。
@@ -626,6 +902,16 @@ scripts/test-copy.sh down check       # 停止并删除
 副本默认放在 `.bench/test-copies/<网络空间>-<PID空间>/`，不依赖 tmux；在普通终端和隔离会话中都在调用者的空间启动。端口只接受 4400–4499，只监听回环地址。代码复制后先在副本里 `next typegen`、`tsc --noEmit --incremental false`，失败就不起服务；这样不会把生成类型或编译缓存写进正式工作区。依赖使用硬链接，不要在副本内升级或修改 node_modules。
 
 副本只继承 HOME、PATH、用户/语言/终端及代理变量，设置独立的 BENCH_DATA_DIR、XDG_STATE_HOME、BENCH_URL；不复制正式数据、凭证或 `.env`。只读输出所指的副本 human-key，不用正式房间口令。down 核对 PID 启动时间与工作目录后结束进程组，僵尸进程视为已退出。list 标记一天未启动的副本，并列出其他空间的目录；不同空间不能用数字 PID 互相停止。隔离空间退出后服务不会继续存在，残留目录需确认不再使用再清理。
+
+### 从副本搬进正式目录（2026-11-17 定的规矩）
+
+正式房间是 `next dev`，文件一落盘就生效，所以搬的过程本身就是上线。2026-11-17 这一天出过两次事：
+
+- **分几次搬，中间是坏的**：11:20:26 到 11:22:07 所有接口返回 500。新文件 `lib/continue.ts` 和 `boot.ts` 里对它的引用先落了盘，它要用的 `store.ts` 里的函数一分四十秒后才到。这期间每个席位的工具调用都失败。
+  - 做法：要改的文件先在临时目录里全部准备好（正式目录当前内容加上你的改动），`tsc` 过了，再一条命令一次搬完；单个文件用「写到临时文件再 `mv`」替换，不要原地慢慢写。搬完马上 `curl http://127.0.0.1:4399/api/v1/projects`，不是 200 就立刻处理。
+  - 只按位置替换自己那几处，不整文件覆盖：同一个文件里常有别人刚搬进来的改动。
+- **新的定时规则一生效就扫到存量**：「停了自己接着做」（`lib/continue.ts`）搬进来两分钟后，本来会把四个项目里停了一到三天的旧欠活全叫醒。上线前要问一句：这条规则第一次跑的时候，房间里已有的东西哪些会被它扫到。现在的做法是只管房间这次启动之后才停下的（`owes.since < bootAt` 的跳过）。
+- **定时器的闭包拿着旧代码**：挂在 `globalThis` 上的定时器，热更新不会换掉它回调里的代码。改了扫描规则，要么让 `ensureXxx` 发现版本号变了就重建定时器（`continue.ts` 的 `SWEEP_VERSION`），要么等重启才生效，并在说明里写清楚是哪一种。
 
 本机隔离启动器在仓库之外；需要桥接的端口仅限以下清单，不开放额外直连外网：
 
@@ -672,21 +958,56 @@ npx eslint --max-warnings 0
 不要用 `POST /api/v1/reset` 除非要清空。请求体必须是 `{"confirm":"清空"}`。测试脚本会自己清。
 
 不要在这个工作区里 `git stash`、`git checkout -- <文件>`、`git reset --hard`、`git clean`：工作区是所有席位共用的，常常有好几个席位的改动同时没提交。`git stash` 会把别人改到一半的文件一起收走，这期间别人的编辑会落空，放回来时还可能冲突（2026-11-14 有席位为了确认「类型检查报错不是我引起的」这么做过，这次没出事）。想知道报错是不是自己引起的，看报错的文件是不是自己改的那几个，或者在隔离副本里验。
-- 重启接上被打断的唤起（`lib/runs.ts`、`lib/summon.ts` 的 `announceInterrupted` / `rewake`）：唤起一开始就写进 `data/runs.json`，记下项目、当时在回的那批消息（`body`）、`replyTo`、单独回话的原话。启动时读到还在 running 的记录，标成 `interrupted`；第一次 boot 时按项目发一条系统提示（带 `interrupted` 列表，每条只提示一次），席位置回空闲。提示下面每人一个「重新叫醒」按钮：`POST /api/v1/runs/<id> {as:"human", action:"rewake"}`。回复类的会把原来那批消息作为「刚才被打断、还没回的」再送一次，单独回话重放原话，摘要重新排队；同一条只能叫醒一次。
+- 重启接上被打断的唤起（`lib/runs.ts`、`lib/summon.ts` 的 `announceInterrupted` / `rewake`）：唤起一开始就写进 `data/runs.json`，记下项目、当时在回的那批消息（`body`）、`replyTo`、单独回话的原话。启动时读到还在 running 的记录，标成 `interrupted`；第一次 boot 时按项目发一条系统提示（带 `interrupted` 列表，每条只提示一次），席位置回空闲。提示下面每人一个「重新叫醒」按钮：`POST /api/v1/runs/<id> {as:"human", action:"rewake"}`。**现在房间自己接上**（2026-11-17，t_67bd9812，`scheduleRestartResume` / `resumeSeatAfterRestart`）：启动 60 秒后开始，一个席位一个席位来，隔 30 秒（`BENCH_RESTART_RESUME_MS` / `BENCH_RESTART_RESUME_GAP_MS`，测试用），被打断的先、只是排着队被重启停住的后；被打断的走 `rewake(runId, true)`，排队的把这次重启加的暂停去掉再跑。只接这次重启打断的：重启前就暂停着的不动。`lane_state.paused` 现在分三种：0 没停，1 用户停的，2 重启停的（`Lane.restartPaused`）；只有这次启动时从 0 变成 2 的（`bootPaused`）会自动放开，上次重启停了没接上的（已经是 2）、用户自己停的（1）都留着。用户点了「停止」的席位、那家客户端撞了额度的不接，按钮还在。用户在这之前自己点过「重新叫醒」或暂停/恢复了，到点就跳过。用户暂停着队列、当时又有一轮在跑的席位，被打断的那一轮也不自动叫回（`userPaused`）：`rewake` 会顺带解开暂停，所以整个留给用户点「重新叫醒」。提示改成「重启打断了 X，稍后自动接上」；这批全是用户暂停着的，照旧写「点下方重新叫醒」（系统提示最长 30 字，名字长了会截断，所以说得短）。回复类的会把原来那批消息作为「刚才被打断、还没回的」再送一次，单独回话重放原话，摘要重新排队；同一条只能叫醒一次。
 - 重启前先看有没有 agent 在跑：`ps -eo pid,etime,args | grep -E "claude-code.sh|codex-wake|dsh-agent|cursor-agent|agy "`，或看左栏谁是「在做」。被唤起的 agent 是开发服务器的子进程，重启会把它们一起掐断；现在重启后能在群里一键叫回来，但最好挑大家都空闲时重启。agent 自己要重启时，用一个独立会话的后台脚本（`setsid nohup`）延迟几十秒再做，不然会先把自己掐掉。
 - agent 想在临时项目里自测时，新坐一个测试席位（`/api/v1/join` 起个新名字），不要用自己的席位 `bench_join` 到临时项目：入座会让它离开原来的项目，临时项目删掉后它就哪儿也不在了。
 - 自测脚本建的临时项目，删除要放在 `finally` 里（照 `scripts/test-room.mjs`）。只写在脚本最后一行的话，中途断言失败或超时就会留下一个没人删的项目：`.bench/accept/pfull.mjs` 留下过 `pfull-…`。现在删项目要带 `data/human-key` 的口令，脚本从文件读。
-- 点「发给」的标签，`@名字` 加在输入框光标所在的位置（选中了一段就替换那一段），不再加到最前面：`lib/text.ts` 的 `insertMention` 在名字两边各留一个空格（已经有就不加），光标落在名字后面那个空格之后，接着打字不会和名字连在一起把点名弄没；文字是受控的，所以光标位置先记在 `caret` 里，等新文字渲染完再在 layout effect 里设。没点进过输入框时光标在末尾。点名一律按整个名字匹配（`@Opus2` 不算 `@Opus`）：服务端一直如此，页面上发送后「正在忙」的提示以前用的是子串，2026-11 改成和服务端同一个 `namedAgentIds`。注意名字后面要有空格或标点，`@Opus2看一下`、`@opus2` 都谁也叫不到，输入框下面会提示没有这个席位。
+- 点「发给」的标签，`@名字` 加在输入框光标所在的位置（选中了一段就替换那一段），不再加到最前面：`lib/text.ts` 的 `insertMention` 在名字两边各留一个空格（已经有就不加），光标落在名字后面那个空格之后，接着打字不会和名字连在一起把点名弄没；文字是受控的，所以光标位置先记在 `caret` 里，等新文字渲染完再在 layout effect 里设。没点进过输入框时光标在末尾。点名一律按整个名字匹配（`@Opus2` 不算 `@Opus`）：服务端一直如此，页面上发送后「正在忙」的提示以前用的是子串，2026-11 改成和服务端同一个函数，现在是 `mentionedAgentIds`。**只有 `@名字` 叫醒人**：以前用户说的话里出现席位名，没写 @ 也会叫醒它（`namedAgentIds`），「两位开发都交付了，@验收 接手」把两个开发也叫醒了；agent 之间本来就只认 @。现在 `summonCandidates` 只认正文里的 @、前台转来的点名（`mentions`）、交接和用户的回复，`namedAgentIds` 已删。注意名字后面要有空格或标点，`@Opus2看一下`、`@opus2` 都谁也叫不到，输入框下面会提示没有这个席位。
 - 「发给」快捷标签可以拖动排序（`composer.tsx` 的 `useChipOrder`）：指针事件，横向拖过 6px 才算拖；拖动时在 window 上监听 pointermove/up，因为 React 换位会移动 DOM 节点、丢掉指针捕获。拖过别人中线就换位，其他标签用 FLIP 滑过去：位置用 offsetLeft 量（不受动画中的 transform 影响），新一段滑动从当前屏幕位置接着走，位移加在外层（内层有 overflow-hidden，挪出去会被裁掉，拖得快时就是这样「看不见」的）。顺序按席位 id 存在 localStorage 的 `bench-chip-order`，新席位按原顺序排在后面；松手 300ms 内的 click 不算点选。「所有人」固定在最后，不参与拖动。
 - 点进输入框时，最近在群里说过话的席位（最多 3 个，最新的在最前）排到「发给」最前面，其余按拖好的顺序：`room-app.tsx` 的 `speakers` 从群聊倒着取说话的席位（跳过系统消息和用户自己），`composer.tsx` 在 `onFocus` 里取前 3 个、`upFront` 排前面。只在获得焦点那一刻定一次，打字时不跟着新消息跳；重排本身不写进 `bench-chip-order`（拖动的话按拖时看到的顺序存）。
 - 答完就收尾（`lib/events.ts` 的 `ended`、`lib/summon.ts` 的 `END_GRACE_MS`）：输出流里出现一轮结束的事件（Claude / cursor 的 `type:"result"`、Antigravity 的 `event:"result"`、Codex 的 `turn.completed`、`type:"final"`）后，进程 3 秒内不退就收掉它的进程组，按正常结束贴回答，「过程」里记一条说明。常见原因是 agent 在后台挂了任务（Claude Code 的 `-p` 要等后台任务结束才退），以前要等到超时，回答才贴出来。只等 3 秒，是因为同一席位的下一次唤起会接着用这个会话，旧进程不能留着。
 - 「正在做」卡片（thread.tsx 的 `LiveRun` / `LiveDrawer`）：气泡里藏着一份按自然宽度排的副本，量出宽度后再给气泡设宽，靠 width 过渡平滑伸缩。席位做完后，`useLeaving` 用它最后的样子再留 `LEAVE_MS`，播 `.live-leave` 退场，效果是老电视关机：上下压成一条亮线，缩成一个点，然后这一行合上。离开的卡片必须是同一个元素（同 key、同 `Leaving` 外壳）；换成新元素的话，入场淡入会把退场盖住。CSS 动画是 1.4 秒，`LEAVE_MS` 要比它稍长。合上的那一行在卸载前还占着群聊那一列的行间距（`gap-1`，4px），以前卸载时会跳一下；现在那一列把间距写成 `--live-gap` 交给它，`live-close` 合上时用负的 `margin-top` 一起收掉。改那一列的 `gap` 时记得同步这个值。气泡末尾是「停止」（2026-11-12）：以前那里是一个过程图标，点它和点气泡一样是展开过程，等于没用。现在外层是 `div.bubble`，里面左边一个按钮（点了看过程），右边一个圆形停止按钮（按钮不能套按钮）。停止和席位菜单里的停止调同一个 `stopSeat`（`room-app.tsx`，`action: "stop"`），停掉这次唤起，排着的也一起取消。量宽度的那份副本在末尾垫一个同样大的空位。新手引导的演示气泡（`demo`）不显示停止。
 
+## 哪些东西在「高级」里
+
+2026-11-17（t_f5b04d14，简单版第 6 件）：功能不删、默认值不变，只把平时很少改或偏开发的设置收进「高级」（下拉里用二级子菜单 `DropdownMenuSub`，弹窗里用共用组件 `components/room/advanced.tsx` 的 `AdvancedSection`，默认折叠）：
+
+- **设置菜单**（`components/room/room-app.tsx`）：外面只留外观（深浅色、字号）、通知（桌面通知、推送到手机…）、「你的名字…」（复用 `components/room/name-field.tsx` 改用户名）和「高级」。「高级」子菜单里放：唤起命令…、Token 测速台、网络错误自动重试、5 小时额度到点自动继续、深色背景缓慢流动、新手引导。
+- **开新会话**（`components/room/spawn-dialog.tsx`，包括前台「挑一个 AI 来值班」）：外面只留「选客户端」（仅前台）、名字（默认就是客户端名，如 `Claude`，已有同名席位才加数字）、工作目录一句话提示和「创建」按钮；项目未设目录时自动用「临时目录」，不再出现灰色点不动的「创建」。「高级」里放：分工、模型与模型高级项（`advancedMode="inline"`）、工作区四选一、首条交代（选填）、默认给全权。
+- **换模型与席位设置**（`components/room/model-field.tsx`、`components/room/seat-profile-dialog.tsx`）：「换模型」外面只留模型下拉，自定义模型 id、思考强度、最大上下文、自动压缩阈值收进「高级」（`ModelAdvancedFields`）；「席位设置」的档案页把只读 `.md` 路径说明收进「高级」（长期记忆标签去掉 `bench_memory` 代码词），换客户端页外面只留目标客户端和模型下拉，自定义模型 id、思考强度、工作目录、顺带交代和历史会话收进「高级」。
+- **手机推送**（`components/room/push-dialog.tsx`）：默认只显示最省事的 `ntfy`（免注册免建群、跨平台通用、服务端默认渠道，外层只留必填「主题地址」；若已保存其他渠道则按当前渠道显示必填字段）。其余 5 种推送方式、可选口令/密钥字段、「【本轮结束】也推」和「只推标题，不带正文」全收进「高级」。
+- **项目设置**（`components/room/project-menu.tsx`）：外面只留名字、项目目录（带「浏览」）和删除项目；「请验收前先让另一个 AI 检查」和「补一句话结论」收进「高级」（新建项目时不显示空「高级」）。
+- **席位菜单（「⋯」）**（`components/room/roster.tsx`）：外面留点名、单独说…、停下这次/取消重试、改名…、换模型…、只看它相关/看全部对话、「高级 ›」和移出；「高级」子菜单里放开新会话…、压缩上下文、暂停/恢复叫醒、默认给全权、编辑档案…、换客户端…和打开终端… Beta。
+- **「接入 AI」弹窗**（`components/room/join-dialog.tsx`）：把「房间替你开一个」放在最前面；手动三步（选客户端 `j-pick`、写入客户端配置 `j-register`、发那句入座 `j-say`）、其他客户端说明、房间地址和单独隔离放置的「清空记录」全部收进「高级」。当从新手引导或某家客户端下「接入 AI」打开时自动展开「高级」，以免打断引导高亮或直达操作。
+
+## 两层页面：平时只留对话和「等你定」（2026-11-17，t_cbc5c3c4，简单版第 4 件）
+
+功能不砍，平时只留第一层。哈基米在副本里做的，中途它那一轮挂住，Fable 把它合到当时的页面上验过搬入。
+
+- **两层**（`components/room/room-app.tsx`）：第一层（默认）是对话加右边一列「等你定」；第二层是原来的三栏，一处没改。顶栏按钮「看细节」去第二层，「回到简单」回来。记在这个浏览器里（`localStorage` 的 `bench-ui-layer`，值 `simple` / `full`，`setUiLayer` 改、`useSyncExternalStore` 读），是页面上的切换，不是设置项，不进设置菜单。
+- **前台也留着项目列表**（2026-11-18，t_71f7effc）：第二层里从左栏项目列表点进前台，以前前台整列不显示左栏（`desk` 时网格只有一列），只剩顶栏一个小下拉，用户说「能点进去但点不回来」。现在前台在 lg 以上也是 `300px + 对话` 两列，左栏在前台固定是项目列表（`left-pane.tsx` 里 `current.front` 时 `tier` 恒为 `projects`，前台自己的 AI 在对话上方，不需要席位栏），点任一项目卡片就回去。
+- **项目文件夹按钮**（同上）：顶栏项目名右边一个文件夹图标，项目设了文件夹时才出现（前台没有）。点了走现成的 `POST /api/v1/open`（`refs.ts` 的 `openFile`，默认就是在文件管理器里显示），和消息里点路径是同一条路，要用户口令。
+- **第一层不显示的**：左栏（项目和 AI 列表）、右栏待办、「进展 / 对话 / 流程」切换、刻度尺、顶栏的「N 在线 · N 在做」和「接入 AI」、调试菜单。顶栏留：标志、项目菜单（`ProjectMenu` 加了 `alwaysShowName`，宽屏也显示项目名）、「前台」、「看细节」、设置。房间是空的那一屏（「第一次打开只问一句话」）优先于这两层。
+- **「等你定」**（`components/room/waiting-panel.tsx`）：只放要用户动手的事，一件一张卡，顺序是要批的权限 → 问你的话 → 撞到额度要你选的 → 被重启打断要重新叫醒的 → 等你验收的待办。用的都是现成卡片（`PermitCard`、`AskCard`、`LimitedCard`、`thread.tsx` 里抽出来的 `InterruptedCard`），验收卡是面板里的 `WaitingReviewCard`：标题、「<负责人> 做完了」加检查结论（`lib/waiting-shared.ts` 的 `reviewCheckSummary`）、请验收说明第一句、「通过」「打回」（要写原因）「看细节」（切到第二层并打开那条待办）。没有事时一句「现在没有要你定的事」。底下固定两行：「今天替你收下 N 件　看看」（N 为 0 不显示）和「N 个 AI 正在干活　看细节」。
+- **数据**：普通项目里直接用页面手上的房间快照和 `digestOf`（第一层时也算 `digest`，不只在进展页）。在前台，「等你定」列的是所有普通项目的事，来自只读接口 `GET /api/v1/waiting`（`lib/waiting.ts` 对每个普通项目调 `digestOf`；页面在第一层的前台里每 4 秒且页面可见时拉一次，房间版本号变了也拉；正式房间上热的一次约 30 毫秒）。两边共用 `lib/waiting-shared.ts` 里的筛选函数，别各算一套。
+- **别的项目的事**：验收可以在前台直接点「通过」（`POST /api/v1/tasks/<id>` 的 body 带 `project`）；其余只有「去看」（`refs.ts` 的 `openProjectAt`，跳过去并打开那件事）。前台不能在这里替别的项目批权限、回答问题。
+- **同一件事在第一层只有一处能点**：`Thread` 收到 `simple` 后给消息行传 `hidePendingCards`，对话里开着的提问、待选的额度卡、没重新叫醒的打断卡只剩一行小字「去「等你定」处理」；提问置顶条、输入框上方的权限条和「你刚说的」在第一层不画。进展页自己的去重（`ChainLine` 的 `hideAsk`）是另一回事，两个参数都留着。
+- **今天替你收下**：`front.tsx` 把原来 `DeputyTodayBar` 里的取数和列表拆成 `useDeputyToday` 和 `DeputyPassList`，前台值班栏和「等你定」共用；重开之后发 `bench-deputy-changed` 事件让两处一起刷新。第一层的前台对话顶上不再画那一条（`showDeputyBar={!simple}`），免得一屏两份。
+- **手机 / 窄屏**：第一层底部导航只有两格「对话」「等你定（N）」。
+- **从第一层点到待办**（`openTask`）会先切到第二层；从设置菜单开「新手引导」也先切到第二层（引导讲的是完整页面）。
+- **去掉了每 10 秒整页重画**：`RoomApp` 里的 `now` 时钟拿掉了，左栏、前台值班栏各自用 `useTick(10_000)`。用 `PerformanceObserver` 量过：200 条消息的房间空闲一分钟，两层的 longtask 都是 0 次（原来约 6 次，每次 60–70 毫秒）。
+- **测试**：`scripts/test-room.mjs` 里有一段查 `GET /api/v1/waiting`（结构、开着的提问和等验收的待办在里面、回答和通过之后不在、带 `project` 通过别的项目的待办）。页面走查是无头浏览器脚本（造一间有权限请求、提问、等验收的房间，走：默认第一层 → 三种卡都在都能点 → 通过后卡片消失 → 看细节 → 回到简单 → 刷新后还记得 → 前台里看得到别的项目的事、能通过、「去看」能跳 → 手机两格；另一份量 longtask 和打回），没进仓库，改这一块时照这个顺序再走一遍。
+
 ## 界面用词和长短
 
 新增或修改界面文案时照同一把尺子写（第一批对照表见 [`docs/界面文案对照表.md`](docs/界面文案对照表.md)）：
 
-- **统一叫法**：同一概念只用一种词——**客户端**（不混用厂家/厂商/后端/软件）、**席位** vs **会话**、**叫醒**（给人看的动作统一写叫醒，仅保留配置专有名词「唤起命令」）、**待办**（不混用任务）、**验收** / **复验**、**房间摘要** vs **摘要句**、**单独说**（不混用插话）、**默认给全权** / **本轮全允**。
+- **统一叫法（2026-11-17 `t_5e010292` 第二批统一后）**：同一概念只用一种词——
+  - **客户端**（不混用厂家/厂商/后端/软件）、**席位** vs **会话**、**分工**（不混用职责/职责与规范）、**接入 AI**（顶栏按钮、左栏入口、客户端引导、弹窗标题统一叫 `接入 AI`）。
+  - **叫醒**（给人看的动作、权限条「这次叫醒的全部权限」等统一写叫醒，仅保留配置专有名词「唤起命令」/「缺唤起命令」）、**移出**（菜单「移出」、弹窗「把 X 移出？」/「取消 / 移出」；前台保留「换人… / 换掉 X」）。
+  - **待办**（不混用任务）、**等你验收**（替代待验收/等验收）、**卡住**（待办被堵，替代等着；席位停下有欠话保留「停着」）、**检查**（AI 彼此检查，替代复验；三结论统一：`查过，没问题` / `查出问题` / `没查出结论`；设置叫「请验收前先让另一个 AI 检查」；前台自动收下保留「前台代签」/「今天代你通过 N 件」）。
+  - **叫醒进度**（对话线程与进度页共用同一套 11 态：`排着队`、`已送到`、`开始了`、`在做`、`已回答`、`跑完了没说话`、`重试中`、`没叫成`、`你停了`、`中途断了`、`撤掉了`）。
+  - **房间摘要** vs **一句话结论**（单条总结/补句统一叫「一句话结论」/「结论由 X 补」/「补一句话结论」）、**展开** / **收起**（折叠按钮统一，保留「还有 N 件」）、**打回输入提示**（统一 `哪里不对？会转给 X，它照着改`）、**单独说**（不混用插话）、**默认给全权** / **允许一次** / **本轮全允**。
 - **字数尺子**：
   - **菜单项**：≤ 6 字，动词开头，不带句号，不带解释（解释放 `title`）。
   - **悬停提示（`title`）**：一句，≤ 20 字；按钮文字本身已说清的直接不设 `title`。
@@ -694,4 +1015,47 @@ npx eslint --max-warnings 0
   - **弹窗**：标题 ≤ 8 字（席位名、项目名等动态标识用小号副标签跟在旁边）；`DialogDescription` 和字段说明最多一句；按钮 2～4 字。
   - **群聊系统消息**：一句，≤ 30 字（「谁 + 怎么了」，需要时加一句动作）；长报错原因与客户端输出写进 `Run` 步骤（点开「过程」查看），不要整段贴进群聊。
   - **「接着做」发出的话（`components/room/nudge.ts`）**：≤ 40 字。
-- **只改短、不能删的提醒**：不可撤销后果（清空记录、删项目会删掉席位/对话/待办）、花额度的地方（复验、补摘要句、压缩省额度但少细节）、往外发内容（手机推送及本机密钥位置）、改外部配置（向客户端写 MCP 配置、导出 `.md` 只读副本、换客户端不带旧会话聊天记录）、安全边界（「默认给全权」直接跑命令改文件）、手动善后（新分支手动合并、临时目录手动清理）。
+- **只改短、不能删的提醒**：不可撤销后果（清空记录、删项目会删掉席位/对话/待办）、花额度的地方（检查、补一句话结论、压缩省额度但少细节）、往外发内容（手机推送及本机密钥位置）、改外部配置（向客户端写 MCP 配置、导出 `.md` 只读副本、换客户端不带旧会话聊天记录）、安全边界（「默认给全权」直接跑命令改文件）、手动善后（新分支手动合并、临时目录手动清理）。
+
+### 说人话：agent 写给用户看的话由房间把关（2026-11-17，t_37e8315c）
+
+用户读的待办标题、请验收的说明、权限卡、「正在做」、失败灰条，都不该要他读代码。做法是房间自己查，全是确定的规则，不叫别的 AI 改写（不花额度、不多等）：写得像代码的，当场退回给写的那个 agent，告诉它怎么改。
+
+**规则在 `lib/plain.ts`**（纯函数，页面和服务端都能用）：
+
+- `plainFault(text)`：反引号、文件名（`xxx.ts`、`.md`、`.json`…）、路径（`lib/…`、`/api/…`）、`t_`/`m_`/`p_`/`a_`/`s_` 编号、网址和 `127.0.0.1:端口`、带下划线的名字（`bench_task`）、小驼峰名字（`keyFile`）、连着 4 个以上的英文单词，再加一小张行话词（`tsc`、`eslint`、`diff`、`webhook`…）。产品名（Claude、GPT、Gemini、Next.js、CodeBuddy、WebGL 这类）放行；带短横的英文名（`bench-shell`、分支名）不查，因为很多正是项目的名字。
+- 接在 `lib/store.ts` 的 `requirePlain`，三处，**只管 agent**（用户自己在页面上建的不查；复制旧待办 `fork` 不查；已有的待办一条都不动）：
+  - `createTask`：标题和每一步，被退回是 400，错误文字里带改法和正反例子；
+  - `actOnTask` 的 `step`（`add` 加步骤）：同样；步骤自己的 `note` 是技术细节，不查；
+  - `actOnTask` 的 `review`：只查 `note` 的**第一行**，退回时提示「第一句写用户怎么看到效果」，后面细节随便写。被退回时待办不会进入等验收。
+  - `review` 的 `note` 为空不拦（宁可漏拦）。
+- **先量再定的数**（11-17，正式库里全部现有待办，只读）：标题 343 条拦 25 条（7%），拦的全是真夹代码的，例如「提问：MCP 里的 bench_ask…」「…（lib/digest.ts）」「低语森林第 3 站：搭 echo_woods…」；步骤 1660 条拦 284 条（17%，多是带文件名的长备注）；验收说明首行 49 条拦 27 条（旧写法大多是「分支 xxx 提交 abc123」这类）。第一版规则把 `CodeBuddy`、`WebGL`、`bench-shell`、`Next.js` 也拦了，去掉了驼峰产品名和短横名两类、给 `Next.js` 这类加了放行名。
+- 守则文字：`lib/summon.ts` 里「新功能先建待办」那一句和 `scripts/bench-mcp.mjs` 里 `bench_task`、`bench_step`、`bench_task_update` 的说明，都告诉 agent 标题和验收说明会被检查、怎么写。
+
+**权限卡和进展页「要权限」**：`PermitRequest.plain = { action, why }`，在 `app/api/v1/permit/route.ts` 收到请求时由 `toolAction(tool, input)`（按工具种类：「运行一条命令」「改文件 x.ts」「读文件」「打开网页 域名」「用一个外部工具」…）和 `toolWhy(input)`（Claude 的命令自带的 `input.description`，有就用）算好。卡上先写「X 想运行一条命令」，有说明就在下一行写说明，工具名和命令原文折在「看原始内容」里；按钮没动。`lib/digest.ts` 的「要权限」行同样先写这句。Codex 的 `commandExecution`、`fileChange` 也认；认不出的写「用一个工具」。
+
+**「正在做」**：`lib/events.ts` 的 `liveLine` 经 `liveToolLine`（`lib/plain.ts`）：命令自带了中文说明就用「正在 + 说明」；英文说明或没有说明，就写「正在运行一条命令」「正在在文件里找东西」这类种类说法，命令原文不再出现在席位那一行（点气泡进「过程」里看，那里的标题和输入原样保留）。读文件、改文件本来就是文件名，保持。进展页「在做」行用的是同一个 `seat.doing`，一起变。
+
+**失败灰条**：`lib/summon.ts` 的 `reportFailure` 现在写「谁 叫醒没成功：大概原因（看「进展」里它的「过程」）」，原因来自 `failureReason`（没登录、模型用不了、网络断了、找不到程序、超时、限速、认不出就写「出了没预料到的错」）；原来只截报错前 8 个字加「（看过程）」，并且受 30 字尺子压缩。**这一条是字数尺子的例外**（≤ 50 字都行）：一句完整的话比短更要紧。「过程」里那条「失败原因说明」没动，原始报错还在。
+
+**对话里的待办编号**：`components/room/refs.ts` 存一份「编号→标题」（`RoomApp` 每次房间更新时 `rememberTasks(room.tasks)`），`markdown.tsx` 的 `RefLink` 用 `useTaskTitle`：知道标题就显示「标题」（超过 18 字截断），悬停才是编号；不知道（别的项目、已不在快照里的旧待办）照旧显示编号。右栏待办卡、整批卡、转达卡（等验收）、今日代签条、流程块上摆着的编号改成悬停（`title`）才见。摘要提示里的「待办 83c6」改成「挂在一条待办上」。
+
+**测试**：`scripts/test-plain.mjs`（规则和各句话，不起服务：`node scripts/test-plain.mjs`）；`scripts/test-room.mjs` 里一段「说人话」（夹代码的标题、步骤、加步骤、验收说明首行被退回并带改法；大白话放行；步骤 `note` 不查；用户自己建的、复制旧待办不拦）和权限卡的 `plain` 断言；`scripts/test-faults.mjs` 四条（标题不检查、验收说明不检查、连用户也拦、权限请求不带人话），都被抓到。**别的测试自己建待办时标题要写大白话**，否则会被退回。
+
+**没验到的**：失败灰条只有函数测试，没有在真实唤起失败时截图（要真的让客户端失败）；「正在做」气泡是在副本里用房间收到的状态行看的，没有跑一次真客户端；`refs` 里的标题只覆盖当前项目的待办，前台房间里别的项目的待办仍显示编号。
+
+## 停了自己接着做：席位停满 5 分钟欠着活，房间自己叫它（2026-11-17，t_4494da49 前 5 步）
+
+- **在哪跑**：`lib/continue.ts`（`boot()` 里调 `ensureContinue`，每 30 秒扫一遍各普通项目，进程内 `globalThis` 单例带 `SWEEP_VERSION`，以后改扫描规则记得把 `SWEEP_VERSION` 加一，热更新时才会替换旧定时器闭包）。没有开关，默认生效。
+- **什么时候叫、发什么**：
+  - 席位停着且名下还有欠活（`owedTasks` 里的待接/在做待办，或非房间发出的未达点名 `failed`/`cut`），停满 5 分钟（`BENCH_CONTINUE_FIRST_MS` 可在测试副本缩短）由房间以自己名义（`postRoomWake`，`authorId: "room"`，**绝不冒充用户**）发一行 ≤30 字的系统提示小字（如 `房间叫 XX 接着做 t_…`），直接触发 `summon` 唤起。
+  - 给席位的完整指令放在 `Message.wakeText`（群聊气泡仍只显示短 `text`，`talkLine` 和 `enqueue` 对席位展开 `wakeText`），带上待办编号、标题、当前第几步、让它接着做、做不下去标卡住写原因或用 `bench_ask` 问用户、做完了还没请验收就请验收。
+- **最多两次、有进展清零**：
+  - 同一批欠活（按待办步骤状态与非房间未达点名算签名 `progressSig`）最多叫 2 次：第 1 次停满 5 分钟，第 2 次等上次结算后再过 20 分钟（`BENCH_CONTINUE_SECOND_MS`）。
+  - 两次叫完结算后仍无进展，不再叫第 3 次，走 `lib/patrol.ts` 的 `noteSeatStalled` 给前台记一条 `【要紧】`（`level: "high"`，`XX 停了，叫了两次没动：t_… 标题`）并叫醒值班 AI。
+  - 只要有进展（步骤往前走、标卡住、请验收、向用户提问、待办完成），计数立刻清零，并从清零时刻重新计算下一段 5 分钟静默窗口。
+- **10 种不叫的情况**：① 用户点过停止的那一轮之后（`markSeatUserStopped`，直到用户再点名/单独说/设目标/手动重叫才 `clearSeatUserStopped`）；② 用户暂停了队列（`queuePaused`）；③ 客户端正被限额拦着（`limitedAgentNames` 或 `isKindQuotaBlocked`）；④ 有网络重试在排或队列未空闲（`retry` / `!isLaneIdle`）；⑤ 挂在 `bench_wait` 守候或开着网页终端；⑥ 演示席位（`demo`）；⑦ 前台项目的席位（`front`）；⑧ 叫不醒的席位（无会话、缺配置或本机没装客户端命令）；⑨ 服务器启动后 2 分钟内（`BENCH_CONTINUE_BOOT_MS`）；⑩ 房间这次启动之前就已经停着的旧欠活（`owes.since < s.bootAt`，防止上线或重启后把没人推的老项目几天前的欠活全叫起来；重启打断的活归重启恢复管）。
+- **持久化与左栏展示**：已叫次数、时间和用户点停记录存在 SQLite `meta` 的 `continue.state`（保留 7 天），重启后不丢也不重复叫。左栏 `components/room/roster.tsx` 在房间自动叫过以后（`owes.woken`）显示「房间已叫它接着做」（下拉标题注明已叫次数），右侧保留「接着做」按钮。
+- **搬进正式目录的顺序**：跨多个互相引用文件的改动，先在副本/临时目录全部准备好并跑通 `tsc` 与测试，再按「底层被依赖文件 → 调用方 → 路由」一次性原子替换（`rename`），落盘后立刻 `curl http://127.0.0.1:4399/api/v1/projects` 确认 200，避免热更新中途看到半截引用导致正式房间全接口 500。
+- **测试**：`scripts/test-continue.mjs`（跨冷启动两阶段覆盖全部 10 种守卫、进展清零与持久化，并在 `scripts/test-room.mjs` 调用）；`scripts/test-faults.mjs` 三条故障注入（`autowake-no-max-cap`、`autowake-ignores-user-stop`、`autowake-before-boot`）。
+

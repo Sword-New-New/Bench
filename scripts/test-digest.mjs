@@ -93,6 +93,27 @@ check(d.you.map((item) => item.id).join() === [T(2), T(1), T(3)].join(), "you �
 check(d.stuck[0]?.id === T(5), "stuck 按停了多久排", d.stuck.map((item) => item.id))
 check(JSON.stringify(d.counts) === JSON.stringify({ you: 3, stuck: 5, doing: 1, done: 1 }), "counts", d.counts)
 
+// Tied by taskId, its id never written: the owner's replies under it, with
+// their attachments, still belong to the to-do (GPT2's check, 2026-11-17).
+{
+  const tied = msg({ text: "@席1 照这个改一下", taskId: T(20) })
+  const answer = msg({ authorId: "a_1", authorName: "席1", replyTo: tied.id, text: "改好了。截图在附件。", attachments: [{ kind: "image", name: "b.png", path: "/b.png" }] })
+  const own = [task(T(20), { ownerId: "a_1", ownerName: "席1", updatedAt: now - 59 * min })]
+  const r = digestOf({ messages: [tied, answer], tasks: own, agents: seats, permits: [], userName: "用户", now }).doing.concat(
+    digestOf({ messages: [tied, answer], tasks: own, agents: seats, permits: [], userName: "用户", now }).stuck,
+  ).find((item) => item.id === T(20))
+  check(r?.messageIds.join() === [tied.id, answer.id].join() && r.attachments === 1 && r.at === answer.createdAt, "用 taskId 挂上的起头消息，下面没写编号的回复和附件也归这条待办", r)
+}
+// The owner's open question came before the to-do's last message: the
+// messages still go oldest first.
+{
+  const asked = msg({ authorId: "a_2", authorName: "席2", text: "先问一句：要哪种？", ask: { state: "open", options: [{ label: "A" }] } })
+  const later = msg({ authorId: "a_fable", authorName: "Fable", text: `${T(21)} 先放着` })
+  const own = [task(T(21), { ownerId: "a_2", ownerName: "席2" })]
+  const r = digestOf({ messages: [asked, later], tasks: own, agents: seats, permits: [], userName: "用户", now }).you.find((item) => item.id === T(21))
+  check(r?.messageIds.join() === [asked.id, later.id].join(), "提问比待办的消息早时，消息仍从早到晚", r?.messageIds)
+}
+
 if (failedCount) {
   console.error(`digest: ${failedCount} failed`)
   process.exit(1)

@@ -253,6 +253,106 @@ async function steps(stamp) {
   const originalAfterFork = JSON.stringify((await request(`/api/v1/room?project=${project}`)).data.tasks.find((item) => item.id === passed.data.task.id))
   assert(originalAfterFork === taskBefore, "复制之后原来那条不该变")
 
+  // Tasks finished more than 48 hours ago are omitted from the main snapshot
+  // (`room.tasks`) to keep every push light, while `room.doneTotal` reports the
+  // full count and `GET /api/v1/tasks` + `GET /api/v1/tasks/<id>` fetch them on demand.
+  {
+    const secondDone = await request("/api/v1/tasks", {
+      method: "POST",
+      body: { ...asAlpha, title: `另一条完成的待办${stamp}`, owner: alpha.data.agent.name, steps: ["做完它"] },
+    })
+    assert(secondDone.status === 201, "创建第二条已完成测试待办失败")
+    const secondId = secondDone.data.task.id
+    await request(`/api/v1/tasks/${secondId}`, { method: "POST", body: { ...asAlpha, action: "step", step: 1, state: "done" } })
+    await request(`/api/v1/tasks/${secondId}`, { method: "POST", body: { ...asAlpha, action: "review", note: "完成" } })
+    const secondPassed = await request(`/api/v1/tasks/${secondId}`, { method: "POST", body: { as: "human", action: "pass" } })
+    assert(secondPassed.status === 200 && secondPassed.data.task.status === "done", "第二条已完成测试待办验收失败")
+
+    // Both read-only endpoints work without the human key.
+    const byIdRes = await request(`/api/v1/tasks/${secondId}?project=${project}`, { key: false })
+    assert(
+      byIdRes.status === 200 && byIdRes.data.task?.id === secondId && byIdRes.data.task?.status === "done",
+      `按 id 拉取待办失败：${byIdRes.status} ${JSON.stringify(byIdRes.data)}`,
+    )
+    const missingTaskRes = await request(`/api/v1/tasks/t_00000000?project=${project}`, { key: false })
+    assert(missingTaskRes.status === 404, `不存在的待办应返回 404，实际 ${missingTaskRes.status}`)
+
+    const snapNow = await request(`/api/v1/room?project=${project}`)
+    assert(
+      snapNow.data.doneTotal === 2,
+      `快照 doneTotal 应为全部已完成总数 2，实际 ${snapNow.data.doneTotal}`,
+    )
+
+    const page1 = await request(`/api/v1/tasks?project=${project}&done=1&limit=1`, { key: false })
+    assert(
+      page1.status === 200 &&
+        page1.data.tasks?.length === 1 &&
+        page1.data.doneTotal === 2 &&
+        page1.data.hasMore === true,
+      `分页拉取第一页已完成待办不对：${JSON.stringify(page1.data)}`,
+    )
+    const firstId = page1.data.tasks[0].id
+    const otherId = firstId === secondId ? passed.data.task.id : secondId
+    const page2 = await request(`/api/v1/tasks?project=${project}&done=1&before=${firstId}&limit=5`, {
+      key: false,
+    })
+    assert(
+      page2.status === 200 &&
+        page2.data.tasks?.length === 1 &&
+        page2.data.tasks[0].id === otherId &&
+        page2.data.hasMore === false,
+      `分页拉取更早已完成待办应包含 ${otherId}，实际 ${JSON.stringify(page2.data)}`,
+    )
+
+    // Verify >48h archival window, doneTotal, pagination, and by-id lookup against cold DB load.
+    const { execFileSync } = await import("node:child_process")
+    const pathMod = await import("node:path")
+    const { fileURLToPath } = await import("node:url")
+    const archiveTest = fileURLToPath(new URL("./test-tasks-archive.mjs", import.meta.url))
+    const repoDir = pathMod.resolve(pathMod.dirname(archiveTest), "..")
+    execFileSync(process.execPath, [archiveTest], {
+      cwd: repoDir,
+      env: { ...process.env, BENCH_ROOT: repoDir },
+      encoding: "utf8",
+    })
+  }
+
+  // 「说人话」: what an agent writes for the user is checked, and sent back
+  // with a way to rewrite it when it reads as code. Only agents are held to it.
+  const plainTask = (title, steps, who = asAlpha) =>
+    request("/api/v1/tasks", { method: "POST", body: { ...who, title, owner: `甲${stamp}`, steps } })
+  for (const bad of ["改 lib/store.ts 的 createTask", "gist.tsx 加 summaryOf", "把 `summaryOf` 换掉", "接着做 t_5de117f4", "bench_task 要检查标题", "看 http://127.0.0.1:4399 的页面"]) {
+    const refused = await plainTask(bad, ["做"])
+    assert(refused.status === 400 && /待办标题/.test(refused.data.error) && /用户能得到什么/.test(refused.data.error), `夹着代码的标题该被退回并带改法：${bad} 得到 ${refused.status} ${refused.data.error}`)
+  }
+  for (const fine of ["聊天里长回复先只显示一句结论", "把 Claude 和 GPT 接进 App：Gemini、DeepSeek 也能用", "第 3 步：深色下也看得清", "修：额度到点后自动继续"]) {
+    const ok = await plainTask(fine, ["先做第一件", "再看效果"])
+    assert(ok.status === 201, `大白话标题不该被拦：${fine} 得到 ${ok.status} ${ok.data.error}`)
+  }
+  const badStep = await plainTask("步骤被退回", ["改 components/room/gist.tsx"])
+  assert(badStep.status === 400 && /待办步骤/.test(badStep.data.error), `夹着文件名的步骤该被退回 ${badStep.status} ${badStep.data.error}`)
+  const plainOne = (await plainTask("检查加步骤", ["先做"])).data.task
+  const plainPath = `/api/v1/tasks/${plainOne.id}`
+  const addBad = await request(plainPath, { method: "POST", body: { ...asAlpha, action: "step", add: ["跑 tsc 和 eslint"] } })
+  assert(addBad.status === 400 && /待办步骤/.test(addBad.data.error), `加步骤也要检查 ${addBad.status} ${addBad.data.error}`)
+  assert((await request(`/api/v1/room?project=${project}`)).data.tasks.find((item) => item.id === plainOne.id).steps.length === 1, "被退回的步骤不该留下")
+  const addFine = await request(plainPath, { method: "POST", body: { ...asAlpha, action: "step", add: ["再看效果"] } })
+  assert(addFine.status === 200, "大白话步骤该能加")
+  // A step's own note is a detail: not checked.
+  const noteCode = await request(plainPath, { method: "POST", body: { ...asAlpha, action: "step", step: 1, state: "done", note: "改了 lib/store.ts，tsc 过了" } })
+  assert(noteCode.status === 200, "步骤的 note 可以写技术细节")
+  const reviewBad = await request(plainPath, { method: "POST", body: { ...asAlpha, action: "review", note: "改了 lib/store.ts，跑了 tsc" } })
+  assert(reviewBad.status === 400 && /验收说明/.test(reviewBad.data.error) && /怎么看到效果/.test(reviewBad.data.error), `验收说明第一句夹代码该被退回 ${reviewBad.status} ${reviewBad.data.error}`)
+  assert((await request(`/api/v1/room?project=${project}`)).data.tasks.find((item) => item.id === plainOne.id).review === undefined, "被退回的验收说明不该让待办进入等验收")
+  const reviewFine = await request(plainPath, { method: "POST", body: { ...asAlpha, action: "review", note: "刷新页面，左栏顶上多了一个开关。\n细节：lib/store.ts 的 createTask，tsc 和 eslint 都过了" } })
+  assert(reviewFine.status === 200 && reviewFine.data.task.review?.state === "waiting", `第一句是大白话、后面写代码，该能请验收 ${reviewFine.status} ${reviewFine.data.error}`)
+  // The user's own to-dos are never checked, and a copy of an old one (its
+  // title already stored) goes through for an agent too.
+  const mine = await request("/api/v1/tasks", { method: "POST", body: { as: "human", title: "改 lib/store.ts 的 createTask", owner: `甲${stamp}`, steps: ["改 gist.tsx"] } })
+  assert(mine.status === 201, `用户自己建的待办不该被检查 ${mine.status} ${mine.data.error}`)
+  const copied = await request(`/api/v1/tasks/${mine.data.task.id}`, { method: "POST", body: { ...asAlpha, action: "fork" } })
+  assert(copied.status === 200 && copied.data.task.title === mine.data.task.title, `复制一条旧待办不该被检查 ${copied.status} ${copied.data.error}`)
+
   // Replies are data an agent can read: the inbox says what each line
   // answers, and /messages hands back a whole chain, structured.
   const question = await request("/api/v1/say", { method: "POST", body: { as: "human", text: "回复链的起点" } })
@@ -468,7 +568,7 @@ async function steps(stamp) {
   // Permission prompts: a seat's request waits on the page until the user
   // allows or denies it; full permission lets the rest through at once.
   const seatA = { agentId: alpha.data.agent.id, token: alpha.data.token }
-  const pendingPermit = request("/api/v1/permit", { method: "POST", body: { ...seatA, action: "tool", tool: "Bash", input: { command: "ls /opt" } } })
+  const pendingPermit = request("/api/v1/permit", { method: "POST", body: { ...seatA, action: "tool", tool: "Bash", input: { command: "ls /opt", description: "看看 /opt 下有什么" } } })
   let permitRoom
   for (let tries = 0; tries < 20; tries++) {
     await new Promise((resolve) => setTimeout(resolve, 100))
@@ -477,6 +577,7 @@ async function steps(stamp) {
   }
   const shown = permitRoom.data.permits?.[0]
   assert(shown?.tool === "Bash" && shown.input === "ls /opt" && shown.agentId === seatA.agentId, "权限请求没出现在快照里")
+  assert(shown.plain?.action === "运行一条命令" && shown.plain.why === "看看 /opt 下有什么", `权限卡要先有一句人话：${JSON.stringify(shown.plain)}`)
   const deny = await request("/api/v1/permit", { method: "POST", body: { as: "human", id: shown.id, decision: "deny", note: "先别动" } })
   assert(deny.status === 200, "拒绝失败")
   const denied = await pendingPermit
@@ -553,10 +654,58 @@ async function steps(stamp) {
     body: { ...alphaSeat, action: "wait", id: later.data.message.id, timeoutMs: 1000 },
   })
   assert(timeout.data.timedOut === true && timeout.data.state === "open", "没人回答时应该超时返回")
+
+  // First-layer waiting overview (`GET /api/v1/waiting`, read-only without key):
+  // exposes open asks & waiting reviews across ordinary projects and drops them once handled.
+  {
+    const revTaskRes = await request("/api/v1/tasks", {
+      method: "POST",
+      body: { ...alphaSeat, title: `跨项目等定检查${stamp}`, owner: alpha.data.agent.name, steps: ["做完", "请用户验收"] },
+    })
+    assert(revTaskRes.status === 201, "创建等定检查待办失败")
+    const revTaskId = revTaskRes.data.task.id
+    await request(`/api/v1/tasks/${revTaskId}`, { method: "POST", body: { ...alphaSeat, action: "step", step: 1, state: "done" } })
+    await request(`/api/v1/tasks/${revTaskId}`, { method: "POST", body: { ...alphaSeat, action: "review", note: "功能已备好。" } })
+
+    const wait1 = await request("/api/v1/waiting", { key: false })
+    assert(
+      wait1.status === 200 &&
+        Array.isArray(wait1.data.permits) &&
+        Array.isArray(wait1.data.asks) &&
+        Array.isArray(wait1.data.limited) &&
+        Array.isArray(wait1.data.interrupted) &&
+        Array.isArray(wait1.data.reviews) &&
+        typeof wait1.data.workingTotal === "number",
+      `GET /api/v1/waiting 返回结构不对：${JSON.stringify(wait1.data)}`,
+    )
+    assert(
+      wait1.data.asks.some((item) => item.projectId === project && item.message?.id === later.data.message.id),
+      "GET /api/v1/waiting 应包含当前未回答提问",
+    )
+    assert(
+      wait1.data.reviews.some((item) => item.projectId === project && item.row?.id === revTaskId),
+      "GET /api/v1/waiting 应包含当前等验收待办",
+    )
+
+    // Pass that review directly with explicit project (as the front desk does)
+    const passByProj = await request(`/api/v1/tasks/${revTaskId}`, {
+      method: "POST",
+      body: { as: "human", project, action: "pass" },
+    })
+    assert(passByProj.status === 200 && passByProj.data.task.status === "done", "指定项目通过待办失败")
+  }
+
   await request("/api/v1/say", { method: "POST", body: { as: "human", text: "要", replyTo: later.data.message.id } })
   askRoom = await request(`/api/v1/room?project=${project}`)
   const laterCard = askRoom.data.messages.find((message) => message.id === later.data.message.id)
   assert(laterCard.ask.state === "answered" && !laterCard.ask.handed, "没人在等时回答不该记成已直接交给提问者")
+  {
+    const wait2 = await request("/api/v1/waiting", { key: false })
+    assert(
+      !wait2.data.asks.some((item) => item.message?.id === later.data.message.id),
+      "回答提问后 GET /api/v1/waiting 不应再包含该提问",
+    )
+  }
 
   await request("/api/v1/leave", {
     method: "POST",
@@ -594,9 +743,19 @@ async function steps(stamp) {
   })
   assert(gamma.status === 201, "丙入座失败")
   const gammaSeat = { agentId: gamma.data.agent.id, token: gamma.data.token }
+  // A picture on a message that will be older than the 400 kept in memory.
+  // Not an upload: those are served from data/uploads whatever a message says.
+  const oldFs = await import("node:fs")
+  const oldPath = await import("node:path")
+  const oldDir = oldFs.mkdtempSync(oldPath.join((await import("node:os")).tmpdir(), "bench-old-"))
+  const oldPicture = oldPath.join(oldDir, `早期的图${stamp}.png`)
+  oldFs.writeFileSync(
+    oldPicture,
+    Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==", "base64"),
+  )
   const earlyPhrase = await request("/api/v1/say", {
     method: "POST",
-    body: { ...gammaSeat, text: `早期架构暗语：琥珀星云-${stamp}` },
+    body: { ...gammaSeat, text: `早期架构暗语：琥珀星云-${stamp}`, attachments: [{ path: oldPicture }] },
   })
   assert(earlyPhrase.status === 200, "发早期暗号消息失败")
   const earlyPhraseId = earlyPhrase.data.message.id
@@ -625,6 +784,27 @@ async function steps(stamp) {
   assert(deepRoom.data.totalMessages >= 430, `totalMessages 应反映全量 SQLite 行数，实际 ${deepRoom.data.totalMessages}`)
   assert(!deepRoom.data.messages.some((m) => m.id === earlyAskId), "早期提问卡应当已滑出 400 条热窗口")
   assert(deepRoom.data.openAsks?.some((m) => m.id === earlyAskId), "滑出 400 条热窗口的未答提问卡仍应出现在 openAsks")
+
+  // The picture on that early message still opens (the room once looked for
+  // it only among the 400 in memory and answered 404).
+  const oldImage = await fetch(`${origin}/api/v1/files?path=${encodeURIComponent(oldPicture)}&project=${project}`)
+  await oldImage.arrayBuffer()
+  assert(oldImage.status === 200, `400 条以前的消息里的图片应当还能打开，实际 ${oldImage.status}`)
+  oldFs.rmSync(oldDir, { recursive: true, force: true })
+
+  // A bridge's keep-alive from a seat that is online changes nothing the
+  // page shows: the room's revision stays, so no page is sent the room again.
+  // (Tried a few times: something else in the room may move it in between.)
+  let beatKept = false
+  let beatSeen = ""
+  for (let attempt = 0; attempt < 4 && !beatKept; attempt++) {
+    const revBefore = (await request(`/api/v1/room?project=${project}`)).data.rev
+    const beat = await request("/api/v1/pulse", { method: "POST", body: { ...gammaSeat, keepalive: true } })
+    const revAfter = (await request(`/api/v1/room?project=${project}`)).data.rev
+    beatSeen = `${beat.status}：${revBefore} → ${revAfter}`
+    beatKept = beat.status === 200 && revAfter === revBefore
+  }
+  assert(beatKept, `在线席位的保活不该改房间版本号（${beatSeen}）`)
 
   // Trigram FTS search (>= 3 chars) and short 2-char Chinese search across SQLite messages outside hot window.
   const ftsHit = await request("/api/v1/messages", {
@@ -755,6 +935,10 @@ async function steps(stamp) {
   const mockReliefName = `mockrel_${stamp}`
   const mockSlowName = `mockslow_${stamp}`
   const mockMuteName = `mockmute_${stamp}`
+  // 5-hour allowance that resets in an hour (carries on by itself by default,
+  // t_51220c7e) and a weekly one (stays a card for the user).
+  const mockSoonName = `mocksoon_${stamp}`
+  const mockWeekName = `mockweek_${stamp}`
   // Ends well, and the only thing on stderr is the isolation launcher's socat
   // complaining about a bridged connection (lib/summon.ts withoutBridgeNoise).
   const mockBridgeName = `mockbridge_${stamp}`
@@ -774,6 +958,8 @@ async function steps(stamp) {
   // The checker before the user's sign-off (lib/summon.ts checkTask): its
   // verdict goes by a mark in the task's title.
   const mockCheckName = `mockcheck_${stamp}`
+  const mockCheckAltName = `mockcheck2_${stamp}`
+  const checkCmd = `node -e "const t = process.argv[2] || ''; if (t.includes('【慢复验】')) { setTimeout(() => console.log('复验结论：通过\\n类别：跑得出\\n慢复验通过\\n没验到的：无'), 900); } else if (t.includes('【没过】')) { console.log('想了想\\n复验结论：没过\\n按钮没反应\\n没验到的：无'); } else if (t.includes('【没验到】')) { console.log('复验结论：没验到\\n要真机\\n没验到的：全部'); } else if (t.includes('【乱答】')) { console.log('挺好的'); } else if (t.includes('【跑得出】')) { console.log('复验结论：通过\\n类别：跑得出\\n接口断言全过\\n没验到的：无'); } else if (t.includes('【要人看带漏验】')) { console.log('复验结论：通过\\n类别：要人看\\n功能正常\\n没验到的：浅色窄屏排版未看'); } else if (t.includes('【只能本人签】')) { console.log('复验结论：通过\\n类别：只能本人签\\n涉及口令校验\\n没验到的：无'); } else { console.log('复验结论：通过\\n看过了\\n没验到的：无'); }" {uuid} {text}`
   // A woken Codex turn (scripts/codex-app.mjs) against a fake app-server: it
   // says what sandbox and approvals it was given, asks for a command and a
   // file change, and answers with what the room decided.
@@ -839,6 +1025,16 @@ createInterface({ input: process.stdin }).on("line", async (line) => {
           // Ends well without a word, and ends in an error.
           { name: mockMuteName, command: `node -e "setTimeout(() => {}, 200)" {uuid} {text}`, reply: "stdout" },
           {
+            name: mockSoonName,
+            command: `node -e "const d = new Date(Date.now() + 3600000); const h = d.getHours(); console.log('You\\'ve hit your 5-hour limit · resets ' + (h % 12 || 12) + ':' + String(d.getMinutes()).padStart(2, '0') + (h < 12 ? 'am' : 'pm')); process.exit(1)" {uuid} {text}`,
+            reply: "stdout",
+          },
+          {
+            name: mockWeekName,
+            command: `node -e "const d = new Date(Date.now() + 3600000); const h = d.getHours(); console.log('You\\'ve hit your weekly limit · resets ' + (h % 12 || 12) + ':' + String(d.getMinutes()).padStart(2, '0') + (h < 12 ? 'am' : 'pm')); process.exit(1)" {uuid} {text}`,
+            reply: "stdout",
+          },
+          {
             name: mockBridgeName,
             command: `node -e "process.stderr.write('2026/11/14 22:24:33 socat[52] E write(5, 0x58a7e3bed000, 24): Broken pipe\\n')" {uuid} {text}`,
             reply: "stdout",
@@ -866,11 +1062,8 @@ createInterface({ input: process.stdin }).on("line", async (line) => {
           },
           { name: mockGisterBadName, command: `node -e "process.stderr.write('摘要席位故意出错'); process.exit(2)" {uuid} {text}`, reply: "stdout" },
           { name: mockNetName, command: `node -e "process.stderr.write('TRANSPORT: Connection error.'); process.exit(1)" {uuid} {text}`, reply: "stdout" },
-          {
-            name: mockCheckName,
-            command: `node -e "const t = process.argv[2] || ''; console.log(t.includes('【没过】') ? '想了想\\n复验结论：没过\\n按钮没反应\\n没验到的：无' : t.includes('【没验到】') ? '复验结论：没验到\\n要真机\\n没验到的：全部' : t.includes('【乱答】') ? '挺好的' : '复验结论：通过\\n看过了\\n没验到的：无')" {uuid} {text}`,
-            reply: "stdout",
-          },
+          { name: mockCheckName, command: checkCmd, reply: "stdout" },
+          { name: mockCheckAltName, command: checkCmd, reply: "stdout" },
           // "--json": read as a streaming client, like codex-wake.sh.
           { name: mockCodexName, command: `CODEX_BIN=${fakeCodex} node ./scripts/codex-app.mjs {uuid} {text} # --json`, reply: "stdout" },
           {
@@ -993,6 +1186,10 @@ createInterface({ input: process.stdin }).on("line", async (line) => {
     })
     assert(relayTask.status === 201, "创建接力待办失败")
 
+    // With 「5 小时额度到点自动继续」 off, the card waits for the user.
+    const limitOff = await request("/api/v1/retry", { method: "POST", body: { as: "human", limit: false } })
+    assert(limitOff.status === 200 && limitOff.data.limit === false, `关掉到点自动继续失败 ${limitOff.status}`)
+    assert((await request("/api/v1/retry")).data.limit === false, "关掉后 GET 该读到 limit=false")
     await request("/api/v1/say", { method: "POST", body: { as: "human", text: `@丙${stamp} 请开始执行压测` } })
     let limitMsg = null
     for (let tries = 0; tries < 30; tries++) {
@@ -1001,7 +1198,9 @@ createInterface({ input: process.stdin }).on("line", async (line) => {
       limitMsg = snap.data.messages.find((m) => m.limited?.agentId === gammaSeat.agentId)
       if (limitMsg) break
     }
-    assert(limitMsg?.limited?.state === "open", "撞到额度后未生成 open 状态的 LimitedCard")
+    assert(limitMsg?.limited?.state === "open", `关掉自动继续时撞额度该是 open 的卡片，实际 ${limitMsg?.limited?.state}`)
+    await request("/api/v1/retry", { method: "POST", body: { as: "human", limit: true } })
+    assert((await request(`/api/v1/room?project=${project}`)).data.limitResume === true, "打开后房间快照该带 limitResume=true")
 
     const rebindRes = await request(`/api/v1/runs/${limitMsg.limited.runId}`, {
       method: "POST",
@@ -1118,6 +1317,20 @@ createInterface({ input: process.stdin }).on("line", async (line) => {
     }
     const owesOf = async (seatId) => (await request(`/api/v1/room?project=${project}`)).data.agents.find((a) => a.id === seatId)?.owes
 
+    // Only an @ calls a seat: a name written without one is talked about
+    // (「两位开发都交付了，@验收 接手」 woke both developers).
+    const calledSeat = await seatIn("被点名", mockReliefName)
+    const namedSeat = await seatIn("被提到", mockReliefName)
+    const mentionOnly = await request("/api/v1/say", {
+      method: "POST",
+      body: { as: "human", text: `@${calledSeat.name} ${namedSeat.name} 已经交付了，你接手` },
+    })
+    assert((await settled(mentionOnly.data.message.id, calledSeat.id))?.state === "answered", "被 @ 的席位没被叫醒")
+    await new Promise((resolve) => setTimeout(resolve, 500))
+    const notCalled = await callOf(mentionOnly.data.message.id, namedSeat.id)
+    const namedSaid = (await request(`/api/v1/room?project=${project}`)).data.messages.some((m) => m.authorId === namedSeat.id)
+    assert(!notCalled && !namedSaid, `正文里只写了名字、没有 @ 的席位不该被叫醒 ${JSON.stringify(notCalled)}`)
+
     // Busy when called again: the first is being worked on, the second waits
     // in the lane, and each ends answered.
     const slowSeat = await seatIn("去向慢", mockSlowName)
@@ -1145,6 +1358,34 @@ createInterface({ input: process.stdin }).on("line", async (line) => {
     const c3b = await request("/api/v1/say", { method: "POST", body: { as: "human", text: `@${bridgeSeat.name} 隔离启动器` } })
     const end3b = await settled(c3b.data.message.id, bridgeSeat.id)
     assert(end3b?.state === "silent", `只有 socat 桥接报错不该算失败，实际 ${end3b?.state} ${end3b?.note}`)
+
+    // A 5-hour allowance with a reset in an hour: scheduled by itself (on by
+    // default), a little after the reset; the user can still take it back.
+    const limitCardOf = async (seatId) => {
+      for (let tries = 0; tries < 40; tries++) {
+        const found = (await request(`/api/v1/room?project=${project}`)).data.messages.find((m) => m.limited?.agentId === seatId)
+        if (found) return found
+        await new Promise((resolve) => setTimeout(resolve, 100))
+      }
+      return null
+    }
+    const soonSeat = await seatIn("额度五时", mockSoonName)
+    await request("/api/v1/say", { method: "POST", body: { as: "human", text: `@${soonSeat.name} 干活` } })
+    const soonCard = await limitCardOf(soonSeat.id)
+    const soonLead = (soonCard?.limited?.at ?? 0) - (soonCard?.limited?.resetsAt ?? 0)
+    assert(
+      soonCard?.limited?.state === "scheduled" && soonCard.limited.resetsAt > Date.now() && soonLead === 45_000,
+      `撞上 5 小时额度且读得出重置时间，默认该自己定好到点继续（重置后 45 秒），实际 ${JSON.stringify(soonCard?.limited)}`,
+    )
+    const soonCancel = await request(`/api/v1/runs/${soonCard.limited.runId}`, { method: "POST", body: { as: "human", action: "cancel" } })
+    assert(soonCancel.status === 200, `自动定的也能取消，实际 ${soonCancel.status} ${soonCancel.data.error || ""}`)
+    const soonAfter = (await request(`/api/v1/room?project=${project}`)).data.messages.find((m) => m.id === soonCard.id)
+    assert(soonAfter?.limited?.state === "open" && !soonAfter.limited.at, `取消后卡片该回到 open，实际 ${JSON.stringify(soonAfter?.limited)}`)
+    // A weekly allowance is never carried on by itself.
+    const weekSeat = await seatIn("额度每周", mockWeekName)
+    await request("/api/v1/say", { method: "POST", body: { as: "human", text: `@${weekSeat.name} 干活` } })
+    const weekCard = await limitCardOf(weekSeat.id)
+    assert(weekCard?.limited?.state === "open", `每周额度不该自动定时，实际 ${JSON.stringify(weekCard?.limited)}`)
 
     // Ended in an error: failed, with why; and the seat owes that call.
     const badSeat = await seatIn("去向坏", mockBadName)
@@ -1401,6 +1642,10 @@ createInterface({ input: process.stdin }).on("line", async (line) => {
     const passed = await checked(passTask)
     assert(passed?.state === "passed" && passed.note?.includes("看过了") && passed.runId, `复验该通过并记下依据，实际 ${JSON.stringify(passed)}`)
     assert(
+      passed.kind === undefined && passed.gaps === undefined,
+      `复验未写类别、没验到的写「无」时都不该存进 Task.check，实际 ${JSON.stringify(passed)}`,
+    )
+    assert(
       !(await request(`/api/v1/room?project=${project}`)).data.messages.some((m) => m.text?.includes("复验结论")),
       "复验的回答不该进群聊",
     )
@@ -1440,6 +1685,379 @@ createInterface({ input: process.stdin }).on("line", async (line) => {
     await askReview(doer, afterOff)
     await new Promise((resolve) => setTimeout(resolve, 500))
     assert(!(await checkOf(afterOff)), "关掉复验后不该再复验")
+
+    // t_ab05661d: (1) check kind & gaps parsing, (2) single & batch re-check
+    // without duplicate queueing, (3) auto-pick checker rules, and (4) compact
+    // context every 5 consecutive checks on Claude/Codex seats.
+    await asChecker(checkSeat, true)
+    const runKindTask = await taskFor(doer, "【跑得出】逻辑修复")
+    await askReview(doer, runKindTask)
+    const runKindRes = await checked(runKindTask)
+    assert(
+      runKindRes?.state === "passed" && runKindRes.kind === "run" && runKindRes.gaps === undefined,
+      `「类别：跑得出」+「没验到的：无」应存 kind=run 且不存 gaps，实际 ${JSON.stringify(runKindRes)}`,
+    )
+
+    const lookGapsTask = await taskFor(doer, "【要人看带漏验】排版微调")
+    await askReview(doer, lookGapsTask)
+    const lookGapsRes = await checked(lookGapsTask)
+    assert(
+      lookGapsRes?.state === "passed" && lookGapsRes.kind === "look" && lookGapsRes.gaps === "浅色窄屏排版未看",
+      `「类别：要人看」与「没验到的：…」应准确存入 kind/gaps，实际 ${JSON.stringify(lookGapsRes)}`,
+    )
+
+    const youKindTask = await taskFor(doer, "【只能本人签】口令调整")
+    await askReview(doer, youKindTask)
+    const youKindRes = await checked(youKindTask)
+    assert(
+      youKindRes?.state === "passed" && youKindRes.kind === "you" && youKindRes.gaps === undefined,
+      `「类别：只能本人签」应存 kind=you，实际 ${JSON.stringify(youKindRes)}`,
+    )
+
+    // Permission & state guards on manual re-check
+    const agentRecheck = await request(`/api/v1/tasks/${afterOff}`, {
+      method: "POST",
+      body: { agentId: doer.id, token: doer.token, action: "check" },
+    })
+    assert(agentRecheck.status === 403, `普通席位不应能调单条补跑复验，实际 ${agentRecheck.status}`)
+    const notWaitingTask = await taskFor(doer, "还没请验收")
+    const prematureCheck = await request(`/api/v1/tasks/${notWaitingTask}`, {
+      method: "POST",
+      body: { as: "human", action: "check" },
+    })
+    assert(prematureCheck.status === 400, `未请验收的待办补跑复验应返回 400，实际 ${prematureCheck.status}`)
+
+    // Single & batch re-check: must NOT re-queue a check already queued/running,
+    // and batch re-check only queues tasks with no verdict (none / skipped / error).
+    const slowCheckTask = await taskFor(doer, "【慢复验】防重复排")
+    await askReview(doer, slowCheckTask)
+    const slowInitial = await checkOf(slowCheckTask)
+    assert(
+      slowInitial && (slowInitial.state === "queued" || slowInitial.state === "running"),
+      `慢复验刚触发应处于 queued 或 running，实际 ${JSON.stringify(slowInitial)}`,
+    )
+    const slowDupSingle = await request(`/api/v1/tasks/${slowCheckTask}`, {
+      method: "POST",
+      body: { as: "human", action: "check" },
+    })
+    const slowAfterSingle = await checkOf(slowCheckTask)
+    assert(
+      slowDupSingle.status === 200 && slowDupSingle.data.queued === false && slowAfterSingle?.at === slowInitial.at,
+      `已在跑/排着的复验调单条补跑不应重复入队或覆盖 check.at，实际 queued=${slowDupSingle.data.queued} at=${slowAfterSingle?.at} vs ${slowInitial.at}`,
+    )
+
+    const batch1 = await request("/api/v1/check", {
+      method: "POST",
+      body: { as: "human", project },
+    })
+    assert(
+      batch1.status === 200 &&
+        batch1.data.queued >= 4 &&
+        batch1.data.skipped.some((s) => s.taskId === ownTask && s.why.includes("负责人")),
+      `整批补跑应排入无结论待办并把负责人自己的待办列入 skipped，实际 ${JSON.stringify(batch1.data)}`,
+    )
+    assert(
+      (await checkOf(slowCheckTask))?.at === slowInitial.at && (await checkOf(passTask))?.at === passed.at,
+      "整批补跑不应改动已在跑的待办和已有结论待办的 check.at",
+    )
+
+    // Immediate second batch call while those 4+ items are still queued behind slowCheckTask: 0 new queued!
+    const batch2 = await request("/api/v1/check", {
+      method: "POST",
+      body: { as: "human", project },
+    })
+    assert(
+      batch2.status === 200 && batch2.data.queued === 0,
+      `排着的复验未跑完时再调整批补跑不应重复排入，实际 ${JSON.stringify(batch2.data)}`,
+    )
+
+    assert((await checked(slowCheckTask))?.state === "passed", "慢复验最终应通过")
+    assert((await checked(offTask))?.state === "passed", "补跑的 offTask 应得出通过结论")
+    assert((await checked(afterOff))?.state === "passed", "补跑的 afterOff 应得出通过结论")
+    assert((await checked(badTask))?.state === "passed", "之前 error 的 badTask 补跑后应通过")
+    await checked(junkTask)
+
+    // Single manual re-check CAN re-run an already-settled waiting task with a fresh timestamp
+    const rerunSettled = await request(`/api/v1/tasks/${passTask}`, {
+      method: "POST",
+      body: { as: "human", action: "check" },
+    })
+    assert(
+      rerunSettled.status === 200 && rerunSettled.data.queued === true && rerunSettled.data.task.check.at > passed.at,
+      "对已有结论的等验收待办手动单条补跑应更新 check.at 并重跑",
+    )
+    assert((await checked(passTask))?.state === "passed", "单条重跑应顺利完成")
+    await asChecker(checkSeat, false)
+
+    // Auto-pick checker (`ProjectInfo.check = "auto"`) in a clean temporary project
+    let autoProjId = ""
+    try {
+      const mkAuto = await request("/api/v1/projects", {
+        method: "POST",
+        body: { as: "human", name: `自动挑_${stamp}` },
+      })
+      assert(mkAuto.status === 201, `建自动挑测试项目失败 ${mkAuto.status}`)
+      autoProjId = mkAuto.data.project.id
+
+      const joinInAuto = async (name, agentName, uuidTag) => {
+        const res = await request("/api/v1/join", {
+          method: "POST",
+          body: { project: autoProjId, name, model: "m-1", role: "测", agentName, uuid: `${uuidTag}-${stamp}` },
+        })
+        assert(res.status === 200 || res.status === 201, `入座自动挑项目失败 ${name}: ${res.status} ${JSON.stringify(res.data)}`)
+        return { id: res.data.agent.id, name: res.data.agent.name, token: res.data.token }
+      }
+      const autoTask = async (seat, title) => {
+        const created = await request("/api/v1/tasks", {
+          method: "POST",
+          body: { project: autoProjId, agentId: seat.id, token: seat.token, title, owner: seat.name, steps: ["做", "验收"] },
+        })
+        const tid = created.data.task.id
+        await request(`/api/v1/tasks/${tid}`, {
+          method: "POST",
+          body: { project: autoProjId, agentId: seat.id, token: seat.token, action: "step", step: 1, state: "done" },
+        })
+        await request(`/api/v1/tasks/${tid}`, {
+          method: "POST",
+          body: { project: autoProjId, agentId: seat.id, token: seat.token, action: "review", note: "请验" },
+        })
+        return tid
+      }
+      const autoCheckOf = async (tid) =>
+        (await request(`/api/v1/room?project=${autoProjId}`)).data.tasks.find((t) => t.id === tid)?.check
+      const waitAutoCheck = async (tid) => {
+        for (let i = 0; i < 80; i++) {
+          const chk = await autoCheckOf(tid)
+          if (chk && !["queued", "running"].includes(chk.state)) return chk
+          await new Promise((r) => setTimeout(r, 150))
+        }
+        return autoCheckOf(tid)
+      }
+
+      const autoOwner = await joinInAuto("干活甲", mockCheckName, "ao1")
+      // Mutual exclusion between fixed seat checker and check: "auto"
+      await request(`/api/v1/agents/${autoOwner.id}`, {
+        method: "POST",
+        body: { project: autoProjId, as: "human", action: "checker", on: true },
+      })
+      const setAutoRes = await request(`/api/v1/projects/${autoProjId}`, {
+        method: "POST",
+        body: { as: "human", action: "update", name: `自动挑_${stamp}`, check: "auto" },
+      })
+      const snapAuto1 = await request(`/api/v1/room?project=${autoProjId}`)
+      assert(
+        setAutoRes.data.project.check === "auto" &&
+          snapAuto1.data.project.check === "auto" &&
+          !snapAuto1.data.agents.some((a) => a.checker),
+        "开启项目 check='auto' 应清除原有的指定复验席位",
+      )
+      await request(`/api/v1/agents/${autoOwner.id}`, {
+        method: "POST",
+        body: { project: autoProjId, as: "human", action: "checker", on: true },
+      })
+      const snapAuto2 = await request(`/api/v1/room?project=${autoProjId}`)
+      assert(!snapAuto2.data.project.check, "指定具体复验席位后应自动清掉项目的 check='auto'")
+      await request(`/api/v1/projects/${autoProjId}`, {
+        method: "POST",
+        body: { as: "human", action: "update", name: `自动挑_${stamp}`, check: "auto" },
+      })
+
+      // 1) Never pick the task's own owner
+      const soloTid = await autoTask(autoOwner, "只有负责人自己")
+      const soloChk = await autoCheckOf(soloTid)
+      assert(
+        soloChk?.state === "skipped" && !soloChk.by,
+        `自动挑绝不能挑待办负责人自己，应记 skipped，实际 ${JSON.stringify(soloChk)}`,
+      )
+
+      // 2) Never pick a client currently blocked by usage limits
+      const limPeer = await joinInAuto("限额席", mockLimitName, "lim1")
+      await request("/api/v1/say", {
+        method: "POST",
+        body: { project: autoProjId, as: "human", text: `@${limPeer.name} 触发限额` },
+      })
+      for (let i = 0; i < 60; i++) {
+        const snapLim = await request(`/api/v1/room?project=${autoProjId}`)
+        if (snapLim.data.messages.some((m) => m.limited?.agentId === limPeer.id)) break
+        await new Promise((r) => setTimeout(r, 100))
+      }
+      const limSkipTid = await autoTask(autoOwner, "限额客户端不挑")
+      const limSkipChk = await autoCheckOf(limSkipTid)
+      assert(
+        limSkipChk?.state === "skipped" && limSkipChk.note?.includes("限额"),
+        `正被限额拦着的客户端不应被自动挑中，实际 ${JSON.stringify(limSkipChk)}`,
+      )
+
+      // 3) Same-client vs different-client: even when same-client seat is quieter for longer,
+      //    must pick the different-client seat; among idle different-client seats, pick the quietest;
+      //    when one is running, pick the idle one!
+      const sameClientPeer = await joinInAuto("同家老席", mockCheckName, "same1")
+      void sameClientPeer
+      await new Promise((r) => setTimeout(r, 30))
+      const diffOldPeer = await joinInAuto("异家久闲", mockCheckAltName, "diff1")
+      await new Promise((r) => setTimeout(r, 30))
+      const diffNewPeer = await joinInAuto("异家新动", mockCheckAltName, "diff2")
+
+      const diffPickTid = await autoTask(autoOwner, "【慢复验】优先挑不同家且最久没动")
+      const diffPickInitial = await autoCheckOf(diffPickTid)
+      assert(
+        diffPickInitial?.by === diffOldPeer.id,
+        `同家与不同家都在时应优先挑不同家，且挑最久没动的异家久闲（${diffOldPeer.name}），实际挑了 ${diffPickInitial?.name}`,
+      )
+
+      // While diffOldPeer is still running that 900ms check, ask another review: must pick idle diffNewPeer!
+      const idlePickTid = await autoTask(autoOwner, "优先挑没在跑的异家席")
+      const idlePickChk = await waitAutoCheck(idlePickTid)
+      assert(
+        idlePickChk?.by === diffNewPeer.id && idlePickChk?.state === "passed",
+        `异家久闲正在跑复验时应挑没在跑的异家新动（${diffNewPeer.name}），实际挑了 ${idlePickChk?.name}`,
+      )
+      assert((await waitAutoCheck(diffPickTid))?.state === "passed", "异家久闲的慢复验应完成")
+
+      // 4) Peers first (t_50597554): a seat that has had a to-do of its own in this project is
+      //    picked before seats that never have, even ones on a different client.
+      const peerOwnTid = await autoTask(sameClientPeer, "同家老席自己的活")
+      const peerOwnChk = await waitAutoCheck(peerOwnTid)
+      assert(
+        peerOwnChk?.by === autoOwner.id && peerOwnChk?.state === "passed",
+        `复验人应先从在项目里干过活的席位里挑（${autoOwner.name}），实际挑了 ${peerOwnChk?.name}（${JSON.stringify(peerOwnChk)}）`,
+      )
+      const peerPickTid = await autoTask(autoOwner, "干过活的同家席优先于没干过活的异家席")
+      const peerPickChk = await waitAutoCheck(peerPickTid)
+      assert(
+        peerPickChk?.by === sameClientPeer.id && peerPickChk?.state === "passed",
+        `干过活的同家席应优先于没干过活的异家席，实际挑了 ${peerPickChk?.name}`,
+      )
+
+      // 5) A seat whose check could not run is left alone for a while: the next one goes to another.
+      const badPeer = await joinInAuto("坏复验", mockBadName, "bad1")
+      await waitAutoCheck(await autoTask(badPeer, "坏席自己的活"))
+      const failTid = await autoTask(autoOwner, "先落到会出错的席位上")
+      const failChk = await waitAutoCheck(failTid)
+      assert(
+        failChk?.by === badPeer.id && failChk?.state === "error" && failChk.note?.includes("复验没跑成"),
+        `干过活的异家席（会出错）应先被挑中并记没跑成，实际 ${JSON.stringify(failChk)}`,
+      )
+      const afterFailTid = await autoTask(autoOwner, "刚没跑成的席位不再挑")
+      const afterFailChk = await waitAutoCheck(afterFailTid)
+      assert(
+        afterFailChk?.by === sameClientPeer.id && afterFailChk?.state === "passed",
+        `刚才复验没跑成的席位这次不应再被挑中，实际挑了 ${afterFailChk?.name}（${JSON.stringify(afterFailChk)}）`,
+      )
+
+      // 6) 「查过没问题的，自动替我收下」 (t_491538da): with the room's switch on,
+      //    a check that passes as 跑得出 lets the room pass the to-do itself;
+      //    one the user has to look at stays waiting.
+      try {
+        const autoOn = await request("/api/v1/deputy", { method: "POST", body: { as: "human", action: "auto", on: true } })
+        assert(autoOn.status === 200 && autoOn.data.on === true, `打开「自动收下」失败 ${autoOn.status} ${autoOn.data.error || ""}`)
+        await new Promise((r) => setTimeout(r, 5))
+        const taskNow = async (tid) => (await request(`/api/v1/room?project=${autoProjId}`)).data.tasks.find((t) => t.id === tid)
+        const autoRunTid = await autoTask(autoOwner, "【跑得出】自动收下")
+        let autoRun = null
+        for (let i = 0; i < 80; i++) {
+          autoRun = await taskNow(autoRunTid)
+          if (autoRun?.review?.state === "passed") break
+          await new Promise((r) => setTimeout(r, 150))
+        }
+        assert(
+          autoRun?.review?.state === "passed" && autoRun.review.deputy?.seatId === "room" && autoRun.status === "done",
+          `开关开着、复验跑得出：房间该自己收下，实际 ${JSON.stringify(autoRun?.review)} ${JSON.stringify(autoRun?.check)}`,
+        )
+        const lookTid = await autoTask(autoOwner, "【要人看带漏验】不自动收")
+        const lookChk = await waitAutoCheck(lookTid)
+        await new Promise((r) => setTimeout(r, 200))
+        const look = await taskNow(lookTid)
+        assert(lookChk?.state === "passed" && look?.review?.state === "waiting", `要人看的复验通过了也不该自动收，实际 ${JSON.stringify(look?.review)}`)
+      } finally {
+        await request("/api/v1/deputy", { method: "POST", body: { as: "human", action: "auto", on: false } })
+      }
+    } finally {
+      if (autoProjId) {
+        await request(`/api/v1/projects/${autoProjId}`, {
+          method: "POST",
+          body: { as: "human", action: "delete", confirm: "删除" },
+        }).catch(() => {})
+      }
+    }
+
+    // Compact context every 5 consecutive checks on a Claude/Codex checker seat
+    let compactProjId = ""
+    const compactLogFile = pathMod.join(osMod.tmpdir(), `bench-check-compact-${stamp}.log`)
+    try {
+      const preAdapters = (await request("/api/v1/adapters")).data.agents.map(({ name, command, reply }) => ({ name, command, reply }))
+      const fakeClaudeCheckCmd = `node -e "const fs = require('fs'); const t = process.argv[2] || ''; if (t.trim() === '/compact') { fs.appendFileSync('${compactLogFile}', 'compact\\n'); console.log('Compacted'); } else { console.log('复验结论：通过\\n类别：跑得出\\n通过\\n没验到的：无'); }" {uuid} {text}`
+      const patchedAdapters = [
+        ...preAdapters.filter((a) => a.name !== "claude"),
+        { name: "claude", command: fakeClaudeCheckCmd, reply: "stdout" },
+      ]
+      await request("/api/v1/adapters", { method: "POST", body: { as: "human", agents: patchedAdapters } })
+      try {
+        const mkComp = await request("/api/v1/projects", {
+          method: "POST",
+          body: { as: "human", name: `复验压缩_${stamp}` },
+        })
+        compactProjId = mkComp.data.project.id
+        const cOwnerRes = await request("/api/v1/join", {
+          method: "POST",
+          body: { project: compactProjId, name: "压缩做事", model: "m", role: "做", agentName: mockMuteName, uuid: `co-${stamp}` },
+        })
+        const cCheckerRes = await request("/api/v1/join", {
+          method: "POST",
+          body: { project: compactProjId, name: "Claude复验", model: "claude-sonnet", role: "验", agentName: "claude", uuid: `cc-${stamp}` },
+        })
+        const cOwner = { id: cOwnerRes.data.agent.id, name: cOwnerRes.data.agent.name, token: cOwnerRes.data.token }
+        const cCheckerId = cCheckerRes.data.agent.id
+        await request(`/api/v1/agents/${cCheckerId}`, {
+          method: "POST",
+          body: { project: compactProjId, as: "human", action: "checker", on: true },
+        })
+
+        for (let k = 1; k <= 5; k++) {
+          const ct = await request("/api/v1/tasks", {
+            method: "POST",
+            body: { project: compactProjId, agentId: cOwner.id, token: cOwner.token, title: `连验第${k}条`, owner: cOwner.name, steps: ["做", "验收"] },
+          })
+          const ctid = ct.data.task.id
+          await request(`/api/v1/tasks/${ctid}`, {
+            method: "POST",
+            body: { project: compactProjId, agentId: cOwner.id, token: cOwner.token, action: "step", step: 1, state: "done" },
+          })
+          await request(`/api/v1/tasks/${ctid}`, {
+            method: "POST",
+            body: { project: compactProjId, agentId: cOwner.id, token: cOwner.token, action: "review", note: "验" },
+          })
+          for (let w = 0; w < 60; w++) {
+            const chk = (await request(`/api/v1/room?project=${compactProjId}`)).data.tasks.find((t) => t.id === ctid)?.check
+            if (chk && !["queued", "running"].includes(chk.state)) break
+            await new Promise((r) => setTimeout(r, 100))
+          }
+          if (k === 4) {
+            const fsTmp = await import("node:fs")
+            assert(!fsTmp.existsSync(compactLogFile), "连着复验不到 5 条时不应提前触发压缩")
+          }
+        }
+        const fsTmp = await import("node:fs")
+        for (let w = 0; w < 40; w++) {
+          if (fsTmp.existsSync(compactLogFile)) break
+          await new Promise((r) => setTimeout(r, 100))
+        }
+        assert(
+          fsTmp.existsSync(compactLogFile) && fsTmp.readFileSync(compactLogFile, "utf8").trim() === "compact",
+          "Claude/Codex 席位连着复验满 5 条后应自动触发一次上下文压缩",
+        )
+      } finally {
+        await request("/api/v1/adapters", { method: "POST", body: { as: "human", agents: preAdapters } }).catch(() => {})
+      }
+    } finally {
+      ;(await import("node:fs")).rmSync(compactLogFile, { force: true })
+      if (compactProjId) {
+        await request(`/api/v1/projects/${compactProjId}`, {
+          method: "POST",
+          body: { as: "human", action: "delete", confirm: "删除" },
+        }).catch(() => {})
+      }
+    }
 
     // Codex seats under the room's permissions (scripts/codex-app.mjs): it
     // may write in its workspace and asks on the page for more; with full
@@ -1492,6 +2110,9 @@ createInterface({ input: process.stdin }).on("line", async (line) => {
     // paused so queued messages never storm-spawn on boot; open calls whose
     // process is gone settle to "cut" while queued ones stay "queued"; and
     // runs that were still "running" become interrupted and are announced once.
+    // Then the room takes them up by itself, one seat at a time (here 0.4s
+    // after the start, 1.5s apart; really 60s and 30s). A pause the user made,
+    // or one left from an earlier restart, stays.
     const { execFileSync } = await import("node:child_process")
     const { mkdtempSync } = await import("node:fs")
     const restartDir = mkdtempSync(pathMod.join(osMod.tmpdir(), "bench-restart-"))
@@ -1524,8 +2145,21 @@ createInterface({ input: process.stdin }).on("line", async (line) => {
           const { startRun } = await import("./lib/runs.ts");
           const projId = listProjects()[0].id;
           inProject(projId, () => {
-            const qJoined = join({ name: "重启排队席", model: "mock-1", role: "测试", agentName: "claude", uuid: "sess-restart-q" });
-            const rJoined = join({ name: "重启打断席", model: "mock-1", role: "测试", agentName: "claude", uuid: "sess-restart-r" });
+            const qJoined = join({ name: "重启排队席", model: "mock-1", role: "测试", agentName: ${JSON.stringify(mockReliefName)}, uuid: "sess-restart-q" });
+            const rJoined = join({ name: "重启打断席", model: "mock-1", role: "测试", agentName: ${JSON.stringify(mockReliefName)}, uuid: "sess-restart-r" });
+            const uJoined = join({ name: "重启前手停席", model: "mock-1", role: "测试", agentName: ${JSON.stringify(mockReliefName)}, uuid: "sess-restart-u" });
+            const oJoined = join({ name: "上次重启停席", model: "mock-1", role: "测试", agentName: ${JSON.stringify(mockReliefName)}, uuid: "sess-restart-o" });
+            const pJoined = join({ name: "手停又在跑席", model: "mock-1", role: "测试", agentName: ${JSON.stringify(mockReliefName)}, uuid: "sess-restart-p" });
+            const mP = say({ as: "human", text: "@手停又在跑席 跑着时被我暂停" }).message;
+            dbSaveLane(pJoined.agent.id, projId, { paused: true, pending: [], hops: 0 });
+            const pausedRun = startRun(pJoined.agent.id, "手停又在跑席", "reply", { project: projId, body: "用户：@手停又在跑席 跑着时被我暂停", replyTo: mP.id });
+            markCalls([mP.id], pJoined.agent.id, "started", { runId: pausedRun.id });
+            const mU = say({ as: "human", text: "@重启前手停席 我先暂停了" }).message;
+            const mO = say({ as: "human", text: "@上次重启停席 上次重启就停着" }).message;
+            markCalls([mU.id], uJoined.agent.id, "queued");
+            markCalls([mO.id], oJoined.agent.id, "queued");
+            dbSaveLane(uJoined.agent.id, projId, { paused: true, pending: [{ id: mU.id, line: "用户：@重启前手停席 我先暂停了" }], hops: 0 });
+            dbSaveLane(oJoined.agent.id, projId, { paused: true, restartPaused: true, pending: [{ id: mO.id, line: "用户：@上次重启停席 上次重启就停着" }], hops: 0 });
             const qId = qJoined.agent.id;
             const rId = rJoined.agent.id;
             const mQ = say({ as: "human", text: "@重启排队席 排队等重启" }).message;
@@ -1542,7 +2176,7 @@ createInterface({ input: process.stdin }).on("line", async (line) => {
               replyTo: mR.id,
             });
             markCalls([mR.id], rId, "started", { runId: deadRun.id });
-            console.log(JSON.stringify({ projId, qId, rId, mQId: mQ.id, mRId: mR.id, deadRunId: deadRun.id }));
+            console.log(JSON.stringify({ projId, qId, rId, uId: uJoined.agent.id, oId: oJoined.agent.id, pId: pJoined.agent.id, pausedRunId: pausedRun.id, mQId: mQ.id, mRId: mR.id, deadRunId: deadRun.id }));
           });
           process.exit(0);
           `,
@@ -1561,14 +2195,30 @@ createInterface({ input: process.stdin }).on("line", async (line) => {
           const { ensureSummon } = await import("./lib/summon.ts");
           const { snapshot, inProject } = await import("./lib/store.ts");
           const { getRun } = await import("./lib/runs.ts");
+          const started = Date.now();
           ensureSummon();
-          const snap = inProject(${JSON.stringify(pre.projId)}, () => snapshot());
-          const dead = getRun(${JSON.stringify(pre.deadRunId)});
-          console.log(JSON.stringify({ snap, dead }));
+          // Copied now: the room keeps changing these objects as it resumes.
+          const snap = JSON.parse(JSON.stringify(inProject(${JSON.stringify(pre.projId)}, () => snapshot())));
+          const dead = JSON.parse(JSON.stringify(getRun(${JSON.stringify(pre.deadRunId)})));
+          const answeredAt = {};
+          const stateOf = (s, messageId, seatId) => s.messages.find((m) => m.id === messageId)?.calls?.find((c) => c.id === seatId)?.state;
+          let late = snap;
+          while (Date.now() - started < 8000 && Object.keys(answeredAt).length < 2) {
+            await new Promise((r) => setTimeout(r, 50));
+            late = inProject(${JSON.stringify(pre.projId)}, () => snapshot());
+            for (const [seat, messageId] of [[${JSON.stringify(pre.rId)}, ${JSON.stringify(pre.mRId)}], [${JSON.stringify(pre.qId)}, ${JSON.stringify(pre.mQId)}]]) {
+              if (!answeredAt[seat] && stateOf(late, messageId, seat) === "answered") answeredAt[seat] = Date.now() - started;
+            }
+          }
+          const pausedRun = getRun(${JSON.stringify(pre.pausedRunId)});
+          console.log(JSON.stringify({ snap, dead, answeredAt, late, pausedRun }));
           process.exit(0);
           `,
         ],
-        { env: { ...process.env, BENCH_DATA_DIR: restartDir }, encoding: "utf8" },
+        {
+          env: { ...process.env, BENCH_DATA_DIR: restartDir, BENCH_RESTART_RESUME_MS: "400", BENCH_RESTART_RESUME_GAP_MS: "1500" },
+          encoding: "utf8",
+        },
       )
       const post = JSON.parse(afterBootOut.trim().split("\n").at(-1))
       const qAgent = post.snap.agents.find((a) => a.id === pre.qId)
@@ -1591,6 +2241,25 @@ createInterface({ input: process.stdin }).on("line", async (line) => {
         interruptedMsg?.interrupted?.some((item) => item.runId === pre.deadRunId),
         `重启后房间应发出包含被打断 runId 的 interrupted 通知消息`,
       )
+      assert(interruptedMsg.text.includes("稍后自动接上"), `重启通知应说房间会自己接上：${interruptedMsg.text}`)
+      const tR = post.answeredAt[pre.rId]
+      const tQ = post.answeredAt[pre.qId]
+      assert(tR >= 400 && tQ >= 400, `重启后应先等一会儿再接上，不是一启动就叫：${JSON.stringify(post.answeredAt)}`)
+      assert(tR && tQ && tQ - tR >= 1000, `重启后应一个一个接上（被打断的先、排队的隔一段再接）：${JSON.stringify(post.answeredAt)}`)
+      // Paused by the user while a wake was running: the wake is cut, but it
+      // stays for the user's 「重新叫醒」, and so does the pause.
+      const pSeat = post.late.agents.find((a) => a.id === pre.pId)
+      assert(
+        !post.pausedRun?.resumedAt && pSeat?.queuePaused === true,
+        `用户暂停着、又有一轮在跑的席位，重启后不该被自动叫回、暂停也不该解开：${JSON.stringify({ resumedAt: post.pausedRun?.resumedAt, paused: pSeat?.queuePaused })}`,
+      )
+      for (const id of [pre.uId, pre.oId]) {
+        const seat = post.late.agents.find((a) => a.id === id)
+        assert(
+          seat?.queuePaused === true && seat?.queuedCount === 1,
+          `重启前就暂停着的（用户停的、上次重启没接的）不该被自动接上：${seat?.name} ${JSON.stringify({ paused: seat?.queuePaused, n: seat?.queuedCount })}`,
+        )
+      }
     } finally {
       rmSync(restartDir, { recursive: true, force: true })
     }
@@ -2422,8 +3091,34 @@ createInterface({ input: process.stdin }).on("line", async (line) => {
           dutyMatch[0].includes("bench_peek") &&
           dutyMatch[0].includes("t_…") &&
           dutyMatch[0].includes("m_…") &&
-          dutyMatch[0].includes("只读阶段"),
+          // Drafts only: relay / nudge / review cards count once the user clicks (t_e8af4882).
+          ["bench_relay", "bench_nudge", "bench_review_card", "点了才算", "不能替他验收"].every((part) => dutyMatch[0].includes(part)),
         `前台唤起提示词须包含 <=200 字的完整职责说明，实际：${dutyMatch ? `${dutyMatch[0].length}字: ${dutyMatch[0]}` : capturedFrontPrompt.slice(-400)}`,
+      )
+      // Sign-off by the desk (t_50597554): the three tools are named, and
+      // signing is the one exception to 「不能替他验收」, only for what the
+      // room marks 「可代签」.
+      assert(
+        ["bench_review_batch", "bench_check", "bench_accept", "只有一个例外", "可代签", "被拒就留给他"].every((part) => capturedFrontPrompt.includes(part)),
+        `前台守则要写明整批卡片、补跑复验和代签的例外，实际：${capturedFrontPrompt.slice(capturedFrontPrompt.indexOf("你是前台"), capturedFrontPrompt.indexOf("你是前台") + 420)}`,
+      )
+
+      // At the desk (a chat with its one AI) a message with no @ wakes it too.
+      fsFront.rmSync(wakeOutFile, { force: true })
+      for (let i = 0; i < 40 && (await frontReq("/api/v1/room", { proj: frontId })).data.agents?.some((a) => a.runId); i++) await sleepFront(150)
+      const plainAsk = await frontReq("/api/v1/say", {
+        method: "POST",
+        proj: frontId,
+        body: { as: "human", text: `不带艾特再问一次_${stamp}` },
+      })
+      assert(plainAsk.status === 200 && !plainAsk.data.message?.text?.includes("@"), `前台不带 @ 的话正文里不该补 @：${plainAsk.raw}`)
+      for (let i = 0; i < 40; i++) {
+        if (fsFront.existsSync(wakeOutFile)) break
+        await sleepFront(150)
+      }
+      assert(
+        fsFront.existsSync(wakeOutFile) && fsFront.readFileSync(wakeOutFile, "utf8").includes(`不带艾特再问一次_${stamp}`),
+        "前台里不带 @ 的话也要叫醒值班的 AI",
       )
 
       // Ordinary project wake prompt must NOT include reception duty
@@ -2440,16 +3135,32 @@ createInterface({ input: process.stdin }).on("line", async (line) => {
         "bench-mcp.mjs tools/list 应注册 bench_overview 与 bench_peek",
       )
 
+      // The desk seats one AI (t_31cd7f9e): a second one is turned away, and
+      // the bridge passes the room's reason on instead of 「名字被占」.
       const frontMcpJoin = await frontMcp.rpc("tools/call", {
         name: "bench_join",
         arguments: { project: "前台", name: `前台桥${stamp}`, model: "claude", role: "前台" },
       })
-      assert(!frontMcpJoin.result?.isError, `前台 MCP 入座失败：${JSON.stringify(frontMcpJoin)}`)
+      const secondText = frontMcpJoin.result?.content?.[0]?.text ?? ""
+      assert(
+        frontMcpJoin.result?.isError === true && secondText.includes("前台只坐一个") && !secondText.includes("名字"),
+        `前台已有人值班时，第二个 MCP 入座应被拒并说明原因，实际：${JSON.stringify(frontMcpJoin)}`,
+      )
+      // The bridge then sits in the desk's seat, the way the room hands a
+      // session its seat (lib/spawn.ts giveSeat).
+      fsFront.mkdirSync(pathFront.join(mcpStateRoot, "bench-mcp"), { recursive: true })
+      fsFront.writeFileSync(
+        pathFront.join(mcpStateRoot, "bench-mcp", `claude-front_mcp2_${stamp}.json`),
+        JSON.stringify({ agentId: frontWakeSeat.data.agent.id, token: frontWakeSeat.data.token, name: `前台总管${stamp}`, project: frontId, cursor: 0 }),
+      )
+      frontMcp.child.kill()
+      const deskMcp = startMcpClient(`front_mcp2_${stamp}`)
+      await deskMcp.rpc("initialize", { protocolVersion: "2025-06-18" })
 
       const snapBizBefore = await frontReq("/api/v1/room", { proj: bizProjectId })
       const bizSeqBefore = snapBizBefore.data.seq
 
-      const mcpOverview = await frontMcp.rpc("tools/call", { name: "bench_overview", arguments: {} })
+      const mcpOverview = await deskMcp.rpc("tools/call", { name: "bench_overview", arguments: {} })
       assert(!mcpOverview.result?.isError, `前台调 bench_overview 失败：${JSON.stringify(mcpOverview)}`)
       const overviewText = mcpOverview.result?.content?.[0]?.text ?? ""
       assert(overviewText.length > 0 && overviewText.length <= 4600, `bench_overview 输出应精简控制在几千字内，实际 ${overviewText.length}`)
@@ -2471,7 +3182,7 @@ createInterface({ input: process.stdin }).on("line", async (line) => {
       )
 
       // Peek by project name via MCP
-      const mcpPeek = await frontMcp.rpc("tools/call", {
+      const mcpPeek = await deskMcp.rpc("tools/call", {
         name: "bench_peek",
         arguments: { project: bizName },
       })
@@ -2555,6 +3266,180 @@ createInterface({ input: process.stdin }).on("line", async (line) => {
         "调完 overview/peek 后别的项目席位原有的未读消息和 seenSeq 必须保持原样",
       )
 
+      // 9) t_ab05661d: front-desk `bench_check` tool + settle notification waking
+      //    the reception seat + `bench_overview` / `bench_peek` carrying check state, kind & gaps
+      const plainCheckDenied = await ordinaryMcp.rpc("tools/call", {
+        name: "bench_check",
+        arguments: { project: bizProjectId },
+      })
+      assert(plainCheckDenied.result?.isError === true, "普通项目席位调 bench_check 必须被 403 拒绝")
+
+      // First call `bench_check` via MCP while bizProject has check off -> returns skipped (proving MCP tool works)
+      const mcpCheckBeforeAuto = await deskMcp.rpc("tools/call", {
+        name: "bench_check",
+        arguments: { project: bizName },
+      })
+      const mcpBeforeText = mcpCheckBeforeAuto.result?.content?.[0]?.text || ""
+      assert(
+        !mcpCheckBeforeAuto.result?.isError && mcpBeforeText.includes("没开复验"),
+        `前台经 MCP 调 bench_check（未开复验时）应返回未开复验原因，实际 ${mcpBeforeText}`,
+      )
+
+      const mockBizCheckKind = `mockbizchk_${stamp}`
+      const mockBizCheckScript = pathFront.join(mcpStateRoot, `mock-biz-chk-${stamp}.mjs`)
+      fsFront.writeFileSync(
+        mockBizCheckScript,
+        `console.log("复验结论：通过\\n类别：要人看\\n对账逻辑通过\\n没验到的：导出报表视觉样式需肉眼看")\n`,
+        "utf8",
+      )
+      const curFrontAdapters = (await frontReq("/api/v1/adapters")).data.agents.map(({ name, command, reply }) => ({ name, command, reply }))
+      await frontReq("/api/v1/adapters", {
+        method: "POST",
+        body: {
+          as: "human",
+          agents: [
+            ...curFrontAdapters,
+            {
+              name: mockBizCheckKind,
+              command: `node '${mockBizCheckScript}' {uuid} {text}`,
+              reply: "stdout",
+            },
+          ],
+        },
+      })
+      await joinBizSeat("业务复验员", { agentName: mockBizCheckKind, uuid: `bizchk_${stamp}` })
+      await sleepFront(25)
+      await frontReq("/api/v1/pulse", {
+        method: "POST",
+        proj: bizProjectId,
+        body: { agentId: bizOweSeat.id, token: bizOweSeat.token, keepalive: true },
+      })
+      await frontReq(`/api/v1/projects/${bizProjectId}`, {
+        method: "POST",
+        body: { as: "human", action: "update", name: bizName, dir: bizDir, check: "auto" },
+      })
+
+      // Ensure any previous wake on frontWakeSeat has settled before clearing wakeOutFile
+      for (let i = 0; i < 40; i++) {
+        const fSnap = await frontReq("/api/v1/room", { proj: frontId })
+        if (!fSnap.data.agents?.some((a) => a.runId)) break
+        await sleepFront(150)
+      }
+      const sessRestore = await frontReq("/api/v1/session", {
+        method: "POST",
+        proj: frontId,
+        body: {
+          agentId: frontWakeSeat.data.agent.id,
+          token: frontWakeSeat.data.token,
+          agentName: mockFrontKind,
+          uuid: `front_wake_${stamp}`,
+        },
+      })
+      assert(sessRestore.status === 200, `恢复前台模拟会话失败：${sessRestore.status} ${sessRestore.raw}`)
+      fsFront.rmSync(wakeOutFile, { force: true })
+
+      const frontBatchCheck = await frontReq("/api/v1/check", {
+        method: "POST",
+        body: {
+          agentId: frontWakeSeat.data.agent.id,
+          token: frontWakeSeat.data.token,
+          project: bizName,
+        },
+      })
+      assert(
+        frontBatchCheck.status === 200 && frontBatchCheck.data.queued === 1,
+        `前台席位调 /api/v1/check 应成功排入业务房未复验待办，实际 ${frontBatchCheck.raw}`,
+      )
+
+      // The pick takes a seat that has had a to-do of its own here first (t_50597554): that is
+      // 欠活员, whose client fails. The check can't run; the desk is told all the same, and how
+      // to go on.
+      for (let i = 0; i < 60; i++) {
+        if (fsFront.existsSync(wakeOutFile)) break
+        await sleepFront(150)
+      }
+      const failedRound = (await frontReq("/api/v1/room", { proj: bizProjectId })).data.tasks?.find((t) => t.id === tReviewId)?.check
+      const failedPrompt = fsFront.existsSync(wakeOutFile) ? fsFront.readFileSync(wakeOutFile, "utf8") : ""
+      assert(
+        failedRound?.state === "error" &&
+          failedRound.by === bizOweSeat.id &&
+          failedPrompt.includes("通过 0 件、没过 0 件、没验到 0 件（另有 1 件跳过或没跑成）") &&
+          failedPrompt.includes("bench_check 再排一次"),
+        `复验没跑成也要叫醒前台并告诉它再排一次，实际 check=${JSON.stringify(failedRound)} 说明：${failedPrompt.slice(failedPrompt.indexOf("巡查"), failedPrompt.indexOf("巡查") + 400)}`,
+      )
+      // Queued again: the seat that just failed is left alone, the other one checks.
+      for (let i = 0; i < 40; i++) {
+        const fSnap = await frontReq("/api/v1/room", { proj: frontId })
+        if (!fSnap.data.agents?.some((a) => a.runId)) break
+        await sleepFront(150)
+      }
+      fsFront.rmSync(wakeOutFile, { force: true })
+      const frontBatchAgain = await frontReq("/api/v1/check", {
+        method: "POST",
+        body: { agentId: frontWakeSeat.data.agent.id, token: frontWakeSeat.data.token, project: bizName },
+      })
+      assert(frontBatchAgain.status === 200 && frontBatchAgain.data.queued === 1, `没跑成的应能再排一次，实际 ${frontBatchAgain.raw}`)
+
+      // Wait for check to finish AND front desk AI to be woken with the hidden settled summary
+      for (let i = 0; i < 60; i++) {
+        if (fsFront.existsSync(wakeOutFile)) break
+        await sleepFront(150)
+      }
+      if (!fsFront.existsSync(wakeOutFile)) {
+        const bDbg = (await frontReq("/api/v1/room", { proj: bizProjectId })).data.tasks?.find((t) => t.id === tReviewId)?.check
+        const fDbg = (await frontReq("/api/v1/room", { proj: frontId })).data
+        throw new Error(
+          `项目排着的复验全部有了结论后应自动叫醒前台值班 AI | bizCheck=${JSON.stringify(bDbg)} | frontAgents=${JSON.stringify(fDbg.agents)} | frontLastMsg=${JSON.stringify(fDbg.messages?.slice(-2))}`,
+        )
+      }
+      const settledPrompt = fsFront.readFileSync(wakeOutFile, "utf8")
+      assert(
+        settledPrompt.includes(bizName) &&
+          settledPrompt.includes("通过 1 件、没过 0 件、没验到 0 件") &&
+          settledPrompt.includes("用户看不到这条"),
+        `前台收到的复验完成说明应包含项目名与通过/没过/没验到计数，实际：\n${settledPrompt
+          .split("\n")
+          .filter((line) => /巡查|复验|bench_peek/.test(line))
+          .join("\n")
+          .slice(0, 1500)}\ncheck=${JSON.stringify((await frontReq("/api/v1/room", { proj: bizProjectId })).data.tasks?.find((t) => t.id === tReviewId)?.check)}`,
+      )
+      const frontSnapAfterCheck = await frontReq("/api/v1/room", { proj: frontId })
+      assert(
+        frontSnapAfterCheck.data.messages.some((m) => m.risk?.items?.some((it) => it.projectId === bizProjectId && it.text.includes("通过 1 件"))),
+        "前台房间应记下一条带 risk 的隐藏复验汇总消息",
+      )
+
+      // Verify bench_overview and bench_peek now include check state, kind ("look" / 要人看), and hasGaps
+      const ovWithCheck = await frontReq("/api/v1/overview", {
+        method: "POST",
+        body: { agentId: frontWakeSeat.data.agent.id, token: frontWakeSeat.data.token },
+      })
+      const bizOvProj = ovWithCheck.data.projects.find((p) => p.id === bizProjectId)
+      const ovRev = bizOvProj?.waitingReviews?.find((r) => r.id === tReviewId)
+      assert(
+        ovRev?.checkState === "passed" &&
+          ovRev?.checkKind === "look" &&
+          ovRev?.hasGaps === true &&
+          ovWithCheck.data.text.includes("复验通过") &&
+          ovWithCheck.data.text.includes("要人看") &&
+          ovWithCheck.data.text.includes("有没验到的"),
+        `bench_overview 应带上等验收待办的复验状态、类别与有无漏验，实际 ${JSON.stringify(ovRev)}`,
+      )
+
+      const peekWithCheck = await frontReq("/api/v1/peek", {
+        method: "POST",
+        body: { agentId: frontWakeSeat.data.agent.id, token: frontWakeSeat.data.token, project: bizProjectId },
+      })
+      const peekRev = peekWithCheck.data.waiting?.reviews?.find((r) => r.id === tReviewId)
+      assert(
+        peekRev?.checkState === "passed" &&
+          peekRev?.checkKind === "look" &&
+          peekRev?.hasGaps === true &&
+          peekWithCheck.data.text.includes("类别：要人看") &&
+          peekWithCheck.data.text.includes("有没验到的（导出报表视觉样式需肉眼看）"),
+        `bench_peek 应带上等验收待办的复验状态、类别与漏验内容，实际 ${JSON.stringify(peekRev)}`,
+      )
+
       fsFront.rmSync(bizDir, { recursive: true, force: true })
     } finally {
       for (const proc of mcpProcs) {
@@ -2594,6 +3479,23 @@ createInterface({ input: process.stdin }).on("line", async (line) => {
       }
       fsFront.rmSync(mcpStateRoot, { recursive: true, force: true })
     }
+  }
+
+  // ---- Auto-continue (t_4494da49) & watched projects (t_0fefb44c) ----
+  {
+    const { execFileSync: execSubTest } = await import("node:child_process")
+    const pathSub = await import("node:path")
+    const keyPath = process.env.BENCH_KEY_FILE || `${process.cwd()}/data/human-key`
+    execSubTest(process.execPath, [pathSub.join(process.cwd(), "scripts/test-continue.mjs")], {
+      cwd: process.cwd(),
+      env: { ...process.env },
+      encoding: "utf8",
+    })
+    execSubTest(process.execPath, [pathSub.join(process.cwd(), "scripts/test-watch.mjs")], {
+      cwd: process.cwd(),
+      env: { ...process.env, BENCH_URL: origin, BENCH_KEY_FILE: keyPath },
+      encoding: "utf8",
+    })
   }
 
   const cleared = await request("/api/v1/reset", {

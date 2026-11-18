@@ -1,6 +1,13 @@
 import { awaitingReview } from "@/lib/review"
 import type { Message, PublicAgent, SeatOwes, Task } from "@/lib/types"
 
+type ContinueWokenReader = (seatId: string, tasks: Task[], nonRoomCallIds: string[]) => SeatOwes["woken"]
+type OwesGlobal = typeof globalThis & { __benchContinueWoken?: ContinueWokenReader }
+
+export function registerContinueWoken(fn: ContinueWokenReader) {
+  ;(globalThis as OwesGlobal).__benchContinueWoken = fn
+}
+
 // Seats that have stopped with work still on them. A seat that stops on
 // purpose says why (a to-do marked 卡住, a question to the user, a to-do
 // waiting for the user's sign-off); one that just went quiet is what this
@@ -35,22 +42,27 @@ export function owesOf(
 
     const owed = owedTasks(seat.id, tasks)
     const calls: SeatOwes["calls"] = []
+    const nonRoomCallIds: string[] = []
     for (const message of messages) {
       if (message.recalled) continue
       const call = message.calls?.find((item) => item.id === seat.id)
       if (!call || (call.state !== "failed" && call.state !== "cut")) continue
       if (call.at <= (wokeAt ?? 0)) continue
       calls.push({ messageId: message.id, from: message.authorName, state: call.state, at: call.at })
+      if (message.authorId !== "room") nonRoomCallIds.push(message.id)
     }
     if (owed.length === 0 && calls.length === 0) continue
 
     const latest = Math.max(0, ...owed.map((task) => task.updatedAt), ...calls.map((call) => call.at))
+    const builtCalls = calls.slice(-5)
+    const woken = (globalThis as OwesGlobal).__benchContinueWoken?.(seat.id, owed, nonRoomCallIds)
     found.set(seat.id, {
       since: Math.max(seat.lastSeenAt, seat.ranUntil ?? 0, latest),
       tasks: owed.slice(0, 5).map((task) => {
         return { id: task.id, title: task.title, step: stepOf(task) }
       }),
-      calls: calls.slice(-5),
+      calls: builtCalls,
+      ...(woken ? { woken } : {}),
     })
   }
   return found

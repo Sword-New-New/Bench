@@ -1,5 +1,6 @@
 import { connection } from "next/server"
 
+import { boot } from "@/lib/boot"
 import { handle, json } from "@/lib/http"
 import { joinPrompt } from "@/lib/prompt"
 import { currentProjectInfo, inRequest, userName } from "@/lib/store"
@@ -8,6 +9,7 @@ import { currentProjectInfo, inRequest, userName } from "@/lib/store"
 export async function GET(request: Request) {
   try {
     await connection()
+    await boot()
     const host = request.headers.get("x-forwarded-host") ?? request.headers.get("host")
     const proto = request.headers.get("x-forwarded-proto") ?? "http"
     const origin = host ? `${proto}://${host}` : "http://127.0.0.1:4399"

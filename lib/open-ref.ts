@@ -1,4 +1,5 @@
 import { execFile, spawn } from "node:child_process"
+import { pathToFileURL } from "node:url"
 import { existsSync, statSync } from "node:fs"
 import os from "node:os"
 import path from "node:path"
@@ -73,6 +74,56 @@ export async function openFile(given: string, line: number | undefined, from?: s
     }, 300)
   })
   return { file, line: tool.jumps && !isDir ? (line ?? null) : null, editor: tool.name }
+}
+
+function launch(command: string, args: string[], what: string) {
+  return new Promise<void>((resolve, reject) => {
+    const child = spawn(command, args, { detached: true, stdio: "ignore", env: desktopEnv() })
+    child.once("error", (error) => reject(new ApiError(500, `打不开${what}（${command}）：${error.message}`)))
+    // It either fails to start right away or it's off on its own.
+    setTimeout(() => {
+      child.unref()
+      resolve()
+    }, 300)
+  })
+}
+
+function run(command: string, args: string[]) {
+  return new Promise<void>((resolve, reject) =>
+    execFile(command, args, { timeout: 5_000, env: desktopEnv() }, (error) => (error ? reject(error) : resolve())),
+  )
+}
+
+// The default for a path in a message (m_494f8d51): the file manager, at the
+// file's folder with the file selected; a folder opens as itself. Linux asks
+// whatever file manager owns org.freedesktop.FileManager1 (deepin's, Nautilus,
+// Dolphin, Nemo…) to show it, and falls back to opening the folder with the
+// desktop's default; macOS and Windows have their own "reveal".
+export async function revealFile(given: string, from?: string) {
+  const file = resolveFile(given, from)
+  const isDir = statSync(file).isDirectory()
+  if (process.platform === "darwin") {
+    await launch("open", isDir ? [file] : ["-R", file], "访达")
+  } else if (process.platform === "win32") {
+    await launch("explorer", isDir ? [file] : [`/select,${file}`], "资源管理器")
+  } else {
+    const uri = pathToFileURL(file).href
+    try {
+      await run("dbus-send", [
+        "--session",
+        "--print-reply",
+        "--dest=org.freedesktop.FileManager1",
+        "--type=method_call",
+        "/org/freedesktop/FileManager1",
+        `org.freedesktop.FileManager1.${isDir ? "ShowFolders" : "ShowItems"}`,
+        `array:string:${uri}`,
+        "string:",
+      ])
+    } catch {
+      await launch("xdg-open", [isDir ? file : path.dirname(file)], "文件管理器")
+    }
+  }
+  return { file, line: null, editor: "文件管理器" }
 }
 
 function git(dir: string, args: string[], maxBuffer = 8 * 1024 * 1024) {

@@ -59,22 +59,6 @@ export function mentionedAgentIds(
   return [...ids]
 }
 
-export function namedAgentIds(
-  text: string,
-  agents: { id: string; name: string }[],
-): string[] {
-  const ids = new Set(mentionedAgentIds(text, agents))
-  const sorted = [...agents].sort((a, b) => b.name.length - a.name.length)
-  for (const agent of sorted) {
-    const named = new RegExp(
-      `(?<![\\p{L}\\p{N}_-])${escapeRegExp(agent.name)}(?![\\p{L}\\p{N}_-])`,
-      "u",
-    )
-    if (named.test(text)) ids.add(agent.id)
-  }
-  return [...ids]
-}
-
 export function unknownMentions(text: string, names: string[]): string[] {
   const known = new Set(names)
   const found = new Set<string>()

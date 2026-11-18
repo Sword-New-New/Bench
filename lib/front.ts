@@ -1,8 +1,12 @@
-import { dbCountOpenAsks, dbLoadTalkPage } from "@/lib/db"
+import { dbCountOpenAsks, dbLoadTalkPage, dbSetMeta } from "@/lib/db"
 import { ApiError, asRecord, asString } from "@/lib/http"
 import { stepOf } from "@/lib/owes"
-import { awaitingReview } from "@/lib/review"
+import { enqueuePushEvent } from "@/lib/push"
+import { awaitingReview, signLane } from "@/lib/review"
 import {
+  autoAcceptSince,
+  FRONT_NOTICE_KEY,
+  readFrontNotice,
   brokenCallsInRoom,
   inProject,
   listProjects,
@@ -11,7 +15,8 @@ import {
   snapshot,
   talkLine,
 } from "@/lib/store"
-import type { CallState, Message, PublicAgent, Task } from "@/lib/types"
+import type { CallState, Message, PublicAgent, Task, TaskCheck } from "@/lib/types"
+import { getWatchedProject } from "@/lib/watch"
 
 const STATUS_LABEL: Record<PublicAgent["status"], string> = {
   working: "在做",
@@ -44,9 +49,60 @@ const CALL_STATE_LABEL: Record<CallState, string> = {
 const CHECK_STATE_LABEL: Record<string, string> = {
   queued: "排队复验",
   running: "正在复验",
+  passed: "复验通过",
   done: "复验完成",
-  failed: "复验失败",
+  failed: "复验没过",
+  unverified: "复验没验到",
   skipped: "跳过复验",
+  error: "复验没跑成",
+}
+
+const CHECK_KIND_LABEL: Record<NonNullable<TaskCheck["kind"]>, string> = {
+  run: "跑得出",
+  look: "要人看",
+  you: "只能本人签",
+}
+
+// Which lane the room puts a waiting to-do in (lib/review.ts signLane), in the
+// desk's words, so it knows what it may sign without trying: the reasons are
+// written for the user's card, where 「你」 is the user.
+// 「可代签」 only for one asked after the room-wide switch went on (lib/deputy.ts).
+function laneText(task: Task, user: string, withReason = true): string {
+  const { lane, why } = signLane(task)
+  const since = autoAcceptSince()
+  if (lane === "batch") {
+    if (since && (task.review?.at ?? 0) > since) return "可代签"
+    if (!withReason) return "可整批"
+    return since ? "可整批（开关打开前就在等，留给用户）" : "可整批（没开自动收下）"
+  }
+  const tag = lane === "look" ? `要 ${user} 看` : `只能 ${user} 签`
+  // The overview has a budget for its whole text: the reason is in bench_peek.
+  if (!withReason) return tag
+  const reason = why.startsWith("有没验到的") ? why : why.replace(/，只能你签$/, "").replaceAll("你", ` ${user} `).trim()
+  return `${tag}（${reason}）`
+}
+
+// A project's sign-off settings, for the same reason. The switch is the
+// room's: with it on, a project without a chosen checker has one picked.
+function signSettings(check: "auto" | undefined, checker: string | undefined, watchedSeat?: string): string {
+  const on = autoAcceptSince() > 0
+  const watchPart = watchedSeat ? ` ｜ 盯防：统筹 ${watchedSeat}` : ""
+  return `复验：${checker ? `指定 ${checker}` : check === "auto" || on ? "自动挑" : "没开"} ｜ 代签：${on ? "开着" : "没开"}${watchPart}`
+}
+
+function formatCheckBrief(check: TaskCheck | undefined, withNote = false): string {
+  if (!check) return "未复验"
+  const state = CHECK_STATE_LABEL[check.state] ?? check.state
+  const by = check.name ? `（${check.name}）` : ""
+  const kind = check.kind ? ` · 类别：${CHECK_KIND_LABEL[check.kind]}` : ""
+  const hasVerdict = check.state === "passed" || check.state === "failed" || check.state === "unverified"
+  const gaps = check.gaps
+    ? ` · 有没验到的（${flatClip(check.gaps, 40)}）`
+    : hasVerdict
+      ? " · 无没验到的"
+      : ""
+  const note = withNote && check.note ? ` — ${flatClip(check.note, 140)}` : ""
+  return `${state}${by}${kind}${gaps}${note}`
 }
 
 const OVERVIEW_SEAT_COMPACT_THRESHOLD = 4
@@ -131,7 +187,8 @@ export function frontOverview(input: unknown) {
       user = snap.userName
       const openAsks = dbCountOpenAsks(proj.id)
       const pendingPermits = snap.permits.length
-      const waitingReviews = snap.tasks.filter(awaitingReview).length
+      const waitingReviewTasks = snap.tasks.filter(awaitingReview)
+      const waitingReviews = waitingReviewTasks.length
       const unfinishedTasks = snap.tasks.filter((t) => t.status !== "done").length
 
       const askingIds = new Set<string>()
@@ -140,7 +197,7 @@ export function frontOverview(input: unknown) {
       }
       const permitSeatIds = new Set(snap.permits.map((p) => p.agentId))
       const reviewOwnerIds = new Set(
-        snap.tasks.filter(awaitingReview).flatMap((t) => (t.ownerId ? [t.ownerId] : [])),
+        waitingReviewTasks.flatMap((t) => (t.ownerId ? [t.ownerId] : [])),
       )
 
       const compactSeats = snap.agents.length > OVERVIEW_SEAT_COMPACT_THRESHOLD
@@ -158,6 +215,7 @@ export function frontOverview(input: unknown) {
         name: proj.name,
         ...(proj.dir ? { dir: proj.dir } : {}),
         ...(proj.front ? { front: true as const } : {}),
+        ...(proj.check ? { check: proj.check } : {}),
         lastAt: proj.lastAt,
         lastAtText: formatStamp(proj.lastAt),
         waiting: {
@@ -166,6 +224,20 @@ export function frontOverview(input: unknown) {
           reviews: waitingReviews,
           total: openAsks + pendingPermits + waitingReviews,
         },
+        waitingReviews: waitingReviewTasks.map((t) => ({
+          id: t.id,
+          title: t.title,
+          ownerName: t.ownerName,
+          checkState: t.check?.state ?? null,
+          checkKind: t.check?.kind ?? null,
+          hasGaps: Boolean(t.check?.gaps),
+          ...(t.check?.gaps ? { gaps: t.check.gaps } : {}),
+          lane: signLane(t).lane,
+          laneText: laneText(t, snap.userName, false),
+        })),
+        signSettings: proj.front
+          ? ""
+          : signSettings(proj.check, snap.agents.find((seat) => seat.checker)?.name, getWatchedProject(proj.id)?.seatName),
         unfinishedTasks,
         seatTotal: snap.agents.length,
         seats: shownSeats.map((s) => ({
@@ -182,44 +254,65 @@ export function frontOverview(input: unknown) {
     }),
   )
 
-  const blocks: string[] = [`并坐全部项目一览（共 ${items.length} 个项目，用户：${user}）`]
-  for (const item of items) {
-    const tag = item.front ? " [前台]" : ""
-    const dirPart = item.dir ? ` · 目录 ${item.dir}` : ""
-    const lines: string[] = [
-      `\n■ ${item.name}（${item.id}）${tag}${dirPart}`,
-      `  最后动静：${item.lastAtText} ｜ 未完待办：${item.unfinishedTasks} ｜ 等 ${user}：提问 ${item.waiting.asks} · 权限 ${item.waiting.permits} · 验收 ${item.waiting.reviews}`,
+  // Over the budget, the summaries go first: what waits on the user in every
+  // project matters more to the desk than how each summary starts. Only then
+  // is the text cut from the end.
+  const render = (withSummary: boolean) => {
+    const blocks: string[] = [
+      `并坐全部项目一览（共 ${items.length} 个项目，用户：${user}）${withSummary ? "" : "\n（内容太长，各项目的摘要开头没列，要看用 bench_peek）"}`,
     ]
-    if (item.seatTotal === 0) {
-      lines.push("  席位：暂无席位")
-    } else {
-      for (const s of item.rawShownSeats) {
-        lines.push(formatOverviewSeat(s))
+    for (const item of items) {
+      const tag = item.front ? " [前台]" : ""
+      const dirPart = item.dir ? ` · 目录 ${item.dir}` : ""
+      const lines: string[] = [
+        `\n■ ${item.name}（${item.id}）${tag}${dirPart}`,
+        `  最后动静：${item.lastAtText} ｜ 未完待办：${item.unfinishedTasks} ｜ 等 ${user}：提问 ${item.waiting.asks} · 权限 ${item.waiting.permits} · 验收 ${item.waiting.reviews}${item.signSettings ? ` ｜ ${item.signSettings}` : ""}`,
+      ]
+      if (item.waitingReviews.length > 0) {
+        for (const r of item.waitingReviews.slice(0, 6)) {
+          const stateText = r.checkState ? CHECK_STATE_LABEL[r.checkState] ?? r.checkState : "未复验"
+          const kindText = r.checkKind ? `·${CHECK_KIND_LABEL[r.checkKind]}` : ""
+          const gapText = r.hasGaps ? "·有没验到的" : r.checkState === "passed" || r.checkState === "failed" || r.checkState === "unverified" ? "·无没验到的" : ""
+          lines.push(`  - 等验收 [${r.id}] ${flatClip(r.title, 26)}：${stateText}${kindText}${gapText} → ${r.laneText}`)
+        }
+        if (item.waitingReviews.length > 6) {
+          lines.push(`  - 另有 ${item.waitingReviews.length - 6} 件等验收（用 bench_peek 查看）`)
+        }
       }
-      if (item.quietSeatNames.length > 0) {
-        const names =
-          item.quietSeatNames.length > 8
-            ? `${item.quietSeatNames.slice(0, 8).join("、")} 等 ${item.quietSeatNames.length} 个`
-            : item.quietSeatNames.join("、")
-        lines.push(`  - 其余无事席位（${item.quietSeatNames.length}）：${names}`)
+      if (item.seatTotal === 0) {
+        lines.push("  席位：暂无席位")
+      } else {
+        for (const s of item.rawShownSeats) {
+          lines.push(formatOverviewSeat(s))
+        }
+        if (item.quietSeatNames.length > 0) {
+          const names =
+            item.quietSeatNames.length > 8
+              ? `${item.quietSeatNames.slice(0, 8).join("、")} 等 ${item.quietSeatNames.length} 个`
+              : item.quietSeatNames.join("、")
+          lines.push(`  - 其余无事席位（${item.quietSeatNames.length}）：${names}`)
+        }
       }
+      if (withSummary && item.summaryHead) {
+        lines.push(`  摘要开头：${item.summaryHead}`)
+      }
+      blocks.push(lines.join("\n"))
     }
-    if (item.summaryHead) {
-      lines.push(`  摘要开头：${item.summaryHead}`)
-    }
-    blocks.push(lines.join("\n"))
+    return blocks.join("\n")
   }
 
-  let text = blocks.join("\n")
+  let text = render(true)
+  if (text.length > OVERVIEW_TEXT_BUDGET) text = render(false)
   if (text.length > OVERVIEW_TEXT_BUDGET) {
     text = `${text.slice(0, OVERVIEW_TEXT_BUDGET)}…（已截断，用 bench_peek 查看单个项目完整详情）`
   }
 
   return {
     userName: user,
-    projects: items.map(({ rawShownSeats: _raw, ...pub }) => {
+    projects: items.map(({ rawShownSeats: _raw, signSettings: _settings, ...pub }) => {
       void _raw
-      return pub
+      void _settings
+      return { ...pub, waitingReviews: pub.waitingReviews.map(({ laneText: _text, ...review }) => (void _text, review)) }
     }),
     text,
   }
@@ -249,9 +342,7 @@ function formatTaskDetail(task: Task): string {
       : task.review?.state === "rejected"
         ? ` · 已打回${task.review.note ? `（原因：${flatClip(task.review.note, 80)}）` : ""}`
         : ""
-  const chk = task.check
-    ? ` · 复验[${CHECK_STATE_LABEL[task.check.state] ?? task.check.state}·${task.check.name}${task.check.note ? `：${flatClip(task.check.note, 80)}` : ""}]`
-    : ""
+  const chk = task.check ? ` · 复验[${formatCheckBrief(task.check, true)}]` : ""
   return `- [${task.id}] ${task.title} ｜ ${TASK_STATUS_LABEL[task.status] ?? task.status} ｜ ${owner} ｜ ${progress}${curText}${rev}${chk}`
 }
 
@@ -287,7 +378,11 @@ export function frontPeek(input: unknown) {
 
     const sections: string[] = []
     sections.push(
-      `【项目「${target.name}」（${target.id}）】${target.front ? " [前台]" : ""}${target.dir ? ` · 目录：${target.dir}` : ""}`,
+      `【项目「${target.name}」（${target.id}）】${target.front ? " [前台]" : ""}${target.dir ? ` · 目录：${target.dir}` : ""}${
+        target.front
+          ? ""
+          : ` · ${signSettings(target.check, snap.agents.find((seat) => seat.checker)?.name, getWatchedProject(target.id)?.seatName)}`
+      }`,
     )
 
     // 1. 房间摘要全文
@@ -316,11 +411,9 @@ export function frontPeek(input: unknown) {
     }
     for (const t of waitingReviews) {
       const note = t.review?.note ? `说明：${flatClip(t.review.note, 200)}` : "（无验收说明）"
-      const chk = t.check
-        ? ` ｜ 复验（${t.check.name}）：${CHECK_STATE_LABEL[t.check.state] ?? t.check.state}${t.check.note ? ` — ${flatClip(t.check.note, 160)}` : ""}`
-        : ""
+      const chk = ` ｜ 复验：${formatCheckBrief(t.check, true)}`
       waitLines.push(
-        `- 等验收 [${t.id}] 「${t.title}」 · 负责人 ${t.ownerName ?? "未认领"} · ${note}${chk}`,
+        `- 等验收 [${t.id}] 「${t.title}」 · 负责人 ${t.ownerName ?? "未认领"} · ${note}${chk} ｜ ${laneText(t, user)}`,
       )
     }
     sections.push(
@@ -393,6 +486,10 @@ export function frontPeek(input: unknown) {
           note: t.review?.note,
           at: t.review?.at,
           check: t.check,
+          checkState: t.check?.state ?? null,
+          checkKind: t.check?.kind ?? null,
+          hasGaps: Boolean(t.check?.gaps),
+          lane: signLane(t).lane,
         })),
       },
       tasks: unfinished.map((t) => {
@@ -432,4 +529,29 @@ export function frontPeek(input: unknown) {
       text: sections.join("\n"),
     }
   })
+}
+
+// The desk's AI telling the user something they should know now (AverageJoe
+// 2026-11-16, t_d82796d3): one line of summary, pushed to the phone (lib/push.ts,
+// skipped while the page is in front, as every push) and shown by the page as
+// a notice or a desktop notification (components/room/notify.ts, via
+// Project.notice). Signed 「前台」: to the user the desk is one. At most one
+// every NOTICE_GAP, so a busy desk can't make the phone buzz on and on.
+const NOTICE_GAP = 5 * 60_000
+const NOTICE_MAX = 80
+
+export function frontNotify(input: unknown) {
+  const { frontProjectId } = requireFrontSeat(input)
+  const text = (asString(asRecord(input).text) ?? "").replace(/\s+/g, " ").trim()
+  if (!text) throw new ApiError(400, "要推的话不能是空的")
+  if ([...text].length > NOTICE_MAX) throw new ApiError(400, `推送只发一句摘要，${NOTICE_MAX} 字以内；细节写在回答里`)
+  const last = readFrontNotice()
+  const now = Date.now()
+  if (last && now - last.at < NOTICE_GAP) {
+    throw new ApiError(429, `刚推过一条，${Math.ceil((NOTICE_GAP - (now - last.at)) / 60_000)} 分钟内先别再推；要说的写在回答里就行`)
+  }
+  const notice = { id: `n_${now.toString(36)}`, at: now, text }
+  dbSetMeta(FRONT_NOTICE_KEY, JSON.stringify(notice))
+  enqueuePushEvent({ projectId: frontProjectId, getProjectName: () => "前台", kind: "front", actor: "", what: "提醒你", snippet: text }, 1_000)
+  return { notice }
 }

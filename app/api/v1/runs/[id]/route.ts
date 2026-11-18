@@ -11,7 +11,7 @@ export async function GET(_request: Request, ctx: RouteContext<"/api/v1/runs/[id
     await boot()
     const { id } = await ctx.params
     const run = getRun(id)
-    if (!run) throw new ApiError(404, "这次唤起的记录已经不在了")
+    if (!run) throw new ApiError(404, "这次叫醒的记录已经不在了")
     return json({ run })
   } catch (error) {
     return handle(error)
@@ -29,7 +29,7 @@ export async function POST(request: Request, ctx: RouteContext<"/api/v1/runs/[id
     if (body.action === "rewake") return json(rewake(id))
     if (body.action === "rebind") {
       const run = getRun(id)
-      if (!run?.limited) throw new ApiError(404, "这次唤起没撞额度，或者记录已经不在了")
+      if (!run?.limited) throw new ApiError(404, "这次叫醒没撞额度，或者记录已经不在了")
       return json(await inSeat(run.agentId, () => rebindSession(run.agentId, { ...body, fromRunId: id })))
     }
     if (typeof body.action === "string" && ["schedule", "now", "cancel", "dismiss"].includes(body.action)) {

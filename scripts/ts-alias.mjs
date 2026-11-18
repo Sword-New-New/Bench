@@ -18,7 +18,16 @@ export async function resolve(specifier, context, next) {
     }
   }
   if (target) return next(pathToFileURL(target).href, context)
-  return next(specifier, context)
+  try {
+    return await next(specifier, context)
+  } catch (error) {
+    // A package subpath without an exports map (next/server): Node wants the
+    // file name; bundlers don't. Try it with .js.
+    if (error?.code === "ERR_MODULE_NOT_FOUND" && !specifier.startsWith(".") && !path.extname(specifier)) {
+      return next(`${specifier}.js`, context)
+    }
+    throw error
+  }
 }
 
 // Say up front that the room's .ts files are ES modules (no package "type"),

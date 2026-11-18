@@ -157,6 +157,21 @@ export async function quotas(fresh = false): Promise<{ at: number; quotas: Quota
   return { at: current.cached.at, quotas: withReports(current.cached.quotas) }
 }
 
+// Synchronous check against cached / plugin-reported quotas (no subprocess or
+// network I/O): true when this client kind is known to be out of allowance right
+// now and its reset time has not passed yet.
+export function isKindQuotaBlocked(kind: string, now = Date.now()): boolean {
+  if (!kind) return false
+  const list = withReports(state().cached?.quotas ?? [])
+  const found = list.find((item) => item.kind === kind)
+  if (!found || !found.blocked) return false
+  const full = found.windows.filter((w) => w.percent >= 100)
+  if (full.length > 0 && full.every((w) => w.resetsAt && Date.parse(w.resetsAt) <= now)) {
+    return false
+  }
+  return true
+}
+
 function empty(kind: string, patch: Partial<Quota>): Quota {
   return { kind, account: false, plan: null, windows: [], blocked: false, error: null, ...patch }
 }

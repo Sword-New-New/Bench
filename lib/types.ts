@@ -116,6 +116,9 @@ export type SeatOwes = {
   since: number
   tasks: { id: string; title: string; step?: string }[]
   calls: { messageId: string; from: string; state: CallState; at: number }[]
+  // How many times the room has already woken this seat to carry on with this
+  // batch of owed work, and when it last did (lib/continue.ts).
+  woken?: { count: number; at: number }
 }
 
 export type SeatProfile = {
@@ -190,6 +193,10 @@ export type Message = {
   authorColor: string
   authorDemo: boolean
   text: string
+  // When the room itself wakes a seat to carry on (lib/continue.ts), `text` is
+  // the short one-line note shown in the thread while `wakeText` is the fuller
+  // instruction handed to that seat.
+  wakeText?: string
   mentions: string[]
   replyTo?: string
   taskId?: string
@@ -221,13 +228,86 @@ export type Message = {
   end?: boolean
   // The user's verdict on a task, said in the room. The owner goes by seat
   // id: the page shows its current name, agents get the id.
-  verdict?: { taskId: string; state: "passed" | "rejected"; ownerId?: string }
+  verdict?: {
+    taskId: string
+    state: "passed" | "rejected" | "reopened"
+    ownerId?: string
+    // Passed by the front desk on the user's behalf, or reopened after one (lib/deputy.ts).
+    deputy?: true
+  }
   // A room note after a restart: the wakes it cut off.
   interrupted?: InterruptedRun[]
   // A wake that ended on the account's usage limit, with the card to carry on
   // after it resets.
   limited?: LimitedRun
+  // At the front desk: something its AI drafted for the user to send into a
+  // project, or a to-do there waiting on them (lib/front-relay.ts). Nothing
+  // leaves the desk until the user clicks.
+  relay?: RelayDraft
+  // The patrol's note at the front desk (lib/patrol.ts): risks it found in
+  // the projects, for the desk's AI. Not shown on the page.
+  risk?: PatrolRisk
   createdAt: number
+}
+
+export type RiskLevel = "high" | "mid" | "low"
+
+export type RiskItem = {
+  // Stable for the same thing (a task, a call, a run), so it is told once.
+  key: string
+  projectId: string
+  project: string
+  level: RiskLevel
+  text: string
+  // Where to look: a task, a message, or a seat's run.
+  ref?: { kind: "task" | "message" | "run"; id: string }
+}
+
+export type PatrolRisk = {
+  items: RiskItem[]
+  // More found than the note lists.
+  more?: number
+}
+
+export type SignLane = "batch" | "look" | "you"
+
+export type RelayBatchItem = {
+  project: string
+  projectName: string
+  taskId: string
+  title: string
+  lane: SignLane
+  line: string
+  why?: string
+  note?: string
+  checkNote?: string
+  checkName?: string
+  state?: "passed" | "skipped"
+}
+
+export type RelayDraft = {
+  // relay: the user's words carried to a seat; nudge: asking a stopped seat
+  // where its work stands; review: a to-do waiting for the user's verdict;
+  // batch: a grouped list of waiting reviews across projects.
+  kind: "relay" | "nudge" | "review" | "batch"
+  project: string
+  projectName: string
+  seatId?: string
+  seatName?: string
+  taskId?: string
+  taskTitle?: string
+  // What goes out (relay, nudge); the user may change it before sending.
+  text?: string
+  // The desk's one line on why.
+  why?: string
+  // Items on a batch review card (kind === "batch").
+  items?: RelayBatchItem[]
+  state: "draft" | "sent" | "dropped" | "passed"
+  // The message it became in that project.
+  sentId?: string
+  settledAt?: number
+  // A batch card closed because a newer one took over what still waited on it.
+  replacedBy?: string
 }
 
 export type TaskEvent = {
@@ -281,9 +361,21 @@ export type TaskCheck = {
   name?: string
   // Its reasons, and what it couldn't check; or why it was skipped / failed.
   note?: string
+  // Category written by the checker: run (跑得出), look (要人看), you (只能本人签).
+  kind?: "run" | "look" | "you"
+  // What the checker could not verify (omitted when "无").
+  gaps?: string
   at: number
   // The wake it ran in, to open its steps.
   runId?: string
+}
+
+export type TaskDeputy = {
+  seatId: string
+  seatName: string
+  why: string
+  checkBy?: string
+  checkName?: string
 }
 
 export type TaskReview = {
@@ -292,6 +384,11 @@ export type TaskReview = {
   // Who asked for it, or what the user said sending it back.
   by: string
   note?: string
+  // Passed by the front desk on the user's behalf (lib/deputy.ts).
+  deputy?: TaskDeputy
+  // The user took a deputy pass back. It stays theirs to sign until the owner
+  // asks for review again (a new ask writes a new record without this).
+  reopened?: true
 }
 
 export type TaskStepState = "todo" | "doing" | "done"
@@ -339,6 +436,8 @@ export type ProjectInfo = {
   dir?: string
   // The room's single reception project (「前台」), pinned at the top of the rail.
   front?: true
+  // Automatically pick a checker seat when a task asks for review.
+  check?: "auto"
   createdAt: number
 }
 
@@ -360,6 +459,8 @@ export type Project = ProjectInfo & {
   names: string[]
   // The newest 「【本轮结束】」 in it, for the desktop notification.
   lastEnd?: ProjectEnd
+  // The front desk only: the latest line its AI pushed to the user (lib/front.ts frontNotify).
+  notice?: { id: string; at: number; text: string }
 }
 
 export type ProjectEnd = { id: string; at: number; name: string; color: string; text: string }
@@ -392,6 +493,10 @@ export type PermitRequest = {
   // What it would run or touch.
   input?: string
   reason?: string
+  // In words: what kind of thing it is (运行一条命令, 改文件 x.ts) and, when
+  // the client wrote one, its own sentence on what it is for. The raw tool
+  // name and `input` sit behind a click.
+  plain?: { action: string; why?: string }
   at: number
 }
 
@@ -400,6 +505,9 @@ export type RoomSnapshot = {
   agents: PublicAgent[]
   messages: Message[]
   tasks: Task[]
+  // Total completed tasks in this project (`tasks[]` only includes done tasks
+  // finished within the last 48 hours).
+  doneTotal?: number
   // Open bench_ask questions older than the snapshot's latest 400 messages, so
   // PinnedAsks can still surface and answer them.
   openAsks?: Message[]
@@ -421,6 +529,10 @@ export type RoomSnapshot = {
   userName: string
   // Wakes that failed on the network are tried again by themselves (lib/netfail.ts).
   netRetry: boolean
+  // Carry on by itself after the 5-hour allowance resets (lib/summon.ts autoResumeAt).
+  limitResume: boolean
+  // 「查过没问题的，自动替我收下」, one switch for the room (lib/deputy.ts autoAcceptChecked).
+  autoAccept: boolean
 }
 
 export type Actor = {

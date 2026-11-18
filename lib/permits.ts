@@ -72,7 +72,7 @@ export function setFull(agentId: string, on: boolean) {
 export function permitsFor(project: string): PermitRequest[] {
   return [...permits().pending.values()]
     .filter((item) => item.project === project)
-    .map(({ id, agentId, agentName, runId, kind, tool, input, reason, at }) => ({
+    .map(({ id, agentId, agentName, runId, kind, tool, input, reason, plain, at }) => ({
       id,
       agentId,
       agentName,
@@ -81,6 +81,7 @@ export function permitsFor(project: string): PermitRequest[] {
       tool,
       input,
       reason,
+      plain,
       at,
     }))
 }

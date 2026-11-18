@@ -4,11 +4,12 @@ import { createHash, randomBytes } from "node:crypto"
 import { StringDecoder } from "node:string_decoder"
 
 import { adapterFor, commandFor, summonPath, type Adapter } from "@/lib/adapters"
+import { clearSeatUserStopped, markSeatUserStopped } from "@/lib/continue"
 import { compactEnv, CONTEXT_KINDS, seatContext, type SeatContext } from "@/lib/context"
 import { dbLoadLanes, dbSaveLane } from "@/lib/db"
 import { createParser, liveLine } from "@/lib/events"
 import { ApiError } from "@/lib/http"
-import { registerLaneReader } from "@/lib/lane-state"
+import { isSeatStoppedByUser, registerLaneIdle, registerLaneReader } from "@/lib/lane-state"
 import { detectLimit, whenText } from "@/lib/limits"
 import { commandLine, killTree } from "@/lib/platform"
 import { accepting, deliver, openTerminal } from "@/lib/terminal"
@@ -60,15 +61,23 @@ import {
   userName,
   gisterSeat,
   setMessageGist,
+  limitResume,
   netRetry,
   tasksOwedBy,
+  limitedAgentNames,
+  autoCheckHere,
 } from "@/lib/store"
+import { failureReason } from "@/lib/plain"
 import { GIST_MAX, withAttachments } from "@/lib/text"
-import type { CallState, Message, RoomSummary, Run, Task } from "@/lib/types"
+import type { CallState, Message, PublicAgent, RoomSummary, Run, Task, TaskCheck } from "@/lib/types"
 import { flowsOf } from "@/lib/flow"
 import { isNetworkFailure, retryDelays } from "@/lib/netfail"
 import { stepOf } from "@/lib/owes"
 import { flowSummaryPrompt, flowsToSummarize } from "@/lib/flow-summary"
+import { autoAcceptChecked } from "@/lib/deputy"
+import { noteChecksSettled } from "@/lib/patrol"
+import { isKindQuotaBlocked } from "@/lib/quota"
+import { awaitingReview } from "@/lib/review"
 
 const NOTE_GAP_MS = 30_000
 // After the stream says its turn is over, how long the process may take to exit.
@@ -101,6 +110,9 @@ const SUMMARY_PROMPT_BYTES = 90_000
 type Lane = {
   running: boolean
   paused?: boolean
+  // The pause is the restart's, not the user's: the room takes it off itself
+  // (resumeAfterRestart). Saved, so a later restart can tell them apart.
+  restartPaused?: boolean
   projectId?: string
   // What called it since its last run, by message id, so a recalled or dropped
   // message can be taken back out before the run starts.
@@ -146,6 +158,8 @@ type Lane = {
 type SummonGlobal = typeof globalThis & {
   __benchSummonBound?: boolean
   __benchSummonAnnounced?: boolean
+  // Lanes this start paused because a restart cut their work short.
+  __benchBootPaused?: Set<string>
   __benchTermBound?: boolean
   // Runs the user asked to be woken again after a usage limit: when.
   __benchResumeTimers?: Map<string, NodeJS.Timeout>
@@ -157,6 +171,12 @@ type SummonGlobal = typeof globalThis & {
   // summary seat is woken with them; and how many batches each seat wrote.
   __benchGistGather?: Map<string, { ids: string[]; timer?: NodeJS.Timeout }>
   __benchGistBatches?: Map<string, number>
+  __benchCheckCounts?: Map<string, number>
+  __benchCheckNotified?: Map<string, string>
+  // Seats whose last check could not run, and when (see pickAutoChecker).
+  __benchCheckFailed?: Map<string, number>
+  // Seat id -> when a usage-limit resume last woke it (autoResumeAt).
+  __benchLimitAutoFired?: Map<string, number>
   __benchCheckBound?: boolean
   __benchCalledHop?: Map<string, number>
   __benchSummonAt?: Map<string, number>
@@ -186,9 +206,14 @@ function lanesMap(): Map<string, Lane> {
           row.goal !== undefined ||
           row.whisper !== undefined
         const paused = Boolean(row.paused || hasWork)
+        // Work this restart cut short is taken up again a little later; a
+        // lane already paused before it (by the user, or by an earlier
+        // restart nobody resumed) stays as it was.
+        if (hasWork && !row.paused) bootPaused().add(row.agentId)
         const entry: Lane = {
           running: false,
           paused: paused || undefined,
+          restartPaused: (paused && (row.restartPaused || !row.paused)) || undefined,
           projectId: row.projectId,
           pending: row.pending,
           hops: row.hops,
@@ -250,6 +275,24 @@ registerLaneReader((agentId) => {
     queuedItems: q.pending,
     retry: q.retryAt ? { at: q.retryAt, n: q.retries ?? 1, of: retryDelays().length } : undefined,
   }
+})
+
+registerLaneIdle((agentId) => {
+  const q = lanesMap().get(agentId)
+  if (!q) return true
+  return (
+    !q.running &&
+    !q.paused &&
+    q.pending.length === 0 &&
+    !q.retryAt &&
+    q.carry === undefined &&
+    !q.summary &&
+    !q.compact &&
+    q.goal === undefined &&
+    q.whisper === undefined &&
+    !q.checks?.length &&
+    !q.gists?.length
+  )
 })
 
 // What became of these messages' call to this seat (Message.calls, lib/types.ts
@@ -359,7 +402,7 @@ function envelope(
   // Every feature the user asks for goes on the to-do list on the right, and
   // is worked and accepted along its steps.
   const todo =
-    `${userName()} 要你做新功能时，开工前必须先用 bench_task 建一条待办：title 写功能，steps 拆成几步，owner 填你自己；每开始一步用 bench_step 标 doing，做完标 done，note 写做了什么、怎么验的。已有待办的就接着推进，不要重复建。做完了用 bench_task_update 的 review 请 ${userName()} 验收（note 写怎么看效果）；「验收」那一步只有 ${userName()} 能在右栏点通过或打回，你不要自己勾，被打回会带着原因叫醒你。`
+    `${userName()} 要你做新功能时，开工前必须先用 bench_task 建一条待办：title 写他能得到什么（比如「聊天里长回复先只显示一句结论」），steps 拆成几步，owner 填你自己；标题和每一步都用大白话，别带文件名、函数名、命令、t_ 编号，写了房间会当场退回让你重写，技术细节放 detail 或步骤的 note；每开始一步用 bench_step 标 doing，做完标 done，note 写做了什么、怎么验的。已有待办的就接着推进，不要重复建。做完了用 bench_task_update 的 review 请 ${userName()} 验收（note 第一句写他怎么看到效果，也要大白话，带文件名或命令会被退回；细节写在后面）；「验收」那一步只有 ${userName()} 能在右栏点通过或打回，你不要自己勾，被打回会带着原因叫醒你。`
   // Two agents can keep @-ing each other; the one that sees the round is done ends it.
   const end = replyByStdout
     ? `如果这一轮交接已经完成、不需要谁再接手，回答以「${END_MARK}」开头，写一句做完了什么，不要 @ 任何人。`
@@ -399,14 +442,14 @@ function envelope(
   const digest = skipped > 0 && summary ? `【房间摘要】\n${summary.text}\n\n【最近的原文】\n` : ""
   const isFront = Boolean(currentProjectInfo().front)
   const frontDuty = isFront
-    ? `你是前台，${userName()} 只跟你对接：用 bench_overview 看全部项目概况、bench_peek 看单个项目详情；回答里提到的每件事都要带上项目名和待办（t_…）或消息（m_…）的 id；现在是只读阶段，不能替他验收、批权限或以他的名义说话，需要他去哪个房间处理什么就说清楚。`
+    ? `你是前台，${userName()} 只跟你对接：bench_overview 看全部项目、bench_peek 看单个项目；提到的事都带项目名和 t_…/m_… id；传话用 bench_relay、催人用 bench_nudge、等验收用 bench_review_card，都只是卡片，他点了才算；你不能替他验收、批权限或以他的名义说话，要他去哪个房间处理就说清楚。等验收的有好几件时，用 bench_review_batch 出一张整批卡片，还没复验的先用 bench_check 补跑。只有一个例外：一览里标着「可代签」的待办（项目开着「让前台代签」，房间按复验结果算的），用 bench_accept 替他通过，why 写复验验到了什么；被拒就留给他，不要换办法。他让你盯着某个项目时用 bench_watch 记下项目和统筹（说不用盯了就传 on:false）；盯着的项目全停卡住时，对那个统筹调 bench_nudge 会以前台名义直接发出，不用等他点。有要紧的事要他知道（他可能不在页面前）时，说完再用 bench_notify 推一句 40 字内的摘要到他手机和桌面，别的时候不推。`
     : ""
   const whole = `${frontDuty}${how}${gist}${thread}${todo}${ask}${attach}${permit}${stop}`
   // The same rules in a line, for a session that has them whole further up.
   const brief = [
     "守则同前，要点：",
     isFront
-      ? `你是前台（只读），用 bench_overview / bench_peek 看各项目，每件事带项目名和 t_…/m_… id，要 ${userName()} 去哪个房间处理说清楚；`
+      ? `你是前台，用 bench_overview / bench_peek 看各项目，每件事带项目名和 t_…/m_… id；传话、催人、等验收用 bench_relay / bench_nudge / bench_review_card（几件用 bench_review_batch）起草卡片，${userName()} 点了才算；只有标着「可代签」的用 bench_accept 替他通过，没复验的先 bench_check；他让盯着项目用 bench_watch（盯着的项目对统筹 bench_nudge 直接以前台名义发出）；要紧的事说完用 bench_notify 推一句摘要；`
       : "",
     replyByStdout ? "最后的回答直接输出，会挂成回复；" : "回复用 bench_say；",
     "第一行写一句 60 字以内的结论，群里默认只显示这一行；",
@@ -599,23 +642,11 @@ function shortSys(text: string) {
   return text.length > SYSTEM_MAX ? `${text.slice(0, SYSTEM_MAX - 1)}…` : text
 }
 
-function shortExplain(agentName: string | undefined, failure: string) {
-  if (agentName === "antigravity" && /trajectory .*not found/.test(failure)) return "找不到会话，需重入座"
-  if (agentName === "antigravity" && /stream was interrupted/i.test(failure)) return "中途中断，查权限或重叫"
-  if (agentName === "workbuddy" && /Authentication required|\/login/i.test(failure)) return "未登录（看过程）"
-  if (agentName === "cursor" && /Model unavailable on Free/i.test(failure)) return "免费版不支持该模型"
-  if (agentName === "codex" && /This chat uses (\S+), but your current provider is (\S+?)\./.test(failure)) {
-    return "提供方不匹配，需开新会话"
-  }
-  if (agentName === "dsh" && /cannot compose presets/.test(failure)) return "网页预设会话无法后台叫醒"
-  const first = failure.trim().split("\n")[0]?.trim() ?? "出错"
-  return first.length > 9 ? `${first.slice(0, 8)}…（看过程）` : `${first}（看过程）`
-}
-
 function noteLimit(agent: NonNullable<ReturnType<typeof agentState>>, log: Run, out: string) {
   const hit = limitOf(log, out)
   if (!hit) return false
-  setLimited(log, { resetsAt: hit.resetsAt })
+  const at = autoResumeAt(log, hit)
+  setLimited(log, { resetsAt: hit.resetsAt, resumeAt: at })
   const when = hit.resetsAt ? `${whenText(hit.resetsAt)}重置` : "未写重置时间"
   postLimited(shortSys(`${agent.name} 撞上${hit.label}（${when}）`), {
     runId: log.id,
@@ -623,9 +654,39 @@ function noteLimit(agent: NonNullable<ReturnType<typeof agentState>>, log: Run, 
     agentName: agent.name,
     label: hit.label,
     resetsAt: hit.resetsAt,
-    state: "open",
+    state: at ? "scheduled" : "open",
+    at,
   })
+  if (at) armResume(log.id, at)
   return true
+}
+
+// The user's call (2026-11-16, t_51220c7e): a wake cut off by the 5-hour
+// allowance carries on by itself once it resets, unless they turned that off
+// (limit_resume). Only the short window: a weekly allowance, or a reset more
+// than SHORT_WINDOW_MS away, stays a card for the user to decide.
+const SHORT_WINDOW_MS = 5.5 * 60 * 60_000
+// Woken at the reset and cut off again soon after: the reset time was wrong
+// or the allowance is gone for longer. Don't go round again; the card waits.
+const REHIT_MS = 15 * 60_000
+
+function autoFired() {
+  return (g().__benchLimitAutoFired ??= new Map<string, number>())
+}
+
+function autoResumeAt(log: Run, hit: { label: string; resetsAt?: number }) {
+  if (!limitResume() || !hit.resetsAt || /周/.test(hit.label)) return undefined
+  if (Date.now() - (autoFired().get(log.agentId) ?? 0) < REHIT_MS) return undefined
+  if (hit.resetsAt - Date.now() > SHORT_WINDOW_MS || !rewakeable(log)) return undefined
+  return hit.resetsAt + RESUME_MARGIN_MS
+}
+
+// Whether rewake() below can take this run up again.
+function rewakeable(log: Run) {
+  if (log.purpose === "private" || log.purpose === "goal") return Boolean(log.ask)
+  if (log.purpose === "summary" || log.purpose === "compact") return true
+  if (log.purpose === "check" || log.purpose === "gist") return false
+  return Boolean(log.body)
 }
 
 function reportFailure(agent: NonNullable<ReturnType<typeof agentState>>, log: Run, failure: string, out: string, what: string) {
@@ -639,7 +700,8 @@ function reportFailure(agent: NonNullable<ReturnType<typeof agentState>>, log: R
     title: "失败原因说明",
     output: detail !== failure ? `${detail}\n\n原始报错：\n${failure}` : failure,
   })
-  postSystem(shortSys(`${what}没成功：${shortExplain(agent.agentName, failure)}`))
+  // One whole sentence: who, that it did not work, roughly why, where to look.
+  postSystem(`${what}没成功：${failureReason(agent.agentName, failure)}（看「进展」里它的「过程」）`)
 }
 
 // Runs one command on a seat's session and reports how it went. Its output
@@ -1166,11 +1228,125 @@ function writeSummary(agent: NonNullable<ReturnType<typeof agentState>>, adapter
 // review card; a "failed" doesn't send the task back, the user decides.
 const VERDICT = /复验结论\s*[:：]\s*(通过|没过|没验到)/g
 const VERDICT_STATE = { 通过: "passed", 没过: "failed", 没验到: "unverified" } as const
+const CHECK_KIND_RE = /类别\s*[:：]\s*(跑得出(?:结果)?|要人看|只能本人签)/g
+const CHECK_GAPS_RE = /(?:^|\n)\s*没验到的\s*[:：]\s*([\s\S]*)$/
+const CHECK_COMPACT_EVERY = Number(process.env.BENCH_CHECK_COMPACT_EVERY) || 5
+
+// A seat whose check could not run is left alone this long before the pick
+// tries it again.
+const FAILED_CHECKER_MS = 30 * 60_000
+
+function pickAutoChecker(task: Task): { seat?: PublicAgent; why?: string } {
+  const snap = snapshot()
+  const owner = task.ownerId ? agentState(task.ownerId) : undefined
+  const ownerKind = owner?.agentName ?? ""
+  const now = Date.now()
+  const limited = limitedAgentNames(now)
+  const isLimited = (kind: string) => Boolean(kind) && (limited.has(kind) || isKindQuotaBlocked(kind, now))
+
+  const others = snap.agents.filter((item) => !item.demo && item.id !== task.ownerId)
+  if (others.length === 0) {
+    return { why: "自动挑复验人：项目里没有除负责人以外的席位，这次跳过" }
+  }
+
+  // Who has had a to-do of their own in this project (peers).
+  const worked = new Set<string>()
+  for (const item of snap.tasks) if (item.ownerId) worked.add(item.ownerId)
+  // Whose check could not run lately: the wake failed or it answered without
+  // a verdict (checkTask notes it; not one cut by a restart or stopped by the
+  // user). Kept in memory, not read off the to-dos: queueing a check again
+  // replaces the record of the one that failed before the pick runs.
+  const failed = (g().__benchCheckFailed ??= new Map())
+  const failedLately = (id: string) => now - (failed.get(id) ?? 0) < FAILED_CHECKER_MS
+
+  const reasons: string[] = []
+  const candidates = others.filter((item) => {
+    const agent = agentState(item.id)
+    if (!agent?.agentName || !agent.session || !adapterFor(agent.agentName)) {
+      reasons.push(`${item.name} 叫不醒`)
+      return false
+    }
+    if (isStandby(item.id)) {
+      reasons.push(`${item.name} 正在守候`)
+      return false
+    }
+    if (terminalOpen(item.id) || lane(item.id).paused) {
+      reasons.push(`${item.name} 队列暂停或终端开着`)
+      return false
+    }
+    if (isLimited(agent.agentName)) {
+      reasons.push(`${item.name}（${agent.agentName}）正被限额拦着`)
+      return false
+    }
+    if (failedLately(item.id)) {
+      reasons.push(`${item.name} 刚才复验没跑成`)
+      return false
+    }
+    return true
+  })
+
+  if (candidates.length === 0) {
+    return { why: `自动挑不到复验人（${reasons.join("；") || "无可用席位"}），这次跳过` }
+  }
+
+  // Peers before anyone else: a seat that has had work of its own here knows
+  // the code and how to run it. Helper seats (the one kept for gists, on a
+  // cheap model) never own a to-do; in AverageJoe's rooms on 2026-11-16,
+  // "a different client first" alone would have given all 21 waiting to-dos
+  // of one project to its gist seat, the only seat there not on Claude. With
+  // no peer to be had (a small project), anyone who can be woken may check.
+  const peers = candidates.filter((item) => worked.has(item.id))
+  const pool = peers.length > 0 ? peers : candidates
+
+  pool.sort((a, b) => {
+    // 1. Different client kind from the task owner first.
+    const aDiff = ownerKind && a.agentName !== ownerKind ? 0 : 1
+    const bDiff = ownerKind && b.agentName !== ownerKind ? 0 : 1
+    if (aDiff !== bDiff) return aDiff - bDiff
+
+    // 2. Not currently running first (and fewer queued items when both idle).
+    const aBusy = lane(a.id).running || Boolean(activeRun(a.id)) || a.status === "working" ? 1 : 0
+    const bBusy = lane(b.id).running || Boolean(activeRun(b.id)) || b.status === "working" ? 1 : 0
+    if (aBusy !== bBusy) return aBusy - bBusy
+
+    const aLoad = (lane(a.id).checks?.length ?? 0) + lane(a.id).pending.length
+    const bLoad = (lane(b.id).checks?.length ?? 0) + lane(b.id).pending.length
+    if (aLoad !== bLoad) return aLoad - bLoad
+
+    // 3. Quietest for longest (smallest last-active timestamp) first.
+    const aLast = Math.max(a.lastSeenAt ?? 0, a.ranUntil ?? 0)
+    const bLast = Math.max(b.lastSeenAt ?? 0, b.ranUntil ?? 0)
+    return aLast - bLast
+  })
+
+  return { seat: pool[0] }
+}
 
 function requestCheck(taskId: string, at: number) {
-  const seat = snapshot().agents.find((item) => item.checker)
+  const snap = snapshot()
+  const task = snap.tasks.find((item) => item.id === taskId)
+  if (!task || task.check?.at !== at) return
   const skip = (note: string) => setTaskCheck(taskId, at, { state: "skipped", note })
-  if (!seat) return skip("复验人已经取消了，这次没复验")
+
+  let seat = snap.agents.find((item) => item.checker)
+  if (!seat) {
+    if (autoCheckHere()) {
+      const picked = pickAutoChecker(task)
+      if (!picked.seat) {
+        skip(picked.why ?? "自动挑不到复验人，这次跳过")
+        return
+      }
+      seat = picked.seat
+      setTaskCheck(taskId, at, { state: "queued", by: seat.id, name: seat.name })
+    } else {
+      skip("复验人已经取消了，这次没复验")
+      return
+    }
+  } else if (seat.id === task.ownerId) {
+    skip(`复验人 ${seat.name} 就是这条的负责人，这次跳过`)
+    return
+  }
+
   const agent = agentState(seat.id)
   if (!agent?.agentName || !agent.session || !adapterFor(agent.agentName)) {
     return skip(`复验人 ${seat.name} 叫不醒（没有会话或唤起命令），这次跳过`)
@@ -1184,12 +1360,14 @@ function requestCheck(taskId: string, at: number) {
 
 // Checks a seat had queued, when it can't take them after all.
 function dropChecks(queue: Lane, why: string) {
+  const had = Boolean(queue.checks?.length)
   for (const item of queue.checks ?? []) {
     try {
       setTaskCheck(item.taskId, item.at, { state: "error", note: `复验没跑成：${why}` })
     } catch {}
   }
   queue.checks = undefined
+  if (had) maybeNotifyChecksSettled()
 }
 
 // After a restart: checks that were queued or running never finish.
@@ -1227,6 +1405,10 @@ function checkPrompt(task: Task) {
     "",
     "回答直接输出，格式：",
     "第一行只写一个结论：复验结论：通过 / 复验结论：没过 / 复验结论：没验到",
+    "第二行必填类别：类别：跑得出 / 类别：要人看 / 类别：只能本人签",
+    "- 跑得出：结果能靠跑测试、调接口、查数据或对代码客观证明的（如 bug 修复、接口和逻辑改动、清理、文档核对）。",
+    "- 要人看：涉及界面排版、视觉样式、文案语气、交互手感这类需要人眼看的。",
+    "- 只能本人签：动了权限、全权、沙盒、口令、凭证、密钥，或删数据、花钱、提交、推送、发版、改验收或代签规则的。",
     "接着写依据：做了什么、看到了什么。",
     "最后一段以「没验到的：」开头，列出没验到的部分；全验到了就写「没验到的：无」。",
   ]
@@ -1234,26 +1416,100 @@ function checkPrompt(task: Task) {
     .join("\n")
 }
 
-function verdictOf(out: string): Pick<Task["check"] & object, "state" | "note"> {
+function parseCheckKind(text: string): TaskCheck["kind"] {
+  const hit = [...text.matchAll(CHECK_KIND_RE)].at(-1)?.[1]
+  if (!hit) return undefined
+  if (hit.startsWith("跑得出")) return "run"
+  if (hit === "要人看") return "look"
+  if (hit === "只能本人签") return "you"
+  return undefined
+}
+
+function parseCheckGaps(text: string): string | undefined {
+  const match = CHECK_GAPS_RE.exec(text)
+  if (!match) return undefined
+  const raw = match[1].trim()
+  const normalized = raw.replace(/[。.\s]+$/g, "").trim()
+  if (!normalized || normalized === "无" || normalized === "没有" || normalized.toLowerCase() === "none") {
+    return undefined
+  }
+  return raw.slice(0, 500)
+}
+
+function verdictOf(out: string): Pick<TaskCheck, "state" | "note" | "kind" | "gaps"> {
   const found = [...out.matchAll(VERDICT)].at(-1)
   if (!found) {
     const tail = out.trim().slice(-200)
-    return { state: "error", note: `复验没交结论${tail ? `，它最后说：${tail}` : ""}` }
+    return { state: "error", note: `复验没交结论${tail ? `，它最后说：${tail}` : ""}`, kind: undefined, gaps: undefined }
   }
-  const rest = out.slice((found.index ?? 0) + found[0].length).trim()
-  return { state: VERDICT_STATE[found[1] as keyof typeof VERDICT_STATE], note: rest.slice(0, 2000) || undefined }
+  const afterVerdict = out.slice((found.index ?? 0) + found[0].length).trim()
+  const kind = parseCheckKind(afterVerdict) ?? parseCheckKind(out)
+  const gaps = parseCheckGaps(afterVerdict)
+  const bodyNote = afterVerdict.replace(/^\s*类别\s*[:：]\s*(?:跑得出(?:结果)?|要人看|只能本人签)\s*\n?/, "").trim()
+  return {
+    state: VERDICT_STATE[found[1] as keyof typeof VERDICT_STATE],
+    note: (bodyNote || afterVerdict).slice(0, 2000) || undefined,
+    kind,
+    gaps,
+  }
+}
+
+// When every queued/running check in the current project has settled, tell the
+// front desk's AI how many passed, failed, or went unverified.
+function maybeNotifyChecksSettled() {
+  try {
+    const info = currentProjectInfo()
+    if (info.front) return
+    const snap = snapshot()
+    const waiting = snap.tasks.filter(awaitingReview)
+    if (waiting.some((t) => t.check?.state === "queued" || t.check?.state === "running")) return
+    for (const seat of snap.agents) {
+      if ((lane(seat.id).checks?.length ?? 0) > 0) return
+    }
+    let passed = 0
+    let failed = 0
+    let unverified = 0
+    let other = 0
+    // Could not run (the wake failed, no verdict): the desk hears of these
+    // too, or a batch that all fell on a seat out of quota would sit there
+    // with nobody told. Skipped ones alone wake nobody.
+    let errored = 0
+    let latestAt = 0
+    for (const t of waiting) {
+      const chk = t.check
+      if (!chk || (t.review && chk.at < t.review.at)) continue
+      if (chk.at > latestAt) latestAt = chk.at
+      if (chk.state === "passed") passed++
+      else if (chk.state === "failed") failed++
+      else if (chk.state === "unverified") unverified++
+      else if (chk.state === "error") {
+        other++
+        errored++
+      } else if (chk.state === "skipped") other++
+    }
+    if (passed + failed + unverified + errored === 0) return
+    const sig = `${latestAt}:${passed}:${failed}:${unverified}:${other}`
+    const notified = (g().__benchCheckNotified ??= new Map())
+    if (notified.get(info.id) === sig) return
+    notified.set(info.id, sig)
+    noteChecksSettled({ projectId: info.id, project: info.name, passed, failed, unverified, other })
+  } catch (error) {
+    console.error(error)
+  }
 }
 
 function checkTask(agent: NonNullable<ReturnType<typeof agentState>>, item: { taskId: string; at: number }) {
   const task = snapshot().tasks.find((one) => one.id === item.taskId)
   // Sent back, signed off or asked again meanwhile: this check is moot.
   if (!task || task.check?.at !== item.at || task.review?.state !== "waiting") {
+    maybeNotifyChecksSettled()
     run(agent.id)
     return
   }
   const command = commandFor(agent.agentName ?? "", agent.session ?? "", checkPrompt(task), agent.modelPick, agent.effortPick)
   if (!command) {
     setTaskCheck(item.taskId, item.at, { state: "error", note: "复验没跑成：拼不出唤起命令" })
+    maybeNotifyChecksSettled()
     run(agent.id)
     return
   }
@@ -1276,7 +1532,26 @@ function checkTask(agent: NonNullable<ReturnType<typeof agentState>>, item: { ta
     else if (failure) {
       setTaskCheck(item.taskId, item.at, { state: "error", note: `复验没跑成：${failure}` })
       noteLimit(agent, log, out)
-    } else if (verdict) setTaskCheck(item.taskId, item.at, verdict)
+    } else if (verdict) {
+      setTaskCheck(item.taskId, item.at, verdict)
+      autoAcceptChecked(item.taskId)
+    }
+    // The pick leaves a seat alone for a while after this (pickAutoChecker).
+    if (!stopped) {
+      const failed = (g().__benchCheckFailed ??= new Map())
+      if (failure || verdict?.state === "error") failed.set(agent.id, Date.now())
+      else failed.delete(agent.id)
+    }
+    // Compact every CHECK_COMPACT_EVERY checks so a checker's context doesn't bloat.
+    if (!stopped) {
+      const counts = (g().__benchCheckCounts ??= new Map())
+      const done = (counts.get(agent.id) ?? 0) + 1
+      counts.set(agent.id, done)
+      if (done % CHECK_COMPACT_EVERY === 0 && CONTEXT_KINDS.includes(agent.agentName ?? "")) {
+        queue.compact = true
+      }
+    }
+    maybeNotifyChecksSettled()
     run(agent.id)
   })
 }
@@ -1540,6 +1815,7 @@ export function requestGoal(agentId: string, input: unknown) {
   }
   const queue = lane(agent.id)
   if (queue.goal !== undefined) throw new ApiError(409, `上一条 /goal 还没交给 ${agent.name}，稍等`)
+  clearSeatUserStopped(agent.id)
   queue.goal = text
   syncLane(agent.id)
   const clearing = CLEAR_GOAL.test(text)
@@ -1621,6 +1897,7 @@ export function whisper(agentId: string, text: string) {
   if (clean.length > 4000) throw new ApiError(400, "太长了，4000 字以内")
   const queue = lane(agent.id)
   if (queue.whisper !== undefined) throw new ApiError(409, `上一句还没交给 ${agent.name}，稍等`)
+  clearSeatUserStopped(agent.id)
   queue.whisper = clean
   syncLane(agent.id)
   const interrupted = queue.running
@@ -1646,6 +1923,7 @@ export function stopAgent(agentId: string) {
     queue.pending = []
     queue.trigger = undefined
     queue.hops = 0
+    markSeatUserStopped(agentId)
     syncLane(agentId)
     return { dropped, retryCancelled: true }
   }
@@ -1675,6 +1953,7 @@ export function stopAgent(agentId: string) {
     try {
       pulseAgent(agentId, "idle", "")
     } catch {}
+    markSeatUserStopped(agentId)
     syncLane(agentId)
     return { dropped, cleared: true }
   }
@@ -1690,6 +1969,7 @@ export function stopAgent(agentId: string) {
   queue.goal = undefined
   clearRetry(queue)
   queue.retries = undefined
+  markSeatUserStopped(agentId)
   syncLane(agentId)
   queue.stop()
   return { dropped }
@@ -1702,6 +1982,7 @@ export function pauseQueue(agentId: string, paused: boolean) {
   if (!agent) throw new ApiError(404, "这个席位不在了")
   const queue = lane(agentId)
   queue.paused = paused || undefined
+  queue.restartPaused = undefined
   syncLane(agentId)
   if (!paused) {
     run(agentId)
@@ -1840,16 +2121,16 @@ function calledAt() {
 function hopOf(message: Message) {
   const known = hops().get(message.id)
   if (known !== undefined) return known
-  if (message.authorId === "human") return 0
+  if (message.authorId === "human" || message.authorId === "room") return 0
   const called = calledAt().get(message.authorId)
   return called === undefined ? 0 : called + 1
 }
 
 function wake(message: Message) {
-  if (message.kind === "system") return
+  if (message.kind === "system" && message.mentions.length === 0) return
   // Said outside any wake (its wait loop, its terminal, its own window): what
   // it took there has its answer.
-  if (message.authorId !== "human" && !message.runId) {
+  if (message.authorId !== "human" && message.authorId !== "room" && !message.runId) {
     try {
       settleCalls(message.authorId)
     } catch (error) {
@@ -1867,6 +2148,7 @@ function wake(message: Message) {
     if (!fromHuman && !message.mentions.includes(agent.id) && message.handoff?.toId !== agent.id) {
       continue
     }
+    if (fromHuman) clearSeatUserStopped(agent.id)
     // No cap on agents relaying to each other (the user's call, 2026-11-11):
     // a line stops when a seat ends it (【本轮结束】 / end: true, which
     // mentions nobody) or the user steps in. The hop is still kept per seat.
@@ -1910,7 +2192,10 @@ function enqueue(agent: { id: string; name: string; agentName?: string; session?
   }
   const queue = lane(agent.id)
   queue.projectId = currentProject()
-  queue.pending.push({ id: message.id, line: `${message.authorName}：${withAttachments(message.text, message.attachments)}` })
+  queue.pending.push({
+    id: message.id,
+    line: `${message.authorName}：${withAttachments(message.wakeText ?? message.text, message.attachments)}`,
+  })
   queue.hops = Math.max(queue.hops, hop)
   queue.trigger = message.id
   syncLane(agent.id)
@@ -1942,7 +2227,9 @@ function watchStandby(agentId: string, message: Message, hop: number) {
 // the user can wake them again (the button under that note).
 function announceInterrupted() {
   const byProject = new Map<string, Run[]>()
-  for (const item of takeUnannounced()) {
+  const cut = takeUnannounced()
+  scheduleRestartResume(cut)
+  for (const item of cut) {
     if (!item.project) continue
     byProject.set(item.project, [...(byProject.get(item.project) ?? []), item])
   }
@@ -1956,7 +2243,7 @@ function announceInterrupted() {
         }
         const shown = list.length === 1 ? list[0].agentName : `${list[0].agentName} 等 ${list.length} 个席位`
         postInterrupted(
-          shortSys(`重启打断了 ${shown}，点下方重新叫醒`),
+          shortSys(`重启打断了 ${shown}，${list.some((item) => !userPaused(item.agentId)) ? "稍后自动接上" : "点下方重新叫醒"}`),
           list.map((item) => ({
             runId: item.id,
             agentId: item.agentId,
@@ -1970,6 +2257,84 @@ function announceInterrupted() {
       // The project is gone.
     }
   }
+}
+
+// After a restart the room takes up what it cut short by itself (AverageJoe
+// 2026-11-17, t_67bd9812): wakes that were running are woken again, lanes it
+// paused are let go. Not all at once: a minute after the start, then one
+// seat every half minute. Only what this restart cut: a pause the user made,
+// or one from an earlier restart, stays; so does a seat the user stopped or
+// whose client is out of quota (the note's button is still there).
+const RESTART_RESUME_FIRST_MS = 60_000
+const RESTART_RESUME_GAP_MS = 30_000
+
+function bootPaused() {
+  return (g().__benchBootPaused ??= new Set<string>())
+}
+
+function envDelay(name: string, fallback: number) {
+  const raw = Number(process.env[name])
+  return process.env[name] !== undefined && process.env[name] !== "" && Number.isFinite(raw) && raw >= 0 ? raw : fallback
+}
+
+function scheduleRestartResume(cut: Run[]) {
+  const seats: string[] = []
+  const runsOf = new Map<string, string[]>()
+  for (const item of cut) {
+    if (!item.project) continue
+    if (!runsOf.has(item.agentId)) seats.push(item.agentId)
+    runsOf.set(item.agentId, [...(runsOf.get(item.agentId) ?? []), item.id])
+  }
+  for (const agentId of bootPaused()) if (!runsOf.has(agentId)) seats.push(agentId)
+  bootPaused().clear()
+  const first = envDelay("BENCH_RESTART_RESUME_MS", RESTART_RESUME_FIRST_MS)
+  const gap = envDelay("BENCH_RESTART_RESUME_GAP_MS", RESTART_RESUME_GAP_MS)
+  seats.forEach((agentId, index) => {
+    const timer = setTimeout(() => {
+      try {
+        resumeSeatAfterRestart(agentId, runsOf.get(agentId) ?? [])
+      } catch (error) {
+        console.error(error)
+      }
+    }, first + index * gap)
+    timer.unref?.()
+  })
+}
+
+// Paused, and not by this restart: the user's (or an earlier restart's).
+function userPaused(agentId: string) {
+  const queue = lanesMap().get(agentId)
+  return Boolean(queue?.paused && !queue.restartPaused)
+}
+
+function resumeSeatAfterRestart(agentId: string, runIds: string[]) {
+  // Run from a timer: no project yet, the seat's own is used.
+  inSeat(agentId, () => resumeSeatHere(agentId, runIds))
+}
+
+function resumeSeatHere(agentId: string, runIds: string[]) {
+  const agent = agentState(agentId)
+  if (!agent || isSeatStoppedByUser(agentId)) return
+  if (agent.agentName && isKindQuotaBlocked(agent.agentName)) return
+  // Waking the cut-off run would lift the user's pause too (rewake does), so
+  // it all waits for the user's 「重新叫醒」.
+  if (userPaused(agentId)) return
+  for (const runId of runIds) {
+    const item = getRun(runId)
+    if (!item || item.resumedAt) continue
+    try {
+      rewake(runId, true)
+    } catch (error) {
+      console.log(`重启后接上 ${agent.name} 没成：${error instanceof Error ? error.message : error}`)
+    }
+  }
+  const queue = lanesMap().get(agentId)
+  // Still the restart's pause: the user hasn't paused or resumed it since.
+  if (!queue?.paused || !queue.restartPaused) return
+  queue.paused = undefined
+  queue.restartPaused = undefined
+  syncLane(agentId)
+  run(agentId)
 }
 
 // After a restart: every call that was on its way is checked against what the
@@ -2014,13 +2379,14 @@ function settleOpenCalls() {
 
 // Wake a seat again with what a cut-off run was doing: one the room's restart
 // stopped, or one that ended on the usage limit.
-export function rewake(runId: string) {
+export function rewake(runId: string, byAutoTimer = false) {
   const item = getRun(runId)
   if (!item || !(item.interrupted || item.limited)) throw new ApiError(404, "这次唤起不是被重启或额度打断的，或者记录已经不在了")
   if (item.resumedAt) throw new ApiError(409, `${item.agentName} 已经重新叫醒过了`)
   if (!item.project) throw new ApiError(400, "这次唤起没记下项目，叫不回去")
   return inProject(item.project, () => {
     const agent = wakeable(item.agentId)
+    if (!byAutoTimer) clearSeatUserStopped(agent.id)
     const queue = lane(agent.id)
     if (item.purpose === "private") {
       if (!item.ask) throw new ApiError(400, "没记下当时单独说了什么")
@@ -2045,7 +2411,10 @@ export function rewake(runId: string) {
     markResumed(item)
     markInterruptedResumed(item.id, item.resumedAt ?? Date.now())
     markLimited(item.id, { state: "resumed", at: item.resumedAt ?? Date.now(), note: undefined })
-    if (item.interrupted) queue.paused = undefined
+    if (item.interrupted) {
+      queue.paused = undefined
+      queue.restartPaused = undefined
+    }
     syncLane(agent.id)
     run(agent.id)
     return { agent: agent.name, started: queue.running }
@@ -2065,6 +2434,7 @@ export function resumeLimitedAfterRebind(runId: string, reboundToLabel: string) 
     const queue = lane(agent.id)
     queue.projectId = item.project
     queue.paused = undefined
+    queue.restartPaused = undefined
     if (item.purpose === "private" && item.ask) {
       queue.whisper = item.ask
     } else if (item.purpose === "summary") {
@@ -2115,9 +2485,10 @@ function fireResume(runId: string) {
   resumeTimers().delete(runId)
   const item = getRun(runId)
   if (!item?.limited?.resumeAt || item.resumedAt || !item.project) return
+  autoFired().set(item.agentId, Date.now())
   inProject(item.project, () => {
     try {
-      rewake(runId)
+      rewake(runId, true)
     } catch (error) {
       const why = error instanceof Error ? error.message : String(error)
       setLimited(item, { ...item.limited, resumeAt: undefined })

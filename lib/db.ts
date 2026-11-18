@@ -25,6 +25,8 @@ type DbBundle = {
   file: string
   db: DatabaseSync
   stmts: Map<string, StatementSync>
+  // ensureSchemaColumns has run on this connection.
+  columns?: boolean
 }
 
 type LegacyRoomGlobal = typeof globalThis & {
@@ -185,6 +187,16 @@ function bundle(): DbBundle {
   const g = globalThis as LegacyRoomGlobal
   const target = dbFile()
   if (g.__benchSqlite && g.__benchSqlite.file === target && g.__benchSqlite.db.isOpen) {
+    // The connection outlives hot reloads (it sits on globalThis), so a column
+    // added to the schema after the server started was never added on it:
+    // 2026-11-16 the running room had no projects.front, and opening the
+    // front desk failed on every write of the projects ("内部错误") until a
+    // restart. Checked once per connection, here as well as on open.
+    if (!g.__benchSqlite.columns) {
+      ensureSchemaColumns(g.__benchSqlite.db)
+      g.__benchSqlite.stmts.clear()
+      g.__benchSqlite.columns = true
+    }
     return g.__benchSqlite
   }
   if (g.__benchSqlite?.db.isOpen) {
@@ -200,7 +212,7 @@ function bundle(): DbBundle {
   db.exec("PRAGMA busy_timeout = 5000;")
   db.exec(SCHEMA_SQL)
   ensureSchemaColumns(db)
-  const created: DbBundle = { file: target, db, stmts: new Map() }
+  const created: DbBundle = { file: target, db, stmts: new Map(), columns: true }
   g.__benchSqlite = created
   migrateLegacyJsonIfNeeded(created)
   cleanFtsResidue(db)
@@ -413,7 +425,7 @@ function migrateLegacyJsonIfNeeded(b: DbBundle) {
       if (fromColdDisk && r.state === "running") {
         const at = Date.now()
         const steps: RunStep[] = (r.steps ?? []).map((s) => (s.state === "running" ? { ...s, state: "failed" } : s))
-        steps.push({ id: "end", at, kind: "note", title: "服务器重启，这次唤起被打断了", state: "failed" })
+        steps.push({ id: "end", at, kind: "note", title: "服务器重启，这次叫醒被打断了", state: "failed" })
         r = { ...r, state: "failed", endedAt: at, interrupted: true, steps }
       }
       const { steps = [], ...metaOnly } = r
@@ -548,6 +560,10 @@ export function dbSaveProject(
     state.summarySkipSeq ?? null,
     state.relayClosed ? 1 : 0,
   )
+}
+
+export function dbHasProject(projectId: string) {
+  return Boolean(stmt(`SELECT 1 FROM projects WHERE id = ?`).get(projectId))
 }
 
 export function dbSaveRoomHeader(
@@ -732,6 +748,16 @@ export function dbCountMessages(projectId: string): number {
 
 export function dbGetMessage(projectId: string, messageId: string): Message | null {
   return rowToMessage(stmt("SELECT data_json FROM messages WHERE project_id = ? AND id = ?").get(projectId, messageId))
+}
+
+// Whether a message of the project carries this file, for the messages older
+// than the ones kept in memory. The path is looked for the way it is written
+// in the row, then checked on the parsed message.
+export function dbHasAttachment(projectId: string, file: string): boolean {
+  const rows = stmt(
+    "SELECT data_json FROM messages WHERE project_id = ? AND recalled_at IS NULL AND instr(data_json, ?) > 0",
+  ).all(projectId, `"path":${JSON.stringify(file)}`)
+  return rows.some((row) => rowToMessage(row)?.attachments?.some((item) => item.path === file))
 }
 
 export function dbLoadOpenAsks(projectId: string, beforeSeq?: number): Message[] {
@@ -1010,7 +1036,7 @@ export function dbMarkColdRunningInterrupted(): void {
       const run = hydrateRun(row, true)
       if (!run) continue
       const steps: RunStep[] = run.steps.map((s) => (s.state === "running" ? { ...s, state: "failed" } : s))
-      const endStep: RunStep = { id: "end", at, kind: "note", title: "服务器重启，这次唤起被打断了", state: "failed" }
+      const endStep: RunStep = { id: "end", at, kind: "note", title: "服务器重启，这次叫醒被打断了", state: "failed" }
       steps.push(endStep)
       const updated: Run = { ...run, state: "failed", endedAt: at, interrupted: true, steps }
       dbSaveRunMeta(updated)
@@ -1048,6 +1074,8 @@ export type StoredLane = {
   agentId: string
   projectId: string
   paused: boolean
+  // Paused by a restart, not by the user (paused column 2).
+  restartPaused?: boolean
   hops: number
   summary: boolean
   compact: boolean
@@ -1099,7 +1127,8 @@ export function dbLoadLanes(): StoredLane[] {
       agentId,
       carryIds,
       projectId: String(r.project_id),
-      paused: Number(r.paused) === 1,
+      paused: Number(r.paused) >= 1,
+      restartPaused: Number(r.paused) === 2 || undefined,
       hops: Number(r.hops ?? 0),
       summary: Number(r.summary) === 1,
       compact: Number(r.compact) === 1,
@@ -1138,6 +1167,7 @@ export function dbSaveLane(
   projectId: string,
   lane: {
     paused?: boolean
+    restartPaused?: boolean
     hops: number
     summary?: boolean
     compact?: boolean
@@ -1177,7 +1207,7 @@ export function dbSaveLane(
     ).run(
       agentId,
       projectId,
-      lane.paused ? 1 : 0,
+      lane.paused ? (lane.restartPaused ? 2 : 1) : 0,
       lane.hops,
       lane.summary ? 1 : 0,
       lane.compact ? 1 : 0,

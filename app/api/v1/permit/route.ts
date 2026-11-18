@@ -1,6 +1,7 @@
 import { boot } from "@/lib/boot"
 import { ApiError, asRecord, asString, handle, json, readBody } from "@/lib/http"
 import { ask, decide, describe, hasFull, setFull } from "@/lib/permits"
+import { toolAction, toolWhy } from "@/lib/plain"
 import { agentState, currentProject, inProject, inRequest, requireAgent, roomChanged } from "@/lib/store"
 import { seatOfRunKey } from "@/lib/summon"
 
@@ -22,7 +23,7 @@ export async function POST(request: Request) {
     const key = body.as === "human" ? undefined : asString(body.key)
     if (key) {
       const agentId = seatOfRunKey(key)
-      if (!agentId) throw new ApiError(404, "这次唤起已经结束了")
+      if (!agentId) throw new ApiError(404, "这次叫醒已经结束了")
       return json(await inRequest({ agentId }, () => permit(body, request.signal, agentId)))
     }
     return json(await inRequest(body, () => permit(body, request.signal)))
@@ -43,7 +44,7 @@ async function permit(body: Record<string, unknown>, signal: AbortSignal, byKey?
       }
       const note = asString(body.note)?.trim().slice(0, 300) || undefined
       const item = decide(id, { allow: decision !== "deny", full: decision === "full", note })
-      if (!item) throw new ApiError(404, "这个请求已经处理过了，或者那次唤起已经结束")
+      if (!item) throw new ApiError(404, "这个请求已经处理过了，或者那次叫醒已经结束")
       changed()
       return { ok: true }
     }
@@ -61,7 +62,7 @@ async function permit(body: Record<string, unknown>, signal: AbortSignal, byKey?
     const tool = asString(body.tool)?.slice(0, 120)
     if (!tool) throw new ApiError(400, "缺少 tool")
     return ask(
-      { project, agentId: agent.id, agentName: agent.name, kind: "tool", tool, input: describe(tool, body.input) },
+      { project, agentId: agent.id, agentName: agent.name, kind: "tool", tool, input: describe(tool, body.input), plain: { action: toolAction(tool, body.input), why: toolWhy(body.input) } },
       { timeoutMs: TOOL_WAIT_MS, signal, changed },
     )
   }

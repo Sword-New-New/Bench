@@ -14,6 +14,7 @@ import { ApiError } from "@/lib/http"
 import { KINDS } from "@/lib/kinds"
 import {
   agentState,
+  checkFrontSeat,
   currentProjectInfo,
   rebindAgent,
   restoreAgentBinding,
@@ -457,6 +458,7 @@ export async function spawnSession(input: Record<string, unknown>) {
   const base = temp ? "" : path.resolve(from.replace(/^~(?=\/|$)/, os.homedir()))
   if (!temp && !isDir(base)) throw new ApiError(400, `${base} 不存在或不是目录`)
   if (snapshot().agents.some((agent) => agent.name === name)) throw new ApiError(409, `已经有人叫 ${name}，换个名字`)
+  checkFrontSeat()
 
   let dir = base
   let branch: string | undefined

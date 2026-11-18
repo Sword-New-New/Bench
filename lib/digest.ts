@@ -1,7 +1,7 @@
 import { chainsOf, firstNamed, namedTasks } from "@/lib/flow"
 import { awaitingReview } from "@/lib/review"
 import { gistOf } from "@/lib/text"
-import type { Message, PermitRequest, PublicAgent, Task, TaskCheck } from "@/lib/types"
+import type { Message, PermitRequest, PublicAgent, Task, TaskCheck, TaskDeputy } from "@/lib/types"
 
 // The 「进展」 view (t_5de117f4): the room's talk gathered into one line per
 // piece of work, with where it stands first. A pure function of the snapshot
@@ -44,7 +44,9 @@ export type DigestRow = {
   messageIds: string[]
   attachments: number
   // The second seat's verdict, when it gave one.
-  check?: Pick<TaskCheck, "state" | "name" | "note">
+  check?: Pick<TaskCheck, "state" | "name" | "note" | "kind" | "gaps">
+  // Passed by the front desk on the user's behalf (lib/deputy.ts).
+  deputy?: TaskDeputy
 }
 
 export type Digest = {
@@ -112,6 +114,16 @@ export function digestOf({ messages, tasks, agents, permits = [], now }: DigestI
   const { rootOf, chains } = chainsOf(talk)
   const born = firstNamed(talk, tasks)
   const taskById = new Map(tasks.map((task) => [task.id, task]))
+  // A message tied to a to-do without writing its id (Message.taskId, a
+  // verdict) hosts it too, if it comes first: otherwise the replies under it
+  // that name nothing are lost to the to-do (GPT2's check, 2026-11-17).
+  for (const message of talk) {
+    for (const id of [message.taskId, message.verdict?.taskId]) {
+      if (!id || !taskById.has(id)) continue
+      const named = born.get(id)
+      if (!named || named.createdAt > message.createdAt) born.set(id, message)
+    }
+  }
   const seatById = new Map(agents.map((seat) => [seat.id, seat]))
   const ownerOf = (task: Task) => task.ownerId ?? undefined
 
@@ -179,8 +191,9 @@ export function digestOf({ messages, tasks, agents, permits = [], now }: DigestI
       attachments: list.reduce((sum, message) => sum + (message.attachments?.length ?? 0), 0),
       check:
         task.check && ["passed", "failed", "unverified"].includes(task.check.state)
-          ? { state: task.check.state, name: task.check.name, note: task.check.note }
+          ? { state: task.check.state, name: task.check.name, note: task.check.note, kind: task.check.kind, gaps: task.check.gaps }
           : undefined,
+      deputy: task.review?.deputy,
     }
     const fallback = latestReply ? lineOf(latestReply) : undefined
 
@@ -190,7 +203,7 @@ export function digestOf({ messages, tasks, agents, permits = [], now }: DigestI
     const lastCall = [...list].reverse().map((message) => message.calls?.find((call) => call.id === owner)).find(Boolean)
     if (task.status === "done") {
       row.state = "done"
-      row.line = "已验收"
+      row.line = task.review?.deputy ? `前台代签：${clip(task.review.deputy.why, 60)}` : "已验收"
     } else if (awaitingReview(task)) {
       row.state = "you"
       row.need = "review"
@@ -202,13 +215,21 @@ export function digestOf({ messages, tasks, agents, permits = [], now }: DigestI
       row.askId = ask.id
       row.since = ask.createdAt
       row.line = clip(ask.text)
-      if (!row.messageIds.includes(ask.id)) row.messageIds = [...row.messageIds, ask.id]
+      if (!row.messageIds.includes(ask.id)) {
+        // In its place in time: the page lists them oldest first.
+        const when = new Map(talk.map((message) => [message.id, message.createdAt]))
+        row.messageIds = [...row.messageIds, ask.id].sort((a, b) => (when.get(a) ?? 0) - (when.get(b) ?? 0))
+      }
     } else if (permit && seat?.runId) {
       row.state = "you"
       row.need = "permit"
       row.permitId = permit.id
       row.since = permit.at
-      row.line = clip(`要权限：${permit.kind === "full" ? "这次唤起的全部权限" : (permit.tool ?? "")}${permit.input ? ` ${permit.input}` : ""}${permit.reason ? `（${permit.reason}）` : ""}`)
+      row.line = clip(
+        permit.kind === "full"
+          ? `要权限：这次叫醒的全部权限${permit.reason ? `（${permit.reason}）` : ""}`
+          : `要权限：${permit.plain?.action ?? "用一个工具"}${permit.plain?.why ? `（${permit.plain.why}）` : ""}`,
+      )
     } else if (task.status === "blocked") {
       row.since = task.updatedAt
       const why = [...task.history].reverse().find((event) => event.action === "卡住")?.note
@@ -238,6 +259,9 @@ export function digestOf({ messages, tasks, agents, permits = [], now }: DigestI
   const talkRows: DigestRow[] = []
   for (const [rootId, chain] of chains) {
     if (hosted.has(rootId)) continue
+    // If a chain references any task id (including one completed > 48h ago and
+    // omitted from the snapshot), do not misclassify it as loose talk.
+    if (chain.some((m) => Boolean(m.taskId || m.verdict || m.handoff || namedTasks(m.text).length > 0))) continue
     const loose = chain.filter((message) => !placed.has(message.id))
     if (loose.length === 0 || !loose.some(isAgentReply)) continue
     const root = loose[0]

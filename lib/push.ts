@@ -19,7 +19,8 @@ import { ApiError, asRecord, asString } from "@/lib/http"
 
 export type PushChannelId = "ntfy" | "bark" | "wecom" | "feishu" | "telegram" | "webhook"
 
-export type PushEventKind = "ask" | "review" | "permit" | "end" | "test"
+// front: the front desk's AI telling the user something (lib/front.ts frontNotify).
+export type PushEventKind = "ask" | "review" | "permit" | "end" | "front" | "test"
 
 export type PushCredentials = {
   target: string
@@ -627,9 +628,11 @@ function formatBatch(
   if (items.length === 1) {
     const only = items[0]
     const snippet = titleOnly ? "" : cleanSnippet(only.snippet)
-    const headline = `「${project}」${only.actor} ${only.what}`
+    // No actor: the front desk speaking for itself (「前台」提醒你).
+    const who = [only.actor, only.what].filter(Boolean).join(" ")
+    const headline = `「${project}」${who}`
     const headerTitle = titleOnly ? `并坐 · ${project}` : headline
-    const headerBody = titleOnly ? `${only.actor} ${only.what}` : snippet || `${only.actor} ${only.what}`
+    const headerBody = titleOnly ? who : snippet || who
     const fullText = snippet ? `${headline}\n${snippet}` : headline
     return {
       project,
@@ -1103,7 +1106,7 @@ export async function sendTestPush(projectName = "并坐"): Promise<{ ok: boolea
         kind: "test",
         actor: "并坐",
         what: "发来一条测试推送",
-        snippet: "看到这条说明手机推送已经通了，有提问、待验收或权限等你时会发到这里。",
+        snippet: "看到这条说明手机推送已经通了，有提问、等你验收或权限等你时会发到这里。",
         at: Date.now(),
       },
     ],

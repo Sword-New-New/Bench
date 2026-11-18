@@ -1,3 +1,4 @@
+import { liveToolLine } from "@/lib/plain"
 import { baseName } from "@/lib/platform"
 import type { RunStep } from "@/lib/types"
 
@@ -170,6 +171,12 @@ export function createParser() {
         output: event.subtype === "completed" ? resultText(result.success ?? result.error ?? result.rejected ?? result) : undefined,
         state: event.subtype === "completed" ? (failed ? "failed" : "done") : "running",
       })
+    } else if (type === "result" && event.num_turns === 0 && !str(event.result)) {
+      // Claude Code: a wake whose last turn left background tasks first
+      // replays their "stopped" notice as a turn of its own, and closes it
+      // with an empty result (num_turns 0) before it reads the message. Not
+      // the end: taken as one, the room stopped the seat 3 s later, mid-request,
+      // and it said nothing (Fable 23:44, Opus1 23:55 on 2026-11-15).
     } else if (type === "result" || (typeof event.result === "string" && event.session_id)) {
       if (typeof event.result === "string") final = event.result
       ended = true
@@ -286,6 +293,6 @@ export function createParser() {
 // A sentence it says shows as is: the seat line is its own notice board.
 export function liveLine(step: RunStep) {
   if (step.kind === "text") return `「${short(step.output ?? step.title, 40)}」`
-  if (step.kind === "tool" && step.state === "running") return `正在${step.title}`
+  if (step.kind === "tool" && step.state === "running") return liveToolLine(step) ?? `正在${step.title}`
   return null
 }

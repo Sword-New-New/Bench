@@ -80,8 +80,9 @@ fi
 (
   cd "$dir/copy"
   for key in $(compgen -e); do
-    # BENCH_RETRY_MS / BENCH_GIST_MS only shorten test waits (lib/netfail.ts, lib/summon.ts).
-    case "$key" in HOME|PATH|USER|LOGNAME|LANG|LC_*|TERM|http_proxy|https_proxy|all_proxy|no_proxy|HTTP_PROXY|HTTPS_PROXY|ALL_PROXY|NO_PROXY|BENCH_RETRY_MS|BENCH_GIST_MS) ;;
+    # BENCH_RETRY_MS / BENCH_GIST_MS / BENCH_CONTINUE_* / BENCH_WATCH_* only shorten test waits.
+    # BENCH_FIRST_KINDS / BENCH_FIRST_PARENT stand in for the installed clients and the desktop (lib/first-open.ts).
+    case "$key" in HOME|PATH|USER|LOGNAME|LANG|LC_*|TERM|http_proxy|https_proxy|all_proxy|no_proxy|HTTP_PROXY|HTTPS_PROXY|ALL_PROXY|NO_PROXY|BENCH_RETRY_MS|BENCH_GIST_MS|BENCH_FIRST_KINDS|BENCH_FIRST_PARENT|BENCH_CONTINUE_*|BENCH_WATCH_*) ;;
       *) unset "$key";;
     esac
   done

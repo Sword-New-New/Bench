@@ -19,8 +19,21 @@ export const STATUS_COLOR: Record<AgentStatus, string> = {
 export const TASK_STATUS_LABEL: Record<TaskStatus, string> = {
   open: "待接",
   doing: "在做",
-  blocked: "等着",
+  blocked: "卡住",
   done: "完成",
+}
+
+/** 统一检查结果与过程提示中的旧措辞，避免历史记录或内部状态在页面露字 */
+export function plainCheckText(text: string): string {
+  return text
+    .replace(/复验没跑成/g, "检查没跑成")
+    .replace(/复验没交结论/g, "检查没交结论")
+    .replace(/复验没过/g, "查出问题")
+    .replace(/复验没验到/g, "没查出结论")
+    .replace(/复验通过/g, "查过，没问题")
+    .replace(/复验人/g, "检查人")
+    .replace(/没开复验/g, "没开检查")
+    .replace(/没复验/g, "没检查")
 }
 
 export function liveStatus(

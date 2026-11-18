@@ -12,6 +12,8 @@ export type LaneSnapshot = {
 
 type LaneReaderGlobal = typeof globalThis & {
   __benchLaneSnapshot?: (agentId: string) => LaneSnapshot | undefined
+  __benchLaneIdle?: (agentId: string) => boolean
+  __benchSeatUserStopped?: (agentId: string) => boolean
 }
 
 export function registerLaneReader(fn: (agentId: string) => LaneSnapshot | undefined) {
@@ -20,4 +22,21 @@ export function registerLaneReader(fn: (agentId: string) => LaneSnapshot | undef
 
 export function readLaneSnapshot(agentId: string): LaneSnapshot | undefined {
   return (globalThis as LaneReaderGlobal).__benchLaneSnapshot?.(agentId)
+}
+
+export function registerLaneIdle(fn: (agentId: string) => boolean) {
+  ;(globalThis as LaneReaderGlobal).__benchLaneIdle = fn
+}
+
+export function isLaneIdle(agentId: string): boolean {
+  const fn = (globalThis as LaneReaderGlobal).__benchLaneIdle
+  return fn ? fn(agentId) : true
+}
+
+export function registerSeatUserStopped(fn: (agentId: string) => boolean) {
+  ;(globalThis as LaneReaderGlobal).__benchSeatUserStopped = fn
+}
+
+export function isSeatStoppedByUser(agentId: string): boolean {
+  return (globalThis as LaneReaderGlobal).__benchSeatUserStopped?.(agentId) ?? false
 }

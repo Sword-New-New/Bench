@@ -6,7 +6,7 @@ import { debugClearSummary, debugForgetSeen, inRequest, postSystem, snapshot, us
 // UI for them can be checked. Off outside `next dev`.
 const NOTES: Record<string, () => string> = {
   relay: () => `agent 之间已经自动接力 3 轮，先停下，等 ${userName()} 发话再继续`,
-  failed: () => "唤起 调试席位 没成功：退出码 1（这是调试菜单插的假消息）",
+  failed: () => "叫醒 调试席位 没成功：退出码 1（这是调试菜单插的假消息）",
   nosession: () => "调试席位 被点到了，但还没报 agent 和 uuid，叫不醒",
 }
 

@@ -6,7 +6,7 @@ import { Readable } from "node:stream"
 import { boot } from "@/lib/boot"
 import { ApiError, asRecord, asString, handle, json, readBody } from "@/lib/http"
 import { mediaKind, mediaType } from "@/lib/media"
-import { inRequest, snapshot } from "@/lib/store"
+import { hasAttachment, inRequest } from "@/lib/store"
 
 // Things pasted or dropped into the composer. The page can't hand over a
 // path for those, so the room keeps a copy under data/uploads and the message
@@ -59,10 +59,7 @@ export async function GET(request: Request) {
     if (!type) throw new ApiError(404, "只能看图片、视频和音频")
     const inUploads = file.startsWith(uploadsDir() + path.sep)
     const attached =
-      inUploads ||
-      inRequest({ project: url.searchParams.get("project") ?? undefined }, () =>
-        snapshot().messages.some((message) => message.attachments?.some((item) => item.path === file)),
-      )
+      inUploads || inRequest({ project: url.searchParams.get("project") ?? undefined }, () => hasAttachment(file))
     if (!attached) throw new ApiError(404, "房间里没有这个文件")
     const stat = statSync(file, { throwIfNoEntry: false })
     if (!stat?.isFile()) throw new ApiError(404, "文件不在了")

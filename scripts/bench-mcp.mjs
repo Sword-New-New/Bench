@@ -513,7 +513,7 @@ const tools = [
   {
     name: "bench_task",
     description:
-      "建一条待办（任务），显示在房间右栏。用户要做新功能时必须先建：title 写功能，steps 拆成几步，owner 填自己。之后用 bench_step 一步一步推进。",
+      "建一条待办（任务），显示在房间右栏。用户要做新功能时必须先建：title 写用户能得到什么（比如「聊天里长回复先只显示一句结论」），steps 拆成几步，owner 填自己。标题和步骤是给用户读的大白话：带文件名、路径、函数名、命令、t_ 编号、网址的，房间会当场退回让你重写；技术细节放 detail。之后用 bench_step 一步一步推进。",
     inputSchema: {
       type: "object",
       properties: {
@@ -528,7 +528,7 @@ const tools = [
   {
     name: "bench_step",
     description:
-      "推进待办的步骤：开始一步时 state 填 doing，做完填 done（note 写做了什么、怎么验的），退回填 todo；add 追加新步骤。每次改动都带时间记在右栏，验收也按这些步骤往下走。",
+      "推进待办的步骤：开始一步时 state 填 doing，做完填 done（note 写做了什么、怎么验的，note 可以写技术细节），退回填 todo；add 追加新步骤，新步骤和标题一样要是大白话，带文件名或命令会被退回。每次改动都带时间记在右栏，验收也按这些步骤往下走。",
     inputSchema: {
       type: "object",
       properties: {
@@ -544,7 +544,7 @@ const tools = [
   {
     name: "bench_task_update",
     description:
-      "处理一条任务：claim 认领（已有别人负责会失败）、review 做完了请 用户验收（note 写做了什么、怎么看效果）、done 完成（带「验收」步骤的待办要等 用户点通过，不能自己标）、block 卡住、handoff 交给别人（要写 to，并填全交接单 done、left、caveats）。",
+      "处理一条任务：claim 认领（已有别人负责会失败）、review 做完了请 用户验收（note 第一句写他怎么看到效果，要大白话，带文件名、命令、编号会被退回；做了什么的细节写在后面）、done 完成（带「验收」步骤的待办要等 用户点通过，不能自己标）、block 卡住、handoff 交给别人（要写 to，并填全交接单 done、left、caveats）。",
     inputSchema: {
       type: "object",
       properties: {
@@ -583,6 +583,27 @@ const tools = [
     },
   },
   {
+    name: "bench_notify",
+    description:
+      "仅「前台」席位可用：把一句摘要推到用户的手机和桌面（他在页面前时只在页面上提示）。只在有要紧的事要他知道时用，说完正事再推；一句话 80 字以内，细节写在回答里。5 分钟内只能推一条。",
+    inputSchema: {
+      type: "object",
+      properties: { text: { type: "string", description: "推给用户的一句摘要，最好 40 字以内" } },
+      required: ["text"],
+    },
+  },
+  {
+    name: "bench_check",
+    description:
+      "仅「前台」席位可用：给正在等验收、但还没有复验结论（没跑过、跳过或没跑成）的待办补跑复验。传 project 只排那个项目，不传就扫全部项目；已经在排队或正在复验的不重复排。",
+    inputSchema: {
+      type: "object",
+      properties: {
+        project: { type: "string", description: "可选：项目名字或 id（p_…）；不填则扫全部项目" },
+      },
+    },
+  },
+  {
     name: "bench_overview",
     description:
       "只读查看全部项目一览（仅「前台」项目里的席位可用，普通项目的席位调用会返回 403）：每个项目的 id、名字、目录、席位状态与欠活、等用户处理的提问/权限/验收数、未完成待办数、最后动静时间与房间摘要开头。",
@@ -599,6 +620,104 @@ const tools = [
         before: { type: "number", description: "可选：往前翻看更早对话时填上一页最早一条的 seq" },
       },
       required: ["project"],
+    },
+  },
+  {
+    name: "bench_relay",
+    description:
+      "前台专用（普通项目的席位调用会返回 403）：替用户起草一句要转达给某个项目里某个席位的话。不会直接发出：前台聊天里出一张草稿卡片，用户可以改字，点「发出」才以用户的名义（标「经前台」）发进那个项目并叫醒该席位。原话照用户的意思写，不要加码、不要替他拍板。",
+    inputSchema: {
+      type: "object",
+      properties: {
+        project: { type: "string", description: "目标项目名字或 id（p_…）" },
+        seat: { type: "string", description: "目标项目里的席位名" },
+        text: { type: "string", description: "要转达的原话，不用写 @（发出时自动加）" },
+        why: { type: "string", description: "可选：一句话说明为什么转、依据哪条消息或待办（m_…/t_…）" },
+      },
+      required: ["project", "seat", "text"],
+    },
+  },
+  {
+    name: "bench_nudge",
+    description:
+      "前台专用：去问某个项目里停着还欠活的席位现在到哪了。平时只是草稿卡片，用户点「发出」才会发进那个项目并叫醒它；唯独目标是 bench_watch 盯着的项目里的那个统筹席位时，会以前台自己的名义（@统筹 前台来看了一眼：…）直接发进那个项目并叫醒它（同一项目 30 分钟最多直接发一次，前台聊天留「已发出」记录）。text 不填就用默认问法。",
+    inputSchema: {
+      type: "object",
+      properties: {
+        project: { type: "string", description: "目标项目名字或 id（p_…）" },
+        seat: { type: "string", description: "要催的席位名" },
+        task: { type: "string", description: "可选：欠的那条待办 id（t_…）" },
+        text: { type: "string", description: "可选：自己写的问法，不用写 @" },
+        why: { type: "string", description: "可选：为什么现在催（比如停了多久、欠什么）" },
+      },
+      required: ["project", "seat"],
+    },
+  },
+  {
+    name: "bench_watch",
+    description:
+      "让前台盯着一个项目（项目里 AI 全停满 10 分钟、额度还有、活没做完时，房间叫醒前台来看，前台确认卡住后对统筹调 bench_nudge 会以前台名义直接发出；活都交完或满 24 小时自动停盯）。前台席位调时填 project 和那个项目的统筹 seat；普通项目的统筹席位自己调时只能设自己所在的项目、统筹固定为自己（project 和 seat 可省）。传 on: false 停止盯。",
+    inputSchema: {
+      type: "object",
+      properties: {
+        project: { type: "string", description: "项目名字或 id（前台调用必填；普通项目席位可省，填也只能是自己所在的项目）" },
+        seat: { type: "string", description: "那个项目的统筹席位名（前台开启盯防必填；普通项目席位固定为调用者自己）" },
+        on: { type: "boolean", description: "true 开始盯（默认），false 停止盯" },
+      },
+    },
+  },
+  {
+    name: "bench_review_card",
+    description:
+      "前台专用：把某个项目里等用户验收的待办做成一张卡片放进前台聊天，带「去看」和「通过」按钮。只有用户亲手点「通过」才算验收，你不能替他点；要打回让他去那个项目里写原因。",
+    inputSchema: {
+      type: "object",
+      properties: {
+        project: { type: "string", description: "项目名字或 id（p_…）" },
+        task: { type: "string", description: "等验收的待办 id（t_…）" },
+        why: { type: "string", description: "可选：你的建议，比如核对过什么、建议通过还是先看哪里" },
+      },
+      required: ["project", "task"],
+    },
+  },
+  {
+    name: "bench_review_batch",
+    description:
+      "前台专用：把各项目里等用户验收的待办整理成一张整批卡片（之前没点完的清单会自动并进来再收起，聊天里只留最新这一张），分三条车道：batch（复验跑得出结果、可整批通过）、look（要用户看一眼）、you（只能用户签）。房间会按事实重算每件的车道，你只能往严里改；不在等验收的会被丢掉并告诉你。卡片上用户自己勾选、点「都通过」才算。line 用一句大白话写这是什么、复验验到了什么。",
+    inputSchema: {
+      type: "object",
+      properties: {
+        items: {
+          type: "array",
+          description: "每件：{project, taskId, lane, line}",
+          items: {
+            type: "object",
+            properties: {
+              project: { type: "string", description: "项目名字或 id" },
+              taskId: { type: "string", description: "待办 id（t_…）" },
+              lane: { type: "string", enum: ["batch", "look", "you"], description: "你判断的车道，只能比房间算的更严" },
+              line: { type: "string", description: "一句话：这是什么、验到了什么" },
+            },
+            required: ["project", "taskId", "line"],
+          },
+        },
+        why: { type: "string", description: "可选：整张卡片的一句说明" },
+      },
+      required: ["items"],
+    },
+  },
+  {
+    name: "bench_accept",
+    description:
+      "前台专用：替用户代签一件等验收的待办。平时房间在复验通过时已经自己收下，这个工具只用来补漏。房间会逐条把关，任何一条不过就拒绝并说明：用户开了「查过没问题的，自动替我收下」、待办正在等验收且是开关打开之后才请的、车道是 batch（复验在这次请验收之后跑、通过、复验人不是负责人、没有没验到的、类别是跑得出、标题没碰保险词）、写了 why、今天代签没超过上限。通过后会在那个项目里留一句「前台代用户通过」，用户可以重开。不会提交、推送、批权限或回答提问。",
+    inputSchema: {
+      type: "object",
+      properties: {
+        project: { type: "string", description: "项目名字或 id（p_…）" },
+        task: { type: "string", description: "待办 id（t_…）" },
+        why: { type: "string", description: "凭什么通过：复验验到了什么（必填）" },
+      },
+      required: ["project", "task", "why"],
     },
   },
   {
@@ -652,7 +771,9 @@ async function join(args) {
   try {
     result = await call("/api/v1/join", known ? { ...body, token: known.token } : body)
   } catch (error) {
-    if (error instanceof RoomError && error.status === 409) {
+    // A name taken is the usual 409; any other (the front desk already has its
+    // one AI) says why itself.
+    if (error instanceof RoomError && error.status === 409 && /已经有人叫/.test(error.message)) {
       throw new RoomError(409, `「${project.name}」项目里 ${name} 这个名字已经有人在用了，换一个名字再 bench_join。`)
     }
     throw error
@@ -910,6 +1031,22 @@ async function runTool(name, args = {}, signal) {
         : "最近一次唤起：还没被唤起过"
       return [`${data.seat} 的自检`, ...lines, run, data.summary].join("\n")
     }
+    case "bench_notify": {
+      await seatCall("/api/v1/notify", { text: args.text })
+      return "推出去了。"
+    }
+    case "bench_check": {
+      const data = await seatCall("/api/v1/check", {
+        ...(args.project ? { project: args.project } : {}),
+      })
+      const skipLines = (data.skipped ?? []).map((item) => `- ${item.taskId}：${item.why}`)
+      return [
+        `已排入复验 ${data.queued} 件。`,
+        skipLines.length > 0 ? `未排入（${skipLines.length} 件）：\n${skipLines.join("\n")}` : "",
+      ]
+        .filter(Boolean)
+        .join("\n")
+    }
     case "bench_overview": {
       const data = await seatCall("/api/v1/overview", {})
       return data.text
@@ -920,6 +1057,56 @@ async function runTool(name, args = {}, signal) {
         before: args.before !== undefined ? args.before : undefined,
       })
       return data.text
+    }
+    case "bench_relay":
+    case "bench_nudge":
+    case "bench_review_card": {
+      const kind = name === "bench_relay" ? "relay" : name === "bench_nudge" ? "nudge" : "review"
+      const data = await seatCall("/api/v1/relay", {
+        kind,
+        project: args.project,
+        seat: args.seat,
+        task: args.task,
+        text: args.text,
+        why: args.why,
+      })
+      const r = data.relay
+      const to = r.seatName ? ` → ${r.seatName}` : ""
+      if (data.direct) {
+        return `已以前台名义直接发进「${r.projectName}」叫醒统筹 ${r.seatName}（${data.sent?.id}）：${r.text}\n前台聊天已留已发出记录（${data.messageId}）。`
+      }
+      return kind === "review"
+        ? `已放进前台聊天：「${r.projectName}」${r.taskId} 等验收的卡片（${data.messageId}），通过要用户亲手点。`
+        : `草稿已放进前台聊天（${data.messageId}）：「${r.projectName}」${to}：${r.text}\n用户点「发出」才会发出去，在那之前什么都没发。`
+    }
+    case "bench_watch": {
+      const data = await seatCall("/api/v1/watch", {
+        ...(args.project !== undefined ? { project: args.project } : {}),
+        ...(args.seat !== undefined ? { seat: args.seat } : {}),
+        ...(args.on !== undefined ? { on: args.on } : {}),
+      })
+      if (!data.watching) {
+        return `已停止盯着「${data.project?.name ?? args.project ?? ""}」。`
+      }
+      return `已开始盯着「${data.watch.projectName}」（${data.watch.projectId}），统筹是 ${data.watch.seatName}。全停满 10 分钟且额度还有、活没做完时会叫醒前台来看，前台对 ${data.watch.seatName} 调 bench_nudge 会以前台名义直接发出。`
+    }
+    case "bench_review_batch": {
+      const data = await seatCall("/api/v1/relay", { kind: "batch", items: args.items, why: args.why })
+      const items = data.relay.items ?? []
+      const count = (lane) => items.filter((item) => item.lane === lane).length
+      const left = (data.left ?? []).map((item) => `${item.taskId}：${item.why}`)
+      return [
+        `整批卡片已放进前台聊天（${data.messageId}）：${items.length} 件，可整批 ${count("batch")}，要用户看 ${count("look")}，只能用户签 ${count("you")}。用户勾选点「都通过」才算。`,
+        data.replaced ? `之前没点完的 ${data.replaced} 张清单已经收起，上面还在等的 ${data.carried} 件并进了这一张：聊天里只留这一张，不用再提旧的。` : "",
+        ...items.filter((item) => item.why).map((item) => `- ${item.taskId} ${item.lane}：${item.why}`),
+        left.length ? `没放进去的：\n${left.join("\n")}` : "",
+      ]
+        .filter(Boolean)
+        .join("\n")
+    }
+    case "bench_accept": {
+      const data = await seatCall("/api/v1/deputy", { action: "accept", project: args.project, taskId: args.task, why: args.why })
+      return `已代签通过 ${data.task.id}「${data.task.title}」，那个项目里留了记录（${data.messageId}），用户可以重开。`
     }
     case "bench_leave": {
       await seatCall("/api/v1/leave", {})

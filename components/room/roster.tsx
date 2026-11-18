@@ -18,6 +18,7 @@ import {
   Plus,
   RotateCw,
   Shrink,
+  SlidersHorizontal,
   Square,
   SquareTerminal,
   X,
@@ -36,9 +37,12 @@ import {
   DropdownMenuItem,
   DropdownMenuLabel,
   DropdownMenuSeparator,
+  DropdownMenuSub,
+  DropdownMenuSubContent,
+  DropdownMenuSubTrigger,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu"
-import { Avatar, Lamp } from "@/components/room/bits"
+import { Avatar, Lamp, useTick } from "@/components/room/bits"
 import { seatFlight } from "@/components/room/project-rail"
 import { goto } from "@/components/room/refs"
 import { CONTEXT_WARN, ContextHair, contextFacts, useContexts } from "@/components/room/context"
@@ -63,7 +67,6 @@ import type { PublicAgent } from "@/lib/types"
 type Props = {
   agents: PublicAgent[]
   adapters: AdapterInfo[] | null
-  now: number
   focusId: string | null
   busy: boolean
   onMention: (name: string) => void
@@ -86,6 +89,8 @@ type Props = {
   // The top line's left end (left-pane.tsx: 「← 项目」 and the project's name).
   head?: React.ReactNode
 }
+
+type RosterRowProps = Props & { now: number }
 
 function reach(kind: Kind, seats: PublicAgent[], adapters: AdapterInfo[] | null) {
   const adapter = adapters?.find((item) => item.name === kind.id)
@@ -116,6 +121,7 @@ function readOpen(): string[] {
 
 export function Roster(props: Props) {
   const { agents, adapters } = props
+  const now = useTick(10_000)
   const others = agents.filter((agent) => kindOf(agent) === null)
   // The five core kinds always get a row; any other kind once it has a seat.
   const seated = new Set(agents.map((agent) => kindOf(agent)?.id))
@@ -154,6 +160,7 @@ export function Roster(props: Props) {
         open={folding ? open.includes(kind.id) : true}
         onToggle={folding ? () => toggle(kind.id) : null}
         {...props}
+        now={now}
         contexts={contexts}
       />
     )
@@ -161,15 +168,19 @@ export function Roster(props: Props) {
 
   return (
     <div className="flex h-full min-h-0 flex-col">
-      <div className="tier-head flex items-center justify-between gap-1 px-4 pt-4 pb-2">
+      <div className="tier-head group/head flex items-center justify-between gap-1 px-4 pt-4 pb-2">
         <div className="min-w-0 flex-1">
           {props.head ?? <h2 className="text-xs font-semibold tracking-wider text-muted-foreground uppercase">入口</h2>}
         </div>
+        {/* Out of the row until the pointer or the keyboard is on it: the row
+            is the way back, the project's name and 「接入」 (AverageJoe
+            2026-11-16: too crowded). Always there where nothing hovers. */}
         {withSeats.length > 0 ? (
           <Button
             type="button"
             variant="ghost"
             size="icon-xs"
+            className="hidden group-focus-within/head:inline-flex group-hover/head:inline-flex [@media(hover:none)]:inline-flex"
             title={allOpen ? "全部收起" : "全部展开"}
             aria-label={allOpen ? "全部收起" : "全部展开"}
             onClick={() =>
@@ -181,7 +192,7 @@ export function Roster(props: Props) {
         ) : null}
         <Button type="button" variant="ghost" size="xs" onClick={() => props.onJoin()}>
           <Plus />
-          接入
+          接入 AI
         </Button>
       </div>
       {/* tier-rows: these fade in one after another when the room opens (globals.css). */}
@@ -213,7 +224,7 @@ export function Roster(props: Props) {
           <section className="pt-3">
             <h3 className="px-2 pb-1 text-xs font-medium text-muted-foreground">其他席位</h3>
             {others.map((agent) => (
-              <SeatRow key={agent.id} agent={agent} {...props} contexts={contexts} />
+              <SeatRow key={agent.id} agent={agent} {...props} now={now} contexts={contexts} />
             ))}
           </section>
         ) : null}
@@ -274,7 +285,7 @@ function KindStub({
             onClick={() => onJoin(kind.id)}
           >
             <Plug className="size-3.5" />
-            接入已有会话…
+            接入 AI
           </button>
         </div>
       </Reveal>
@@ -291,7 +302,7 @@ function KindGroup({
   open,
   onToggle,
   ...props
-}: Props & {
+}: RosterRowProps & {
   kind: Kind
   seats: PublicAgent[]
   state: ReturnType<typeof reach>
@@ -386,7 +397,7 @@ function KindGroup({
   )
 }
 
-function SeatRow({ agent, ...props }: Props & { agent: PublicAgent }) {
+function SeatRow({ agent, ...props }: RosterRowProps & { agent: PublicAgent }) {
   const focused = props.focusId === agent.id
   const context = props.contexts?.[agent.id]
   const facts = context ? contextFacts(context, props.now) : null
@@ -395,8 +406,11 @@ function SeatRow({ agent, ...props }: Props & { agent: PublicAgent }) {
   const busy = Boolean(agent.runId) || agent.status === "working" || agent.status === "blocked"
   // It said it was working, long ago, and nothing since: the room can't tell.
   const unsure = agent.unsure !== undefined && !agent.runId
-  // Quiet for a while with work still on it (lib/owes.ts).
-  const owes = agent.owes && props.now > 0 && props.now - agent.owes.since >= PARKED_MS ? agent.owes : null
+  // Quiet for a while with work still on it (lib/owes.ts), or already auto-woken by the room.
+  const owes =
+    agent.owes && props.now > 0 && (Boolean(agent.owes.woken) || props.now - agent.owes.since >= PARKED_MS)
+      ? agent.owes
+      : null
   const owed = owes ? owes.tasks.length + owes.calls.length : 0
   // What used to be lines under the name, now on hover.
   const tip = [
@@ -495,12 +509,6 @@ function SeatRow({ agent, ...props }: Props & { agent: PublicAgent }) {
                 单独说…
               </DropdownMenuItem>
             ) : null}
-            {kindOf(agent)?.spawn && !agent.demo ? (
-              <DropdownMenuItem title="在它所在目录开新会话" onClick={() => props.onSpawn(kindOf(agent)!.id, agent)}>
-                <Plus />
-                开新会话…
-              </DropdownMenuItem>
-            ) : null}
             {agent.runId ? (
               <DropdownMenuItem onClick={() => props.onStop(agent)}>
                 <Square />
@@ -510,12 +518,6 @@ function SeatRow({ agent, ...props }: Props & { agent: PublicAgent }) {
               <DropdownMenuItem onClick={() => props.onStop(agent)}>
                 <Square />
                 取消重试
-              </DropdownMenuItem>
-            ) : null}
-            {compactable ? (
-              <DropdownMenuItem onClick={() => props.onCompact(agent)}>
-                <Shrink />
-                压缩上下文
               </DropdownMenuItem>
             ) : null}
             {agent.demo ? null : (
@@ -530,56 +532,72 @@ function SeatRow({ agent, ...props }: Props & { agent: PublicAgent }) {
                 换模型…
               </DropdownMenuItem>
             ) : null}
-            {agent.demo ? null : (
-              <>
-                <DropdownMenuItem title="编辑席位职责与长期记忆" onClick={() => openSeatProfileFor(agent.id, { tab: "profile" })}>
-                  <BookOpen />
-                  编辑档案…
-                </DropdownMenuItem>
-                <DropdownMenuItem title="切到别的客户端或顶替此席位" onClick={() => openSeatProfileFor(agent.id, { tab: "rebind" })}>
-                  <ArrowRightLeft />
-                  换客户端…
-                </DropdownMenuItem>
-                {agent.callable ? (
-                  <DropdownMenuItem onClick={() => void togglePause(!agent.queuePaused)}>
-                    {agent.queuePaused ? <Play /> : <Pause />}
-                    {agent.queuePaused ? "恢复叫醒" : "暂停叫醒"}
-                  </DropdownMenuItem>
-                ) : null}
-                {/* Only Claude Code's and Codex's permission prompts come to the page (lib/kinds.ts PERMIT_KINDS). */}
-                {asksOnPage(agent.agentName) ? (
-                  <DropdownMenuCheckboxItem
-                    checked={Boolean(agent.autoFull)}
-                    onCheckedChange={(on) => void toggleAutoFull(on)}
-                    title="每次叫醒直接给全权，不再逐条确认"
-                  >
-                    默认给全权
-                  </DropdownMenuCheckboxItem>
-                ) : null}
-              </>
-            )}
             <DropdownMenuItem onClick={() => props.onFocus(focused ? null : agent.id)}>
               {focused ? "看全部对话" : "只看它相关"}
             </DropdownMenuItem>
-            {agent.hasSession && !agent.demo && (agent.agentName === "claude" || agent.agentName === "codex") ? (
+            {agent.demo ? null : (
               <>
                 <DropdownMenuSeparator />
-                <DropdownMenuGroup>
-                  <DropdownMenuLabel>高级</DropdownMenuLabel>
-                  <DropdownMenuItem
-                    title="在网页终端打开，可直接打字接管"
-                    onClick={() => openTerminalFor(agent.id, agent.name)}
-                  >
-                    <SquareTerminal />
-                    <span className="whitespace-nowrap">{agent.terminal ? "看终端" : "打开终端…"}</span>
-                    <BetaTag />
-                  </DropdownMenuItem>
-                </DropdownMenuGroup>
+                <DropdownMenuSub>
+                  <DropdownMenuSubTrigger>
+                    <SlidersHorizontal />
+                    高级
+                  </DropdownMenuSubTrigger>
+                  <DropdownMenuSubContent className="w-auto min-w-44">
+                    {kindOf(agent)?.spawn ? (
+                      <DropdownMenuItem title="在它所在目录开新会话" onClick={() => props.onSpawn(kindOf(agent)!.id, agent)}>
+                        <Plus />
+                        开新会话…
+                      </DropdownMenuItem>
+                    ) : null}
+                    {compactable ? (
+                      <DropdownMenuItem onClick={() => props.onCompact(agent)}>
+                        <Shrink />
+                        压缩上下文
+                      </DropdownMenuItem>
+                    ) : null}
+                    {agent.callable ? (
+                      <DropdownMenuItem onClick={() => void togglePause(!agent.queuePaused)}>
+                        {agent.queuePaused ? <Play /> : <Pause />}
+                        {agent.queuePaused ? "恢复叫醒" : "暂停叫醒"}
+                      </DropdownMenuItem>
+                    ) : null}
+                    {/* Only Claude Code's and Codex's permission prompts come to the page (lib/kinds.ts PERMIT_KINDS). */}
+                    {asksOnPage(agent.agentName) ? (
+                      <DropdownMenuCheckboxItem
+                        checked={Boolean(agent.autoFull)}
+                        onCheckedChange={(on) => void toggleAutoFull(on)}
+                        title="每次叫醒直接给全权，不再逐条确认"
+                      >
+                        默认给全权
+                      </DropdownMenuCheckboxItem>
+                    ) : null}
+                    <DropdownMenuSeparator />
+                    <DropdownMenuItem title="编辑席位分工与长期记忆" onClick={() => openSeatProfileFor(agent.id, { tab: "profile" })}>
+                      <BookOpen />
+                      编辑档案…
+                    </DropdownMenuItem>
+                    <DropdownMenuItem title="切到别的客户端或顶替此席位" onClick={() => openSeatProfileFor(agent.id, { tab: "rebind" })}>
+                      <ArrowRightLeft />
+                      换客户端…
+                    </DropdownMenuItem>
+                    {agent.hasSession && (agent.agentName === "claude" || agent.agentName === "codex") ? (
+                      <DropdownMenuItem
+                        title="在网页终端打开，可直接打字接管"
+                        onClick={() => openTerminalFor(agent.id, agent.name)}
+                      >
+                        <SquareTerminal />
+                        <span className="whitespace-nowrap">{agent.terminal ? "看终端" : "打开终端…"}</span>
+                        <BetaTag />
+                      </DropdownMenuItem>
+                    ) : null}
+                  </DropdownMenuSubContent>
+                </DropdownMenuSub>
               </>
-            ) : null}
+            )}
             <DropdownMenuSeparator />
             <DropdownMenuItem variant="destructive" onClick={() => props.onLeave(agent)}>
-              移出席位
+              移出
             </DropdownMenuItem>
           </DropdownMenuContent>
         </DropdownMenu>
@@ -738,14 +756,17 @@ function SeatRow({ agent, ...props }: Props & { agent: PublicAgent }) {
           <DropdownMenu>
             <DropdownMenuTrigger
               className="flex min-w-0 items-center gap-1 truncate text-left hover:underline"
-              title="停着未完的事，点开查看"
+              title={owes.woken ? `停着未完的事（房间已叫过 ${owes.woken.count} 次），点开查看` : "停着未完的事，点开查看"}
             >
               <Hourglass className="size-3 shrink-0" />
-              <span className="truncate">停着 · 还欠 {owed} 件</span>
+              <span className="truncate">{owes.woken ? "房间已叫它接着做" : `停着 · 还欠 ${owed} 件`}</span>
             </DropdownMenuTrigger>
             <DropdownMenuContent align="start" className="w-72">
               <DropdownMenuGroup>
-                <DropdownMenuLabel>{agent.name} 停了 {ago(owes.since, props.now).replace("前", "")}，还欠着</DropdownMenuLabel>
+                <DropdownMenuLabel>
+                  {agent.name} 停了 {ago(owes.since, props.now).replace("前", "")}，还欠 {owed} 件
+                  {owes.woken ? ` · 房间已叫过 ${owes.woken.count} 次` : ""}
+                </DropdownMenuLabel>
                 {owes.tasks.map((task) => (
                   <DropdownMenuItem key={task.id} className="flex-col items-start gap-0 text-xs" onClick={() => goto("task", task.id)}>
                     <span className="w-full truncate">{task.title}</span>

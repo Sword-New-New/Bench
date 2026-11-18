@@ -1,11 +1,12 @@
 "use client"
 
 import { type ComponentProps, startTransition, useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react"
-import { Gauge, ListTodo, MessageSquare, Monitor, Moon, Plug, Settings, Smartphone, Sparkles, Sun, TerminalSquare, Type, Users } from "lucide-react"
+import { BellRing, FolderOpen, Gauge, ListTodo, MessageSquare, Monitor, Moon, Plug, Settings, SlidersHorizontal, Smartphone, Sparkles, Sun, TerminalSquare, Type, UserRound, Users } from "lucide-react"
 import { useTheme } from "next-themes"
 import { toast } from "sonner"
 
 import { AdaptersDialog } from "@/components/room/adapters-dialog"
+import { NameField } from "@/components/room/name-field"
 import { Composer } from "@/components/room/composer"
 import { draft, useDraft } from "@/components/room/draft"
 import { Ambient, FLOW_EVENT, flowOn, setFlow } from "@/components/room/ambient"
@@ -28,13 +29,13 @@ import { Trajectory } from "@/components/room/trajectory"
 import { WhisperDialog } from "@/components/room/whisper-dialog"
 import { CommitDialog } from "@/components/room/commit-dialog"
 import { PUSH_OPEN, PushDialog } from "@/components/room/push-dialog"
-import { GOTO_EVENT, goto, type Goto } from "@/components/room/refs"
+import { GOTO_EVENT, OPEN_PROJECT_EVENT, goto, openFile, rememberTasks, type Goto, type OpenProject } from "@/components/room/refs"
 import { JustSaid } from "@/components/room/progress"
 import { digestOf, type Digest } from "@/lib/digest"
 import { FlowView } from "@/components/room/flow"
-import { flowsOf } from "@/lib/flow"
+import { flowsOf, namedTasks } from "@/lib/flow"
 import { SpawnDialog, type SpawnPreset } from "@/components/room/spawn-dialog"
-import { deskSeat, FRONT_ROLE, FRONT_SEAT, FrontButton, rememberBack, useBack } from "@/components/room/front"
+import { deskSeat, FRONT_ROLE, FRONT_SEAT, FrontBar, FrontButton, rememberBack, useBack } from "@/components/room/front"
 import { useSeen } from "@/components/room/project-rail"
 import { SeatProfileDialog } from "@/components/room/seat-profile-dialog"
 import { type Pending } from "@/components/room/attachments"
@@ -62,48 +63,70 @@ import {
   DropdownMenuRadioItem,
   DropdownMenuSeparator,
   DropdownMenuCheckboxItem,
+  DropdownMenuSub,
+  DropdownMenuSubContent,
+  DropdownMenuSubTrigger,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu"
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
 import { Textarea } from "@/components/ui/textarea"
+import { FirstOpen } from "@/components/room/first-open"
+import { WaitingPanel } from "@/components/room/waiting-panel"
 import { parseSlash } from "@/lib/commands"
-import { namedAgentIds } from "@/lib/text"
+import { mentionedAgentIds } from "@/lib/text"
 import { KINDS } from "@/lib/kinds"
+import {
+  collectOpenAsks,
+  isPendingInterrupted,
+  isPendingLimited,
+  type WaitingOverview,
+} from "@/lib/waiting-shared"
 import type { Message, Project, ProjectInfo, PublicAgent, RoomSnapshot, Task } from "@/lib/types"
 
 type TabId = "chat" | "people" | "tasks"
+type SimpleTabId = "chat" | "waiting"
 
-// 「摘要 / 详细」 for the thread, remembered in this browser.
-const DETAIL_KEY = "bench-thread-detail"
-const DETAIL_EVENT = "bench-thread-detail"
+// Two UI layers remembered in this browser (defaults to first/simple layer:
+// conversation + 「等你定」; full three-column detail view sits on the second layer).
+const LAYER_KEY = "bench-ui-layer"
+const LAYER_EVENT = "bench-ui-layer"
+type UiLayer = "simple" | "full"
+let layerNow: UiLayer = "simple"
 
-// Kept here too, for when the browser won't let the page store anything.
-let detailNow = false
-
-function detailSaved() {
-  try {
-    const saved = localStorage.getItem(DETAIL_KEY)
-    return saved === null ? detailNow : saved === "1"
-  } catch {
-    return detailNow
-  }
+function onLayerChange(callback: () => void) {
+  window.addEventListener(LAYER_EVENT, callback)
+  return () => window.removeEventListener(LAYER_EVENT, callback)
 }
 
-function onDetailChange(callback: () => void) {
-  window.addEventListener(DETAIL_EVENT, callback)
-  return () => window.removeEventListener(DETAIL_EVENT, callback)
-}
-
-function showDetail(value: boolean) {
-  detailNow = value
+function layerSaved(): UiLayer {
   try {
-    localStorage.setItem(DETAIL_KEY, value ? "1" : "0")
+    const saved = localStorage.getItem(LAYER_KEY)
+    if (saved === "full" || saved === "simple") layerNow = saved
   } catch {}
-  window.dispatchEvent(new Event(DETAIL_EVENT))
+  return layerNow
 }
 
-// 「进展 / 对话 / 流程」 for the thread, remembered the same way. 「进展」 is
+function setUiLayer(value: UiLayer) {
+  layerNow = value
+  try {
+    localStorage.setItem(LAYER_KEY, value)
+  } catch {}
+  window.dispatchEvent(new Event(LAYER_EVENT))
+}
+
+// The thread always shows replies by their gist, the full text a click away;
+// 「摘要 / 详细」 was taken out on 2026-11-16 (t_d196dffc): at the largest text
+// size it crowded the header, and the steps it put in the thread are a click
+// away in 「查看过程」 anyway.
+const VIEW_EVENT = "bench-thread-view"
+
+function onViewChange(callback: () => void) {
+  window.addEventListener(VIEW_EVENT, callback)
+  return () => window.removeEventListener(VIEW_EVENT, callback)
+}
+
+// 「进展 / 对话 / 流程」 for the thread, remembered in this browser. 「进展」 is
 // what you get until you pick another.
 type ThreadView = "progress" | "chat" | "flow"
 const VIEW_KEY = "bench-thread-view"
@@ -123,7 +146,7 @@ function showView(value: ThreadView) {
   try {
     localStorage.setItem(VIEW_KEY, value)
   } catch {}
-  window.dispatchEvent(new Event(DETAIL_EVENT))
+  window.dispatchEvent(new Event(VIEW_EVENT))
 }
 
 // What the progress tab holds while the page is not drawn.
@@ -185,8 +208,10 @@ export function RoomApp() {
   const room = useMemo(() => actual && withDebug(actual, debug), [actual, debug])
   const [error, setError] = useState<string | null>(null)
   const [live, setLive] = useState(false)
-  const [now, setNow] = useState(0)
   const [tab, setTab] = useState<TabId>("chat")
+  const [simpleTab, setSimpleTab] = useState<SimpleTabId>("chat")
+  const layer = useSyncExternalStore(onLayerChange, layerSaved, (): UiLayer => "simple")
+  const simple = layer === "simple"
   // The composer's text lives in its own store (draft.ts, draft.set below),
   // so typing doesn't redraw the room.
   // 「重新编辑」 on a recalled message puts its words back in the composer.
@@ -201,12 +226,17 @@ export function RoomApp() {
   const [reply, setReply] = useState<Message | null>(null)
   const [focusId, setFocusId] = useState<string | null>(null)
   const [joinOpen, setJoinOpen] = useState(false)
+  const [firstDone, setFirstDone] = useState(false)
   const [joinKind, setJoinKind] = useState<string | null>(null)
+  const [joinTour, setJoinTour] = useState(false)
+  const [nameOpen, setNameOpen] = useState(false)
   // The tour opens and closes the real 接入 dialog for its steps.
   useEffect(() => {
     const onTour = (event: Event) => {
+      const open = Boolean((event as CustomEvent<boolean>).detail)
       setJoinKind(null)
-      setJoinOpen(Boolean((event as CustomEvent<boolean>).detail))
+      setJoinTour(open)
+      setJoinOpen(open)
     }
     window.addEventListener(TOUR_JOIN, onTour)
     return () => window.removeEventListener(TOUR_JOIN, onTour)
@@ -215,8 +245,7 @@ export function RoomApp() {
   const [whisperId, setWhisperId] = useState<string | null>(null)
   // The seat whose model is being picked (「换模型…」).
   const [modelId, setModelId] = useState<string | null>(null)
-  const detail = useSyncExternalStore(onDetailChange, detailSaved, () => false)
-  const picked = useSyncExternalStore(onDetailChange, viewSaved, (): ThreadView => "progress")
+  const picked = useSyncExternalStore(onViewChange, viewSaved, (): ThreadView => "progress")
   // The front desk has no to-dos to line up: it stays a plain conversation.
   const view: ThreadView = room?.project.front && picked === "progress" ? "chat" : picked
   // No key in this browser: whatever the user does here is refused.
@@ -243,9 +272,16 @@ export function RoomApp() {
   const composerRef = useRef<HTMLTextAreaElement>(null)
   const pullRef = useRef<() => void>(() => {})
 
+  // The list as it last came, to tell a poll that brought nothing new.
+  const projectsText = useRef("")
   const loadProjects = useCallback(() => {
     return api<{ projects: Project[] }>("/api/v1/projects").then((data) => {
-      setProjects(data.projects)
+      // Polled every five seconds: the same list again must not redraw the room.
+      const text = JSON.stringify(data.projects)
+      if (text !== projectsText.current) {
+        projectsText.current = text
+        setProjects(data.projects)
+      }
       setProjectId((current) => {
         const ids = data.projects.map((item) => item.id)
         if (current && ids.includes(current)) return current
@@ -299,13 +335,18 @@ export function RoomApp() {
   const openProject = useCallback(
     (id: string, then?: () => void) => {
       wanted.current = id
-      if (id === openedId.current) return
+      if (id === openedId.current) {
+        then?.()
+        return
+      }
       const go = (snapshot: RoomSnapshot | null) => {
         // Only the last project picked.
         if (wanted.current !== id || id === openedId.current) return
         ahead.current.delete(id)
         setFocusId(null)
         setReply(null)
+        setSimpleTab("chat")
+        setOpenProject(id)
         draft.set("")
         startTransition(() => {
           then?.()
@@ -450,13 +491,9 @@ export function RoomApp() {
       streaming = false
       setLive(false)
     }
-    const tick = () => setNow(Date.now())
-    tick()
-    const clock = setInterval(tick, 10000)
     return () => {
       stopped = true
       clearInterval(poll)
-      clearInterval(clock)
       source.close()
     }
   }, [apply, projectId])
@@ -487,26 +524,115 @@ export function RoomApp() {
       return false
     })
   }, [room?.messages, focusAgent])
-  // The 「进展」 rows, worked out only while that page is showing (or its
-  // 「你刚说的」 is, over the composer).
+  // Older completed tasks pulled on demand (when clicking a t_… ref in chat or
+  // when the 「流程」 view names a task finished > 48h ago).
+  const [extraTasksState, setExtraTasksState] = useState<{ projectId: string; list: Task[] }>({
+    projectId: "",
+    list: [],
+  })
+  const allTasks = useMemo(() => {
+    const base = room?.tasks ?? []
+    const pid = room?.project.id ?? ""
+    const extra = extraTasksState.projectId === pid ? extraTasksState.list : []
+    if (extra.length === 0) return base
+    const seen = new Set(base.map((t) => t.id))
+    const merged = [...base]
+    for (const item of extra) {
+      if (!seen.has(item.id)) {
+        seen.add(item.id)
+        merged.push(item)
+      }
+    }
+    return merged
+  }, [room?.tasks, room?.project.id, extraTasksState])
+
+  useEffect(() => {
+    if (view !== "flow" || !room) return
+    const pid = room.project.id
+    const known = new Set(allTasks.map((t) => t.id))
+    const missing = new Set<string>()
+    for (const msg of room.messages) {
+      if (msg.taskId && !known.has(msg.taskId)) missing.add(msg.taskId)
+      if (msg.verdict?.taskId && !known.has(msg.verdict.taskId)) missing.add(msg.verdict.taskId)
+      for (const id of namedTasks(msg.text)) {
+        if (!known.has(id)) missing.add(id)
+      }
+    }
+    if (missing.size === 0) return
+    let live = true
+    Promise.all(
+      [...missing].map((id) =>
+        api<{ task?: Task }>(`/api/v1/tasks/${encodeURIComponent(id)}`)
+          .then((res) => res.task ?? null)
+          .catch(() => null),
+      ),
+    ).then((loaded) => {
+      if (!live) return
+      const valid = loaded.filter((t): t is Task => Boolean(t))
+      if (valid.length === 0) return
+      setExtraTasksState((prev) => {
+        const cur = prev.projectId === pid ? prev.list : []
+        const seen = new Set(cur.map((t) => t.id))
+        const next = [...cur]
+        for (const item of valid) {
+          if (!seen.has(item.id)) {
+            seen.add(item.id)
+            next.push(item)
+          }
+        }
+        return { projectId: pid, list: next }
+      })
+    })
+    return () => {
+      live = false
+    }
+  }, [view, room, allTasks])
+
+  const [waitingOverview, setWaitingOverview] = useState<WaitingOverview | null>(null)
+  const waitingTextRef = useRef("")
+  const loadWaiting = useCallback(() => {
+    return api<WaitingOverview>("/api/v1/waiting")
+      .then((data) => {
+        const text = JSON.stringify(data)
+        if (text !== waitingTextRef.current) {
+          waitingTextRef.current = text
+          setWaitingOverview(data)
+        }
+      })
+      .catch(() => {})
+  }, [])
+  useEffect(() => {
+    if (!simple || !room?.project.front) return
+    const first = window.setTimeout(() => void loadWaiting(), 0)
+    const timer = window.setInterval(() => {
+      if (document.visibilityState === "visible") void loadWaiting()
+    }, 4000)
+    return () => {
+      window.clearTimeout(first)
+      window.clearInterval(timer)
+    }
+  }, [simple, room?.project.front, room?.rev, projects, loadWaiting])
+
+  // The 「进展」 rows, computed when the progress tab is shown OR on the
+  // simple first layer for an ordinary project (reused for 「等你定」).
   const digest = useMemo(
     () =>
-      view === "progress" && room
+      room && ((simple && !room.project.front) || view === "progress")
         ? digestOf({
             messages: room.messages,
-            tasks: room.tasks,
+            tasks: allTasks,
             agents: room.agents,
             permits: room.permits ?? [],
             userName: room.userName,
             now: Date.now(),
           })
         : null,
-    [view, room],
+    [simple, view, room, allTasks],
   )
   // The 「流程」 view's pictures, worked out only while it is showing.
   const flows = useMemo(
-    () => (view === "flow" && room ? flowsOf(room.messages, room.tasks, room.agents, room.userName) : []),
-    [view, room],
+    () => (view === "flow" && room ? flowsOf(room.messages, allTasks, room.agents, room.userName) : []),
+    [view, room, allTasks],
   )
 
   // Who spoke in the room, latest first, for the composer's chips.
@@ -538,7 +664,10 @@ export function RoomApp() {
 
   // A slash command from the input (lib/commands.ts): to each seat @'d in it,
   // through the seat actions; nothing is said in the room.
-  function sendSlash({ command, targets, text }: NonNullable<ReturnType<typeof parseSlash>>) {
+  function sendSlash({ command, targets: named, text }: NonNullable<ReturnType<typeof parseSlash>>) {
+    // At the front desk there is one seat to mean: no @ needed.
+    const sole = room?.project.front ? deskSeat(agents)?.name : undefined
+    const targets = named.length === 0 && sole ? [sole] : named
     if (targets.length === 0) return void toast.error(`/${command.name} 要发给谁？@ 一个席位`)
     if (command.needsText && !text) return void toast.error(`/${command.name} 后面写上${command.hint}`)
     void run(async () => {
@@ -589,33 +718,97 @@ export function RoomApp() {
     requestAnimationFrame(() => composerRef.current?.focus())
   }
 
+  // 「t_…」 in a message reads as the to-do's title (components/room/refs.ts).
+  useEffect(() => {
+    rememberTasks(allTasks)
+  }, [allTasks])
   // A task id clicked in a message (components/room/refs.ts).
   const openTaskRef = useRef(openTask)
-  const tasksRef = useRef(room?.tasks)
+  const tasksRef = useRef(allTasks)
+  const projectIdRef = useRef(room?.project.id ?? "")
   useEffect(() => {
     openTaskRef.current = openTask
-    tasksRef.current = room?.tasks
+    tasksRef.current = allTasks
+    projectIdRef.current = room?.project.id ?? ""
   })
   useEffect(() => {
     const onGoto = (event: Event) => {
       const { kind, id } = (event as CustomEvent<Goto>).detail
       if (kind !== "task") return
-      if (tasksRef.current && !tasksRef.current.some((task) => task.id === id)) {
-        toast("这个项目里没有这条待办")
+      if (tasksRef.current && tasksRef.current.some((task) => task.id === id)) {
+        openTaskRef.current(id)
         return
       }
-      openTaskRef.current(id)
+      const pid = projectIdRef.current
+      api<{ task?: Task }>(`/api/v1/tasks/${encodeURIComponent(id)}`)
+        .then((res) => {
+          if (!res.task) {
+            toast("这个项目里没有这条待办")
+            return
+          }
+          const fetched = res.task
+          setExtraTasksState((prev) => {
+            const cur = prev.projectId === pid ? prev.list : []
+            if (cur.some((t) => t.id === fetched.id)) return prev
+            return { projectId: pid, list: [...cur, fetched] }
+          })
+          requestAnimationFrame(() => openTaskRef.current(id))
+        })
+        .catch(() => {
+          toast("这个项目里没有这条待办")
+        })
     }
     window.addEventListener(GOTO_EVENT, onGoto)
     return () => window.removeEventListener(GOTO_EVENT, onGoto)
   }, [])
+  // A card at the front desk pointing into another project (relay-card.tsx):
+  // open that room, at the to-do when it names one.
+  const openProjectRef = useRef(openProject)
+  useEffect(() => {
+    openProjectRef.current = openProject
+  })
+  useEffect(() => {
+    const onOpen = (event: Event) => {
+      const { project, task } = (event as CustomEvent<OpenProject>).detail
+      openProjectRef.current(project, task ? () => openTaskRef.current(task) : undefined)
+    }
+    window.addEventListener(OPEN_PROJECT_EVENT, onOpen)
+    return () => window.removeEventListener(OPEN_PROJECT_EVENT, onOpen)
+  }, [])
+
+  function scrollTaskIntoView(taskId: string, tries = 30) {
+    const step = (left: number) => {
+      const node = document.getElementById(`task-${taskId}`)
+      if (node) {
+        node.scrollIntoView({ block: "center" })
+        return
+      }
+      if (left > 0) requestAnimationFrame(() => step(left - 1))
+    }
+    requestAnimationFrame(() => step(tries))
+  }
 
   function openTask(taskId: string) {
+    const pid = room?.project.id ?? ""
+    if (layerSaved() === "simple") setUiLayer("full")
+    if (!allTasks.some((t) => t.id === taskId)) {
+      const query = pid ? `?project=${encodeURIComponent(pid)}` : ""
+      api<{ task?: Task }>(`/api/v1/tasks/${encodeURIComponent(taskId)}${query}`)
+        .then((res) => {
+          if (!res.task) return
+          const fetched = res.task
+          setExtraTasksState((prev) => {
+            const cur = prev.projectId === pid ? prev.list : []
+            if (cur.some((t) => t.id === fetched.id)) return prev
+            return { projectId: pid, list: [...cur, fetched] }
+          })
+          scrollTaskIntoView(taskId, 30)
+        })
+        .catch(() => {})
+    }
     setTab("tasks")
     setHighlight(taskId)
-    requestAnimationFrame(() => {
-      document.getElementById(`task-${taskId}`)?.scrollIntoView({ block: "center" })
-    })
+    scrollTaskIntoView(taskId, 30)
     window.setTimeout(() => {
       setHighlight((current) => (current === taskId ? null : current))
     }, 2200)
@@ -641,6 +834,27 @@ export function RoomApp() {
   ]
   const openTasks = room?.tasks.filter((task) => task.status !== "done").length ?? 0
   const currentProject = room?.project ?? projects?.find((item) => item.id === projectId) ?? null
+  // The front desk shows as one chat window (FrontBar over the thread).
+  const desk = Boolean(room?.project.front)
+  const simpleWaitingCount = !room
+    ? 0
+    : desk
+      ? waitingOverview
+        ? waitingOverview.permits.length +
+          waitingOverview.asks.length +
+          waitingOverview.limited.length +
+          waitingOverview.interrupted.length +
+          waitingOverview.reviews.length
+        : 0
+      : (room.permits?.length ?? 0) +
+        collectOpenAsks(room.messages, room.openAsks).length +
+        room.messages.filter(isPendingLimited).length +
+        room.messages.filter(isPendingInterrupted).length +
+        (digest?.you.filter((row) => row.need === "review").length ?? 0)
+  const simpleWorkingCount = desk
+    ? (waitingOverview?.workingTotal ??
+      (projects?.filter((item) => !item.front).reduce((sum, item) => sum + item.working, 0) ?? 0))
+    : working
 
   // Stop a seat's run (and what is queued for it): the seat menu and the
   // working bubble in the thread.
@@ -653,6 +867,33 @@ export function RoomApp() {
       if (result.retryCancelled) return void toast.success(`${agent.name} 不再自动重试了`)
       toast.success(`${agent.name} 停下了${result.dropped > 0 ? `，排队的 ${result.dropped} 条也取消了` : ""}`)
     })
+
+  // Have the room compact a seat's context: the seat menu, and the desk's bar.
+  const compactSeat = (agent: PublicAgent) =>
+    void run(async () => {
+      await api(`/api/v1/agents/${agent.id}`, {
+        method: "POST",
+        body: JSON.stringify({ as: "human", action: "compact" }),
+      })
+      toast.success(`${agent.name} 开始压缩上下文，好了会在群里说一声`)
+    })
+
+  // 「第一次打开」: nobody has sat or spoken here yet (the server checks every
+  // project before it shows). Gone for good once anything has happened.
+  if (room && !firstDone && !room.agents.some((agent) => !agent.demo) && !room.messages.some((message) => message.authorId === "human")) {
+    return (
+      <main className="relative isolate flex h-dvh flex-col overflow-y-auto">
+        <Ambient />
+        <FirstOpen
+          onMore={() => setFirstDone(true)}
+          onStarted={(id) => {
+            setFirstDone(true)
+            openProject(id)
+          }}
+        />
+      </main>
+    )
+  }
 
   return (
     <main className="relative isolate flex h-dvh flex-col">
@@ -673,20 +914,32 @@ export function RoomApp() {
         <Mark />
         <h1 className="sr-only">并坐</h1>
         <div className="min-w-0" data-tour="project">
-          {/* From lg the project rail switches, creates and opens settings, so
-              the header only says where this one lives. */}
-          <div className="lg:hidden">
+          {/* From lg on the second layer the project rail switches, creates and opens settings, so
+              the header only says where this one lives. On the first layer and at the desk there is no rail. */}
+          <div className={simple || currentProject?.front ? "" : "lg:hidden"}>
             <ProjectMenu
               projects={projects ?? []}
               current={currentProject}
+              alwaysShowName={simple}
               onPick={openProject}
               onCreate={() => setProjectDialog({ editing: null })}
               onEdit={() => room && setProjectDialog({ editing: room.project })}
               onEnableFront={frontProject ? undefined : enableFront}
             />
           </div>
-          <ProjectPlace project={currentProject} />
+          {simple || currentProject?.front ? null : <ProjectPlace project={currentProject} />}
         </div>
+        {currentProject?.dir && !currentProject.front ? (
+          <button
+            type="button"
+            className="-ml-1.5 grid size-7 shrink-0 place-items-center rounded-full text-muted-foreground transition-colors hover:bg-foreground/[0.06] hover:text-foreground"
+            title={`在文件管理器里打开 ${currentProject.dir}`}
+            aria-label="在文件管理器里打开项目文件夹"
+            onClick={() => void openFile(currentProject.dir!, undefined, undefined)}
+          >
+            <FolderOpen className="size-4" />
+          </button>
+        ) : null}
         <div className="ml-auto flex items-center gap-1.5">
           {projects ? (
             <FrontButton
@@ -698,14 +951,24 @@ export function RoomApp() {
               onEnable={enableFront}
             />
           ) : null}
-          <span
-            className="pill mr-1 hidden items-center gap-1.5 rounded-full px-2.5 py-1 text-xs text-muted-foreground sm:flex"
-            title={live ? "实时连接正常" : "正在重连"}
+          {!simple ? (
+            <span
+              className="pill mr-1 hidden items-center gap-1.5 rounded-full px-2.5 py-1 text-xs text-muted-foreground sm:flex"
+              title={live ? "实时连接正常" : "正在重连"}
+            >
+              <span className={`size-1.5 rounded-full ${live ? "bg-emerald-500" : "animate-pulse bg-amber-500"}`} />
+              {room ? `${seated} 在线 · ${working} 在做` : "正在打开"}
+            </span>
+          ) : null}
+          <button
+            type="button"
+            className="flex h-7 items-center gap-1 rounded-full border border-foreground/12 px-2.5 text-xs font-medium text-muted-foreground transition-colors hover:bg-foreground/[0.06] hover:text-foreground"
+            title={simple ? "打开完整项目、席位和待办栏" : "回到对话与等你定界面"}
+            onClick={() => setUiLayer(simple ? "full" : "simple")}
           >
-            <span className={`size-1.5 rounded-full ${live ? "bg-emerald-500" : "animate-pulse bg-amber-500"}`} />
-            {room ? `${seated} 在线 · ${working} 在做` : "正在打开"}
-          </span>
-          {DEBUG_MENU ? (
+            {simple ? "看细节" : "回到简单"}
+          </button>
+          {!simple && DEBUG_MENU ? (
             <DebugMenu
               view={debug}
               agents={agents}
@@ -715,7 +978,7 @@ export function RoomApp() {
               onForget={(agent) =>
                 void run(() => debugCall({ action: "forget", agentId: agent.id }), `${agent.name} 下次被叫醒会收到全部积压`)
               }
-              onClearSummary={() => void run(() => debugCall({ action: "clearSummary", confirm: "清空摘要" }), "摘要清空了")}
+              onClearSummary={() => void run(() => debugCall({ action: "clearSummary", confirm: "清空摘要" }), "房间摘要清空了")}
               onSummaryDone={() => window.dispatchEvent(new Event(SUMMARY_DONE_DEMO))}
               onLiveDemo={() => window.dispatchEvent(new Event(LIVE_DEMO))}
               onTour={() => window.dispatchEvent(new Event(TOUR_START))}
@@ -746,11 +1009,6 @@ export function RoomApp() {
                     跟随系统
                   </DropdownMenuRadioItem>
                 </DropdownMenuRadioGroup>
-                {theme !== "light" ? (
-                  <DropdownMenuCheckboxItem checked={flow} onCheckedChange={(on) => setFlow(on)} closeOnClick>
-                    深色背景缓慢流动
-                  </DropdownMenuCheckboxItem>
-                ) : null}
               </DropdownMenuGroup>
               <DropdownMenuSeparator />
               <DropdownMenuGroup>
@@ -787,118 +1045,184 @@ export function RoomApp() {
                 推送到手机…
               </DropdownMenuItem>
               <DropdownMenuSeparator />
-              {room ? (
-                <DropdownMenuCheckboxItem
-                  checked={room.netRetry}
-                  closeOnClick
-                  title="唤起因为断网、连接被重置、网关 502/503/504 这类原因没成功时，房间隔 20 秒、60 秒带着同样的消息再叫两次，都不行才在群里报错"
-                  onCheckedChange={(on) =>
-                    void run(
-                      () => api("/api/v1/retry", { method: "POST", body: JSON.stringify({ as: "human", on }) }).then(() => undefined),
-                      on ? "网络错误会自动重试了" : "网络错误不再自动重试",
-                    )
-                  }
-                >
-                  网络错误自动重试
-                </DropdownMenuCheckboxItem>
-              ) : null}
-              <DropdownMenuItem
-                onClick={() => {
-                  setAdapterName(null)
-                  setAdaptersOpen(true)
-                }}
-              >
-                <TerminalSquare />
-                唤起命令…
+              <DropdownMenuItem onClick={() => setNameOpen(true)}>
+                <UserRound />
+                你的名字…
               </DropdownMenuItem>
-              <DropdownMenuItem onClick={() => window.dispatchEvent(new Event(TOUR_START))}>
-                <Sparkles />
-                新手引导
-              </DropdownMenuItem>
-              <DropdownMenuItem onClick={() => window.dispatchEvent(new Event(SPEED_OPEN))}>
-                <Gauge />
-                Token 测速台
-              </DropdownMenuItem>
+              <DropdownMenuSeparator />
+              <DropdownMenuSub>
+                <DropdownMenuSubTrigger>
+                  <SlidersHorizontal />
+                  高级
+                </DropdownMenuSubTrigger>
+                <DropdownMenuSubContent className="min-w-52">
+                  <DropdownMenuItem
+                    onClick={() => {
+                      setAdapterName(null)
+                      setAdaptersOpen(true)
+                    }}
+                  >
+                    <TerminalSquare />
+                    唤起命令…
+                  </DropdownMenuItem>
+                  <DropdownMenuItem onClick={() => window.dispatchEvent(new Event(SPEED_OPEN))}>
+                    <Gauge />
+                    Token 测速台
+                  </DropdownMenuItem>
+                  {room || theme !== "light" ? <DropdownMenuSeparator /> : null}
+                  {room ? (
+                    <DropdownMenuCheckboxItem
+                      checked={room.netRetry}
+                      closeOnClick
+                      title="叫醒因为断网、连接被重置、网关 502/503/504 这类原因没成功时，房间隔 20 秒、60 秒带着同样的消息再叫两次，都不行才在群里报错"
+                      onCheckedChange={(on) =>
+                        void run(
+                          () => api("/api/v1/retry", { method: "POST", body: JSON.stringify({ as: "human", on }) }).then(() => undefined),
+                          on ? "网络错误会自动重试了" : "网络错误不再自动重试",
+                        )
+                      }
+                    >
+                      网络错误自动重试
+                    </DropdownMenuCheckboxItem>
+                  ) : null}
+                  {room ? (
+                    <DropdownMenuCheckboxItem
+                      checked={room.limitResume}
+                      closeOnClick
+                      title="叫醒撞上 5 小时额度、读得出几点重置时，到点后自动带着同样的消息再叫一次；卡片上能取消。每周额度不自动，仍由你决定"
+                      onCheckedChange={(limit) =>
+                        void run(
+                          () => api("/api/v1/retry", { method: "POST", body: JSON.stringify({ as: "human", limit }) }).then(() => undefined),
+                          limit ? "撞到 5 小时额度会到点自动继续了" : "撞到 5 小时额度不再自动继续",
+                        )
+                      }
+                    >
+                      5 小时额度到点自动继续
+                    </DropdownMenuCheckboxItem>
+                  ) : null}
+                  {theme !== "light" ? (
+                    <DropdownMenuCheckboxItem checked={flow} onCheckedChange={(on) => setFlow(on)} closeOnClick>
+                      深色背景缓慢流动
+                    </DropdownMenuCheckboxItem>
+                  ) : null}
+                  <DropdownMenuSeparator />
+                  <DropdownMenuItem
+                    onClick={() => {
+                      // The tour walks the full page (project rail, seats): show that first.
+                      if (simple) setUiLayer("full")
+                      window.dispatchEvent(new Event(TOUR_START))
+                    }}
+                  >
+                    <Sparkles />
+                    新手引导
+                  </DropdownMenuItem>
+                </DropdownMenuSubContent>
+              </DropdownMenuSub>
             </DropdownMenuContent>
           </DropdownMenu>
-          <Button
-            type="button"
-            size="sm"
-            className="rounded-full"
-            data-tour="join"
-            onClick={() => {
-              setJoinKind(null)
-              setJoinOpen(true)
-            }}
-          >
-            <Plug />
-            接入说明
-          </Button>
+          {!simple ? (
+            <Button
+              type="button"
+              size="sm"
+              className="rounded-full"
+              data-tour="join"
+              onClick={() => {
+                setJoinKind(null)
+                setJoinTour(false)
+                setJoinOpen(true)
+              }}
+            >
+              <Plug />
+              接入 AI
+            </Button>
+          ) : null}
         </div>
       </header>
       </div>
 
       {!room ? (
-        <div className="grid min-h-0 flex-1 gap-4 p-3 lg:grid-cols-[300px_1fr_300px] lg:px-4 lg:pt-1 lg:pb-4">
-          {["入口", "对话", "待办"].map((label) => (
+        <div
+          className={`grid min-h-0 flex-1 gap-4 p-3 lg:px-4 lg:pt-1 lg:pb-4 ${
+            simple ? "lg:grid-cols-[1fr_340px]" : "lg:grid-cols-[300px_1fr_300px]"
+          }`}
+        >
+          {(simple ? ["对话", "等你定"] : ["入口", "对话", "待办"]).map((label) => (
             <div key={label} className="frost animate-pulse rounded-2xl p-4 text-sm text-muted-foreground">
               正在打开{label}
             </div>
           ))}
         </div>
       ) : (
-        <div className="grid min-h-0 flex-1 grid-rows-[minmax(0,1fr)] pt-2 lg:grid-cols-[300px_minmax(0,1fr)_300px] lg:gap-4 lg:px-4 lg:pt-1 lg:pb-4">
-          <aside className={`${tab === "people" ? "block" : "hidden"} h-full min-h-0 lg:block`}>
-            <LeftPane
-              projects={projects ?? []}
-              current={room.project}
-              className="h-full min-h-0"
-              onOpen={openProject}
-              onPrefetch={prefetch}
-              onCreate={() => setProjectDialog({ editing: null })}
-              onEdit={(project) => setProjectDialog({ editing: project })}
-              onEnableFront={enableFront}
-              roster={(head) => (
-            <Roster
-              head={head}
-              agents={agents}
-              adapters={adapters}
-              now={now}
-              focusId={focusId}
-              busy={busy}
-              onMention={mention}
-              onFocus={(id) => {
-                setFocusId(id)
-                setTab("chat")
-              }}
-              onLeave={setLeaving}
-              onRename={(agent) => {
-                setNewName(agent.name)
-                setRenaming(agent)
-              }}
-              onOpenRun={setRunId}
-              onWhisper={(agent) => setWhisperId(agent.id)}
-              onModel={(agent) => setModelId(agent.id)}
-              onSpawn={(kind, from) => setSpawn({ kind, from })}
-              onStop={stopSeat}
-              onCompact={(agent) =>
-                void run(async () => {
-                  await api(`/api/v1/agents/${agent.id}`, {
-                    method: "POST",
-                    body: JSON.stringify({ as: "human", action: "compact" }),
-                  })
-                  toast.success(`${agent.name} 开始压缩上下文，好了会在群里说一声`)
-                })
-              }
-              onJoin={(kind) => {
-                setJoinKind(kind ?? null)
-                setJoinOpen(true)
-              }}
-            />
-              )}
-            />
-          </aside>
-          <section data-tour="chat" className={`${tab === "chat" ? "flex" : "hidden"} relative h-full min-h-0 flex-col lg:flex`}>
+        <div
+          className={`grid min-h-0 flex-1 grid-rows-[minmax(0,1fr)] pt-2 lg:gap-4 lg:px-4 lg:pt-1 lg:pb-4 ${
+            simple ? "lg:grid-cols-[minmax(0,1fr)_340px]" : desk ? "lg:grid-cols-[300px_minmax(0,1fr)]" : "lg:grid-cols-[300px_minmax(0,1fr)_300px]"
+          }`}
+        >
+          {/* Second layer only: project rail + seats column (ordinary projects). */}
+          {/* At the desk too, from lg: walking in from the project list, the
+              list stays, so a project is one click back (AverageJoe
+              2026-11-18: 「能点进去但点不回来」). There it is the list, not a roster. */}
+          {!simple ? (
+            <aside className={`${tab === "people" && !desk ? "block" : "hidden"} h-full min-h-0 lg:block`}>
+              <LeftPane
+                projects={projects ?? []}
+                current={room.project}
+                className="h-full min-h-0"
+                onOpen={openProject}
+                onPrefetch={prefetch}
+                onCreate={() => setProjectDialog({ editing: null })}
+                onEdit={(project) => setProjectDialog({ editing: project })}
+                onEnableFront={enableFront}
+                roster={(head) => (
+              <Roster
+                head={head}
+                agents={agents}
+                adapters={adapters}
+                focusId={focusId}
+                busy={busy}
+                onMention={mention}
+                onFocus={(id) => {
+                  setFocusId(id)
+                  setTab("chat")
+                }}
+                onLeave={setLeaving}
+                onRename={(agent) => {
+                  setNewName(agent.name)
+                  setRenaming(agent)
+                }}
+                onOpenRun={setRunId}
+                onWhisper={(agent) => setWhisperId(agent.id)}
+                onModel={(agent) => setModelId(agent.id)}
+                onSpawn={(kind, from) => setSpawn({ kind, from })}
+                onStop={stopSeat}
+                onCompact={compactSeat}
+                onJoin={(kind) => {
+                  setJoinKind(kind ?? null)
+                  setJoinTour(false)
+                  setJoinOpen(true)
+                }}
+              />
+                )}
+              />
+            </aside>
+          ) : null}
+          <section
+            data-tour="chat"
+            className={`${(simple ? simpleTab === "chat" : tab === "chat" || desk) ? "flex" : "hidden"} relative h-full min-h-0 flex-col lg:flex`}
+          >
+            {desk ? (
+              <FrontBar
+                seat={deskSeat(agents)}
+                showDeputyBar={!simple}
+                refreshKey={String(room.rev)}
+                onStop={stopSeat}
+                onOpenRun={setRunId}
+                onLeave={setLeaving}
+                onStaff={staffFront}
+                onCompact={compactSeat}
+                onModel={(agent) => setModelId(agent.id)}
+              />
+            ) : null}
             {error ? (
               <p className="mx-3 rounded-xl bg-destructive/10 px-4 py-2 text-xs text-destructive">{error} 正在重试。</p>
             ) : null}
@@ -906,13 +1230,11 @@ export function RoomApp() {
               // A fresh thread per project: it opens at the bottom of the new
               // room at once, instead of gliding there from the old one's spot.
               key={room.project.id}
-              detail={detail}
-              onDetail={showDetail}
-              view={view}
-              onView={showView}
-              progress={room.project.front ? undefined : { digest: digest ?? EMPTY_DIGEST, permits: room.permits ?? [] }}
+              view={simple ? "chat" : view}
+              onView={simple || desk ? undefined : showView}
+              progress={simple || room.project.front ? undefined : { digest: digest ?? EMPTY_DIGEST, permits: room.permits ?? [] }}
               flow={
-                view === "flow" ? (
+                !simple && view === "flow" ? (
                   <FlowView
                     flows={flows}
                     agents={agents}
@@ -955,12 +1277,14 @@ export function RoomApp() {
                 requestAnimationFrame(() => composerRef.current?.focus())
               }}
               front={Boolean(room.project.front)}
+              simple={simple}
               onStaff={staffFront}
             />
             {/* Over the thread, in the blank to its left; lets the scroll through. */}
-            {view === "chat" ? <Trajectory agents={agents} messages={visibleMessages} onOpenRun={setRunId} /> : null}
+            {!simple && view === "chat" && !desk ? <Trajectory agents={agents} messages={visibleMessages} onOpenRun={setRunId} /> : null}
             <DraftComposer
               placeholder={room.project.front ? frontHint(agents) : undefined}
+              sole={room.project.front ? deskSeat(agents)?.name : undefined}
               agents={agents}
               speakers={speakers}
               reply={reply}
@@ -972,22 +1296,27 @@ export function RoomApp() {
               notice={
                 room ? (
                   <>
-                    {/* On the progress page a permission is a button on its row; the bar only holds those no row has. */}
-                    <PermitBar
-                      room={
-                        digest
-                          ? { ...room, permits: (room.permits ?? []).filter((item) => !digest.you.some((row) => row.permitId === item.id)) }
-                          : room
-                      }
-                    />
-                    {digest ? <JustSaid messages={room.messages} agents={room.agents} digest={digest} /> : null}
+                    {/* In simple mode, permit & ask buttons live solely in 「等你定」. */}
+                    {!simple ? (
+                      <>
+                        {/* On the progress page a permission is a button on its row; the bar only holds those no row has. */}
+                        <PermitBar
+                          room={
+                            digest
+                              ? { ...room, permits: (room.permits ?? []).filter((item) => !digest.you.some((row) => row.permitId === item.id)) }
+                              : room
+                          }
+                        />
+                        {digest ? <JustSaid messages={room.messages} agents={room.agents} digest={digest} /> : null}
+                      </>
+                    ) : null}
                     <SummaryNudge
                       room={room}
                       busy={busy}
                       onRequest={(agent) =>
                         void run(
                           () => summaryCall({ action: "request", agentId: agent.id }),
-                          `请 ${agent.name} 写摘要了`,
+                          `请 ${agent.name} 写房间摘要了`,
                         )
                       }
                       onSkip={() => void run(() => summaryCall({ action: "skip" }))}
@@ -998,6 +1327,12 @@ export function RoomApp() {
               onSend={() => {
                 const text = draft.get().trim()
                 if ((!text && files.length === 0) || files.some((item) => item.uploading)) return
+                // Nobody at the desk to hear it: pick one first, the words stay in the input.
+                if (room.project.front && !deskSeat(agents)) {
+                  toast("还没有人值班，先挑一个 AI")
+                  staffFront()
+                  return
+                }
                 const slash = parseSlash(
                   text,
                   agents.map((agent) => agent.name),
@@ -1008,9 +1343,9 @@ export function RoomApp() {
                 }
                 const attachments = files.map(({ kind, name, path }) => ({ kind, name, path }))
                 const replyTo = reply?.id
-                // Named seats that are busy get this after what they're doing.
+                // Seats called (@) that are busy get this after what they're doing.
                 // Whole names, the way the room takes them: @Opus2 is not @Opus.
-                const named = new Set(namedAgentIds(text, agents))
+                const named = new Set(mentionedAgentIds(text, agents))
                 const queued = agents.filter((agent) => agent.runId && named.has(agent.id))
                 void run(async () => {
                   await api("/api/v1/say", {
@@ -1032,95 +1367,172 @@ export function RoomApp() {
               }}
             />
           </section>
-          <aside data-tour="tasks" className={`${tab === "tasks" ? "block" : "hidden"} h-full min-h-0 overflow-hidden lg:block`}>
-            <TasksPanel
-              tasks={room.tasks}
-              agents={agents}
-              highlightId={highlight}
-              busy={busy}
-              onOpenRun={setRunId}
-              header={
-                <SummaryCard
-                  room={room}
-                  busy={busy}
-                  onSave={async (text) => {
-                    let saved = false
-                    await run(async () => {
-                      await summaryCall({ action: "edit", text })
-                      saved = true
-                    }, "摘要存好了")
-                    return saved
-                  }}
-                />
-              }
-              onStep={(task, step, state) =>
-                void run(() =>
-                  api(`/api/v1/tasks/${task.id}`, {
-                    method: "POST",
-                    body: JSON.stringify({ as: "human", action: "step", step, state }),
-                  }).then(() => undefined),
-                )
-              }
-              onReview={(task, pass, note) =>
-                void run(
-                  () =>
+          {simple ? (
+            <div className={`${simpleTab === "waiting" ? "block" : "hidden"} h-full min-h-0 px-3 pb-2 lg:block lg:px-0 lg:pb-0`}>
+              <WaitingPanel
+                room={room}
+                digest={digest}
+                overview={waitingOverview}
+                workingCount={simpleWorkingCount}
+                refreshKey={`${room.project.id}:${room.rev}:${room.doneTotal ?? 0}:${simpleWorkingCount}`}
+                busy={busy}
+                onEnterFull={(taskId) => {
+                  if (taskId) openTask(taskId)
+                  else setUiLayer("full")
+                }}
+                onOpenRun={setRunId}
+                onRewake={(wakeRunId) =>
+                  void run(
+                    () =>
+                      api(`/api/v1/runs/${wakeRunId}`, {
+                        method: "POST",
+                        body: JSON.stringify({ as: "human", action: "rewake" }),
+                      }).then(() => undefined),
+                    "叫醒了，会带着原来那些消息接着做",
+                  )
+                }
+                onReview={async (taskId, pass, reviewNote) => {
+                  let ok = false
+                  await run(
+                    async () => {
+                      await api(`/api/v1/tasks/${taskId}`, {
+                        method: "POST",
+                        body: JSON.stringify({ as: "human", action: pass ? "pass" : "reject", note: reviewNote }),
+                      })
+                      ok = true
+                    },
+                    pass ? "验收通过" : "打回了，已经叫醒负责人",
+                  )
+                  return ok
+                }}
+                onPassForeignReview={(targetProject, taskId) =>
+                  run(async () => {
+                    await api(`/api/v1/tasks/${taskId}`, {
+                      method: "POST",
+                      body: JSON.stringify({ as: "human", project: targetProject, action: "pass" }),
+                    })
+                    await loadWaiting()
+                    void loadProjects().catch(() => {})
+                  }, "验收通过")
+                }
+              />
+            </div>
+          ) : (
+            <aside data-tour="tasks" className={`${tab === "tasks" && !desk ? "block" : "hidden"} h-full min-h-0 overflow-hidden ${desk ? "" : "lg:block"}`}>
+              <TasksPanel
+                tasks={allTasks}
+                doneTotal={room.doneTotal}
+                projectId={room.project.id}
+                agents={agents}
+                highlightId={highlight}
+                busy={busy}
+                onOpenRun={setRunId}
+                header={
+                  <SummaryCard
+                    room={room}
+                    busy={busy}
+                    onSave={async (text) => {
+                      let saved = false
+                      await run(async () => {
+                        await summaryCall({ action: "edit", text })
+                        saved = true
+                      }, "房间摘要存好了")
+                      return saved
+                    }}
+                  />
+                }
+                onStep={(task, step, state) =>
+                  void run(() =>
                     api(`/api/v1/tasks/${task.id}`, {
                       method: "POST",
-                      body: JSON.stringify({ as: "human", action: pass ? "pass" : "reject", note }),
+                      body: JSON.stringify({ as: "human", action: "step", step, state }),
                     }).then(() => undefined),
-                  pass ? "验收通过" : "打回了，已经叫醒负责人",
-                )
-              }
-              onAskHandoff={(task, agent) => {
-                setHandoff({ task, agent })
-                setNote(`「${task.title}」交给你。需要的上下文：`)
-              }}
-              onStatus={(task, action) =>
-                void run(() =>
-                  api(`/api/v1/tasks/${task.id}`, {
-                    method: "POST",
-                    body: JSON.stringify({ as: "human", action }),
-                  }).then(() => undefined),
-                )
-              }
-              onFork={(task) =>
-                void run(
-                  () =>
+                  )
+                }
+                onReview={(task, pass, reviewNote) =>
+                  void run(
+                    () =>
+                      api(`/api/v1/tasks/${task.id}`, {
+                        method: "POST",
+                        body: JSON.stringify({ as: "human", action: pass ? "pass" : "reject", note: reviewNote }),
+                      }).then(() => undefined),
+                    pass ? "验收通过" : "打回了，已经叫醒负责人",
+                  )
+                }
+                onAskHandoff={(task, agent) => {
+                  setHandoff({ task, agent })
+                  setNote(`「${task.title}」交给你。需要的上下文：`)
+                }}
+                onStatus={(task, action) =>
+                  void run(() =>
                     api(`/api/v1/tasks/${task.id}`, {
                       method: "POST",
-                      body: JSON.stringify({ as: "human", action: "fork" }),
+                      body: JSON.stringify({ as: "human", action }),
                     }).then(() => undefined),
-                  "复制成了一条新待办，原来那条没动",
-                )
-              }
-            />
-          </aside>
+                  )
+                }
+                onFork={(task) =>
+                  void run(
+                    () =>
+                      api(`/api/v1/tasks/${task.id}`, {
+                        method: "POST",
+                        body: JSON.stringify({ as: "human", action: "fork" }),
+                      }).then(() => undefined),
+                    "复制成了一条新待办，原来那条没动",
+                  )
+                }
+              />
+            </aside>
+          )}
         </div>
       )}
       </div>
       </div>
 
-      <nav className="frost grid shrink-0 grid-cols-3 lg:hidden">
-        {tabs.map((item) => {
-          const Icon = item.icon
-          const on = tab === item.id
-          return (
-            <button
-              key={item.id}
-              type="button"
-              className={`flex flex-col items-center gap-0.5 py-2 text-[0.6875rem] ${on ? "text-foreground" : "text-muted-foreground"}`}
-              onClick={() => setTab(item.id)}
-              aria-current={on ? "page" : undefined}
-            >
-              <Icon className="size-5" />
-              <span>
-                {item.label}
-                {item.id === "tasks" && openTasks > 0 ? ` ${openTasks}` : ""}
-              </span>
-            </button>
-          )
-        })}
-      </nav>
+      {simple ? (
+        <nav className="frost grid shrink-0 grid-cols-2 lg:hidden">
+          <button
+            type="button"
+            className={`flex flex-col items-center gap-0.5 py-2 text-[0.6875rem] ${simpleTab === "chat" ? "text-foreground" : "text-muted-foreground"}`}
+            onClick={() => setSimpleTab("chat")}
+            aria-current={simpleTab === "chat" ? "page" : undefined}
+          >
+            <MessageSquare className="size-5" />
+            <span>对话</span>
+          </button>
+          <button
+            type="button"
+            className={`flex flex-col items-center gap-0.5 py-2 text-[0.6875rem] ${simpleTab === "waiting" ? "text-foreground" : "text-muted-foreground"}`}
+            onClick={() => setSimpleTab("waiting")}
+            aria-current={simpleTab === "waiting" ? "page" : undefined}
+          >
+            <BellRing className="size-5" />
+            <span>{simpleWaitingCount > 0 ? `等你定（${simpleWaitingCount}）` : "等你定"}</span>
+          </button>
+        </nav>
+      ) : (
+        <nav className={`frost grid shrink-0 grid-cols-3 lg:hidden ${room?.project.front ? "hidden" : ""}`}>
+          {tabs.map((item) => {
+            const Icon = item.icon
+            const on = tab === item.id
+            return (
+              <button
+                key={item.id}
+                type="button"
+                className={`flex flex-col items-center gap-0.5 py-2 text-[0.6875rem] ${on ? "text-foreground" : "text-muted-foreground"}`}
+                onClick={() => setTab(item.id)}
+                aria-current={on ? "page" : undefined}
+              >
+                <Icon className="size-5" />
+                <span>
+                  {item.label}
+                  {item.id === "tasks" && openTasks > 0 ? ` ${openTasks}` : ""}
+                </span>
+              </button>
+            )
+          })}
+        </nav>
+      )}
 
       <AdaptersDialog
         open={adaptersOpen}
@@ -1168,7 +1580,11 @@ export function RoomApp() {
         spawnable={SPAWNABLE_KINDS}
         userName={room?.userName ?? "用户"}
         busy={busy}
-        onOpenChange={setJoinOpen}
+        expandAdvanced={joinTour}
+        onOpenChange={(open) => {
+          setJoinOpen(open)
+          if (!open) setJoinTour(false)
+        }}
         onSpawn={(kind) => {
           setJoinOpen(false)
           setSpawn({ kind, from: null })
@@ -1215,17 +1631,42 @@ export function RoomApp() {
         }}
       />
 
+      <Dialog open={nameOpen} onOpenChange={setNameOpen}>
+        <DialogContent className="sm:max-w-sm">
+          <DialogHeader>
+            <DialogTitle>你的名字</DialogTitle>
+            <DialogDescription>AI 会这样称呼你，房间里你说的话和待办也署这个名字。</DialogDescription>
+          </DialogHeader>
+          <NameField
+            label="名字"
+            submitLabel="保存"
+            hint=""
+            className="mt-1"
+            onCancel={() => setNameOpen(false)}
+            onNext={(changed) => {
+              setNameOpen(false)
+              if (changed) {
+                pullRef.current()
+                toast.success("名字已修改")
+              }
+            }}
+          />
+        </DialogContent>
+      </Dialog>
+
       <Dialog open={leaving !== null} onOpenChange={(open) => !open && setLeaving(null)}>
         <DialogContent>
           <DialogHeader>
-            <DialogTitle>请 {leaving?.name} 离席</DialogTitle>
+            <DialogTitle>{desk ? `换掉 ${leaving?.name}` : `把 ${leaving?.name} 移出？`}</DialogTitle>
             <DialogDescription>
-              这个席位会从房间消失。它名下还没做完的任务会先停着，等别人接手。
+              {desk
+                ? "它会离开前台，聊天记录留着。接着挑一个新的 AI 来值班。"
+                : "这个席位会从房间消失。它名下还没做完的待办会先停着，等别人接手。"}
             </DialogDescription>
           </DialogHeader>
           <DialogFooter>
             <Button type="button" variant="outline" onClick={() => setLeaving(null)}>
-              留下
+              {desk ? "不换" : "取消"}
             </Button>
             <Button
               type="button"
@@ -1241,10 +1682,12 @@ export function RoomApp() {
                   })
                   setLeaving(null)
                   if (focusId === agent.id) setFocusId(null)
+                  // The desk is never left empty-handed: who sits there next.
+                  if (desk) setTimeout(staffFront, 0)
                 })
               }}
             >
-              离席
+              {desk ? "换人" : "移出"}
             </Button>
           </DialogFooter>
         </DialogContent>
@@ -1353,8 +1796,8 @@ function DraftComposer(props: Omit<ComponentProps<typeof Composer>, "value" | "o
   return <Composer {...props} value={value} onChange={draft.set} />
 }
 
-// The front desk's composer: whom to @ (a message wakes only those it names).
+// The front desk's composer: whatever is said there goes to its one AI.
 function frontHint(agents: PublicAgent[]) {
   const seat = deskSeat(agents)
-  return seat ? `问前台… @${seat.name} 它就去看各项目，每件事带上项目名和编号` : "问前台… 先在左栏接一个 AI 进来值班"
+  return seat ? `问${seat.name}… 它替你看各项目，每件事带上项目名和编号` : "先挑一个 AI 来值班"
 }

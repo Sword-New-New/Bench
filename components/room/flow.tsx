@@ -1,7 +1,7 @@
 "use client"
 
 import { useEffect, useRef, useState, type CSSProperties } from "react"
-import { AlignCenter, AlignLeft, ChevronDown } from "lucide-react"
+import { AlignCenter, AlignLeft, ChevronDown, ChevronLeft, ChevronRight } from "lucide-react"
 
 import { seatLook } from "@/components/room/bits"
 import { Reveal } from "@/components/room/reveal"
@@ -162,7 +162,7 @@ function FlowCard({
             </span>
           ) : null}
           <span className="ml-auto flex shrink-0 -space-x-1">
-            {flow.lanes.slice(0, 8).map((lane) => {
+            {flow.lanes.slice(0, flow.lanes.length > 12 ? 11 : 12).map((lane) => {
               const { name, color } = look(lane)
               return (
                 <span
@@ -175,6 +175,14 @@ function FlowCard({
                 </span>
               )
             })}
+            {flow.lanes.length > 12 ? (
+              <span
+                className="grid h-4 place-items-center rounded-full bg-muted px-1 text-[0.5rem] font-semibold text-muted-foreground ring-2 ring-background"
+                title={`一共 ${flow.lanes.length} 列`}
+              >
+                +{flow.lanes.length - 11}
+              </span>
+            ) : null}
           </span>
         </button>
         {open && hasHuman ? (
@@ -207,7 +215,12 @@ function FlowCard({
 
 type Box = { x: number; y: number; w: number; h: number }
 
+// A lane is 150px wide when there's room. With many seats the lanes narrow
+// to fit the card, down to LANE_FLOOR (a block still reads in two lines);
+// past that the graph scrolls sideways, and the strip above it says how many
+// columns there are, which are in view, and takes you to the rest.
 const LANE_MIN = 150
+const LANE_FLOOR = 104
 const TIME_COL = 44
 
 function FlowGraph({
@@ -259,48 +272,149 @@ function FlowGraph({
     return () => cancelAnimationFrame(frame)
   }, [humanAt])
 
+  // How wide the card's inside is, and which lanes are in view of it.
+  const [room, setRoom] = useState(0)
+  const [seen, setSeen] = useState<[number, number]>([0, lanes.length - 1])
+  useEffect(() => {
+    const box = scroller.current
+    if (!box) return
+    const look = () => {
+      setRoom(box.clientWidth)
+      const heads = [...(grid.current?.querySelectorAll<HTMLElement>("[data-lane-head]") ?? [])]
+      const left = box.scrollLeft
+      const right = left + box.clientWidth
+      const inView = heads.flatMap((head, index) => {
+        const middle = head.offsetLeft + head.offsetWidth / 2
+        return middle >= left && middle <= right ? [index] : []
+      })
+      const next: [number, number] = inView.length ? [inView[0], inView[inView.length - 1]] : [0, 0]
+      setSeen((current) => (current[0] === next[0] && current[1] === next[1] ? current : next))
+    }
+    look()
+    const observer = new ResizeObserver(look)
+    observer.observe(box)
+    if (grid.current) observer.observe(grid.current)
+    box.addEventListener("scroll", look, { passive: true })
+    return () => {
+      observer.disconnect()
+      box.removeEventListener("scroll", look)
+    }
+  }, [lanes.length])
+
+  const gap = lanes.length > 6 ? 8 : 12
+  // 24: the scroller's own padding.
+  const fit = room ? Math.floor((room - 24 - TIME_COL - gap * lanes.length) / lanes.length) : LANE_MIN
+  const lane = Math.max(LANE_FLOOR, Math.min(LANE_MIN, fit))
   const style: CSSProperties = {
-    gridTemplateColumns: `${TIME_COL}px repeat(${lanes.length}, minmax(${LANE_MIN}px, 1fr))`,
-    minWidth: TIME_COL + lanes.length * (LANE_MIN + 12),
+    gridTemplateColumns: `${TIME_COL}px repeat(${lanes.length}, minmax(${lane}px, 1fr))`,
+    minWidth: TIME_COL + lanes.length * (lane + gap),
+    columnGap: gap,
+  }
+  const cut = fit < LANE_FLOOR && seen[1] - seen[0] + 1 < lanes.length
+
+  const goTo = (index: number) => {
+    const box = scroller.current
+    const head = grid.current?.querySelectorAll<HTMLElement>("[data-lane-head]")[index]
+    if (box && head) box.scrollTo({ left: head.offsetLeft + head.offsetWidth / 2 - box.clientWidth / 2, behavior: "smooth" })
+  }
+  // Half a screen of columns at a time, so where you were stays in sight.
+  const page = (direction: -1 | 1) => {
+    const step = Math.max(1, Math.ceil((seen[1] - seen[0]) / 2))
+    goTo(Math.min(lanes.length - 1, Math.max(0, direction < 0 ? seen[0] - step : seen[1] + step)))
   }
 
   return (
-    <div ref={scroller} className="overflow-x-auto px-3 pb-3">
-      <div ref={grid} className="relative grid gap-x-3 gap-y-6" style={style}>
-        {/* Lines under the blocks. */}
-        {boxes ? <Edges flow={flow} boxes={boxes} /> : null}
-        <span style={{ gridRow: 1, gridColumn: 1 }} />
-        {lanes.map((lane, index) => {
-          const { name, color } = look(lane)
-          return (
-            <span key={lane.id} data-lane-head={lane.id} style={{ gridRow: 1, gridColumn: index + 2 }} className="flex min-w-0 items-center gap-1.5 border-b border-foreground/10 pb-1.5 text-xs text-muted-foreground">
-              <span className="size-2 shrink-0 rounded-full" style={{ background: color }} />
-              <span className="truncate">{name}</span>
-            </span>
-          )
-        })}
-        {flow.nodes.map((node, index) => {
-          const minute = clock(node.at)
-          // Not again when the block above is in the same minute.
-          const showTime = index === 0 || minute !== clock(flow.nodes[index - 1].at)
-          const row = index + 2
-          return [
-            <span key={`${node.id}:t`} className="pt-2 text-[0.625rem] text-muted-foreground tabular-nums" style={{ gridRow: row, gridColumn: 1 }}>
-              {showTime ? minute : ""}
-            </span>,
-            <Block
-              key={node.id}
-              node={node}
-              name={names?.[node.id]}
-              style={{ gridRow: row, gridColumn: (column.get(node.lane) ?? 0) + 2 }}
-              attach={(element) => {
-                if (element) blocks.current.set(node.id, element)
-                else blocks.current.delete(node.id)
-              }}
-              onOpen={onOpen}
-            />,
-          ]
-        })}
+    <div className="relative">
+      {cut ? (
+        <div className="flex items-center gap-1.5 px-3 pb-2 text-[0.6875rem] text-muted-foreground">
+          <button
+            type="button"
+            className="pill grid size-5 shrink-0 place-items-center rounded-full disabled:opacity-30"
+            disabled={seen[0] === 0}
+            onClick={() => page(-1)}
+            aria-label="往左看"
+          >
+            <ChevronLeft className="size-3.5" />
+          </button>
+          <span className="flex min-w-0 flex-wrap items-center">
+            {lanes.map((item, index) => {
+              const { name, color } = look(item)
+              const inView = index >= seen[0] && index <= seen[1]
+              return (
+                <button
+                  key={item.id}
+                  type="button"
+                  title={name}
+                  aria-label={`看「${name}」那一列`}
+                  onClick={() => goTo(index)}
+                  className="grid size-4 place-items-center rounded-full"
+                >
+                  <span
+                    className={`block rounded-full transition-[width,height,opacity] motion-reduce:transition-none ${inView ? "size-2.5" : "size-1.5 opacity-45"}`}
+                    style={{ background: color }}
+                  />
+                </button>
+              )
+            })}
+          </span>
+          <button
+            type="button"
+            className="pill grid size-5 shrink-0 place-items-center rounded-full disabled:opacity-30"
+            disabled={seen[1] === lanes.length - 1}
+            onClick={() => page(1)}
+            aria-label="往右看"
+          >
+            <ChevronRight className="size-3.5" />
+          </button>
+          <span className="shrink-0 tabular-nums">
+            {lanes.length} 列 · 看到第 {seen[0] + 1}–{seen[1] + 1} 列
+          </span>
+        </div>
+      ) : null}
+      {/* The edges fade where there's more past them. */}
+      {cut && seen[0] > 0 ? (
+        <span aria-hidden className="pointer-events-none absolute bottom-3 left-0 top-7 z-[2] w-10 bg-linear-to-r from-background/80 to-transparent" />
+      ) : null}
+      {cut && seen[1] < lanes.length - 1 ? (
+        <span aria-hidden className="pointer-events-none absolute right-0 bottom-3 top-7 z-[2] w-10 bg-linear-to-l from-background/80 to-transparent" />
+      ) : null}
+      <div ref={scroller} className="overflow-x-auto px-3 pb-3">
+        <div ref={grid} className="relative grid gap-y-6" style={style}>
+          {/* Lines under the blocks. */}
+          {boxes ? <Edges flow={flow} boxes={boxes} /> : null}
+          <span style={{ gridRow: 1, gridColumn: 1 }} />
+          {lanes.map((lane, index) => {
+            const { name, color } = look(lane)
+            return (
+              <span key={lane.id} data-lane-head={lane.id} style={{ gridRow: 1, gridColumn: index + 2 }} className="flex min-w-0 items-center gap-1.5 border-b border-foreground/10 pb-1.5 text-xs text-muted-foreground">
+                <span className="size-2 shrink-0 rounded-full" style={{ background: color }} />
+                <span className="truncate">{name}</span>
+              </span>
+            )
+          })}
+          {flow.nodes.map((node, index) => {
+            const minute = clock(node.at)
+            // Not again when the block above is in the same minute.
+            const showTime = index === 0 || minute !== clock(flow.nodes[index - 1].at)
+            const row = index + 2
+            return [
+              <span key={`${node.id}:t`} className="pt-2 text-[0.625rem] text-muted-foreground tabular-nums" style={{ gridRow: row, gridColumn: 1 }}>
+                {showTime ? minute : ""}
+              </span>,
+              <Block
+                key={node.id}
+                node={node}
+                name={names?.[node.id]}
+                style={{ gridRow: row, gridColumn: (column.get(node.lane) ?? 0) + 2 }}
+                attach={(element) => {
+                  if (element) blocks.current.set(node.id, element)
+                  else blocks.current.delete(node.id)
+                }}
+                onOpen={onOpen}
+              />,
+            ]
+          })}
+        </div>
       </div>
     </div>
   )
@@ -331,7 +445,7 @@ function Block({
   onOpen: (messageId: string) => void
 }) {
   const look = STATE_LOOK[node.state]
-  const kind = node.kind === "task" && node.taskId ? `${KIND_LABEL.task} ${node.taskId}` : node.state === "stuck" ? "卡住" : KIND_LABEL[node.kind]
+  const kind = node.kind === "task" && node.taskId ? KIND_LABEL.task : node.state === "stuck" ? "卡住" : KIND_LABEL[node.kind]
   return (
     <button
       ref={attach}
@@ -339,7 +453,7 @@ function Block({
       style={style}
       disabled={!node.messageId}
       className={`relative z-[1] self-start rounded-xl border px-2.5 py-1.5 text-left shadow-sm transition-[box-shadow,transform] hover:ring-2 hover:ring-foreground/15 active:scale-[.98] motion-reduce:transition-none motion-reduce:active:scale-100 ${look.box}`}
-      title={node.messageId ? `${node.title}\n点一下回到群聊里的那条消息` : node.title}
+      title={`${node.title}${node.taskId ? `（${node.taskId}）` : ""}${node.messageId ? "\n点一下回到群聊里的那条消息" : ""}`}
       onClick={() => node.messageId && onOpen(node.messageId)}
     >
       <span className={`block ${node.state === "done" ? "opacity-55" : ""}`}>

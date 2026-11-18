@@ -14,10 +14,41 @@ import type { Message } from "@/lib/types"
 // short. Carry on by itself once the allowance resets, retry now, switch the
 // seat to another AI vendor to take over immediately, or dismiss.
 
-export function LimitedCard({ message }: { message: Message }) {
+export function LimitedCard({
+  message,
+  compact = false,
+  projectName,
+  onInspect,
+}: {
+  message: Message
+  compact?: boolean
+  projectName?: string
+  onInspect?: () => void
+}) {
   const limited = message.limited
   const [sending, setSending] = useState(false)
   if (!limited) return null
+
+  if (onInspect) {
+    return (
+      <div className="rounded-2xl border border-amber-500/35 bg-card px-3 py-2.5 text-xs shadow-sm">
+        <p className="flex flex-wrap items-center gap-1.5 font-medium">
+          {projectName ? (
+            <span className="rounded bg-foreground/[0.06] px-1.5 py-0.5 text-[0.625rem] leading-4 text-muted-foreground">
+              {projectName}
+            </span>
+          ) : null}
+          <span>{limited.agentName} 撞到额度</span>
+        </p>
+        <p className="mt-1 text-muted-foreground">{message.text}</p>
+        <div className="mt-2 flex justify-end">
+          <Button type="button" size="xs" onClick={onInspect}>
+            去看
+          </Button>
+        </div>
+      </div>
+    )
+  }
 
   const choose = async (action: "schedule" | "now" | "cancel" | "dismiss", done?: string) => {
     setSending(true)
@@ -93,9 +124,15 @@ export function LimitedCard({ message }: { message: Message }) {
   }
 
   return (
-    <div className="my-2 self-center rounded-2xl border border-amber-500/30 bg-amber-500/[0.08] px-4 py-2.5 text-center text-xs leading-5 text-muted-foreground">
-      <p>{message.text}</p>
-      <div className="mt-2">{body}</div>
+    <div
+      className={
+        compact
+          ? "rounded-2xl border border-amber-500/35 bg-card px-3 py-2.5 text-xs shadow-sm"
+          : "my-2 self-center rounded-2xl border border-amber-500/30 bg-amber-500/[0.08] px-4 py-2.5 text-center text-xs leading-5 text-muted-foreground"
+      }
+    >
+      <p className={compact ? "font-medium text-foreground" : ""}>{message.text}</p>
+      <div className={`mt-2 ${compact ? "[&>span]:justify-start" : ""}`}>{body}</div>
     </div>
   )
 }

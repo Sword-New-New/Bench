@@ -53,46 +53,46 @@ const STEPS: Step[] = [
       '[data-tour="project"]',
     ],
     title: "先创建一个项目",
-    body: "一个项目就是一间房，每个项目一张长凳。点左栏底部的「新建项目」，起个名字，项目目录可以不填。建好后会自动弹出接入页。",
+    body: "一个项目就是一间房，每个项目一张长凳。点左栏底部的「新建项目」，起个名字，项目目录选填。建好后会自动弹出「接入 AI」。",
     bodies: [
-      "一个项目就是一间房，每个项目一张长凳。点左栏底部的「新建项目」，起个名字，项目目录可以不填。建好后会自动弹出接入页。",
-      "一个项目就是一间房。点这里的项目名，选「新建项目…」，起个名字，项目目录可以不填。建好后会自动弹出接入页。",
+      "一个项目就是一间房，每个项目一张长凳。点左栏底部的「新建项目」，起个名字，项目目录选填。建好后会自动弹出「接入 AI」。",
+      "一个项目就是一间房。点这里的项目名，选「新建项目…」，起个名字，项目目录选填。建好后会自动弹出「接入 AI」。",
     ],
     sketch: "project",
     tier: "projects",
   },
   {
     target: '[data-tour="j-pick"]',
-    title: "接入页：选要接哪几个 AI",
-    body: "这就是接入页。先选你电脑上装了的 AI，可以多选。列表里没有的，把页面下方那段说明复制给它也能接。",
+    title: "接入 AI：选客户端",
+    body: "这就是「接入 AI」弹窗。想省事可以直接点上面的「房间替你开一个」；要接已有会话或看脚本配置，展开「高级」先选客户端，可以多选。",
     sketch: "pick",
     dialog: true,
   },
   {
     target: '[data-tour="j-register"]',
-    title: "运行一次注册命令",
-    body: "选好后这里会给出一条命令：点「替我运行」，或复制到终端里跑。每个 AI 只做一次，换项目、重启电脑都不用重做。",
+    title: "写入客户端配置",
+    body: "选好客户端后这里会给出一条命令：点「运行」，或复制到终端里跑。每个客户端只做一次，换项目、重启电脑都不用重做。",
     sketch: "register",
     dialog: true,
   },
   {
     target: '[data-tour="j-say"]',
     title: "让它入座",
-    body: "到那个 AI 的会话里，把这句话说给它，它就入座了。不想自己开会话的话，点下面的「新的 xx 会话」，房间会在后台替你开好。",
+    body: "到那个 AI 的会话里，把这句话发给它，它就入座了。不想自己开会话的话，点弹窗最上面的「房间替你开一个」，房间会在后台替你建好。",
     sketch: "say",
     dialog: true,
   },
   {
     target: '[data-tour="roster"]',
     title: "看它有没有入座",
-    body: "回到主页面，左栏的头像亮起来就成功了。写着「离线 · 点名会唤起」说明房间能把它叫醒；还写着「还没接入」，就回到上一页再看一遍注册命令。",
+    body: "回到主页面，左栏的头像亮起来就成功了。写着「离线 · 点名可叫醒」说明房间能把它叫醒；还写着「未接入」，就回到「接入 AI」再检查一遍客户端配置。",
     sketch: "seat",
     tier: "room",
   },
   {
     target: null,
     title: "配置完成！",
-    body: "现在可以试着 @ 它一下了：在底部输入框写「@Claude 你好」，按回车。项目多了以后，点顶栏的「前台」开一个前台，只跟它说话就能知道各项目做到哪了。具体怎么用，看视频。",
+    body: "现在可以试着 @ 它一下了：在底部输入框写「@Claude 你好」，按回车。项目多了以后，点顶栏的「前台」开启前台，只跟它说话就能知道各项目做到哪了。具体怎么用，看视频。",
     sketch: "mention",
     finale: true,
   },
@@ -133,7 +133,7 @@ function Sketch({ kind }: { kind: NonNullable<Step["sketch"]> }) {
             scripts/register-mcp.sh claude
           </code>
           <span className="shrink-0 rounded bg-primary/15 px-2 py-1">
-            替我运行
+            运行
           </span>
         </p>
       </div>
@@ -142,7 +142,7 @@ function Sketch({ kind }: { kind: NonNullable<Step["sketch"]> }) {
     return (
       <div className={frame}>
         <p className="rounded bg-foreground/10 px-2 py-1">
-          加入并坐房间「我的项目」，名字叫 Claude
+          接入并坐的「我的项目」项目，名字叫 …，分工是 …
         </p>
       </div>
     );
@@ -151,11 +151,11 @@ function Sketch({ kind }: { kind: NonNullable<Step["sketch"]> }) {
       <div className={frame}>
         <p className="flex items-center justify-between">
           <span className="font-medium">Claude</span>
-          <span className="text-muted-foreground">离线 · 点名会唤起</span>
+          <span className="text-muted-foreground">离线 · 点名可叫醒</span>
         </p>
         <p className="mt-1 flex items-center justify-between">
           <span className="font-medium">DeepSeek</span>
-          <span className="text-muted-foreground">还没接入</span>
+          <span className="text-muted-foreground">未接入</span>
         </p>
       </div>
     );

@@ -7,6 +7,8 @@ import { api } from "@/components/room/api"
 import { AskCard, PinnedAsks } from "@/components/room/ask-card"
 import { MessageFiles, previewText } from "@/components/room/attachments"
 import { LimitedCard } from "@/components/room/limited-card"
+import { BatchCard } from "@/components/room/batch-card"
+import { RelayCard } from "@/components/room/relay-card"
 import { FullAccessToggle } from "@/components/room/permits"
 import { Avatar, FoldButton, keepTopInView, MessageBody, seatLook, useFold } from "@/components/room/bits"
 import { DOCK_EVENT } from "@/components/room/composer"
@@ -14,10 +16,10 @@ import { expandMessage, openFold, SummaryButton, SummaryLine, useSummary } from 
 import { ProgressView } from "@/components/room/progress"
 import { GOTO_EVENT, type Goto } from "@/components/room/refs"
 import { Reveal } from "@/components/room/reveal"
-import { RunTrail } from "@/components/room/run-trail"
 import { Button } from "@/components/ui/button"
 import type { Digest } from "@/lib/digest"
 import { clock } from "@/lib/status"
+import { isPendingInterrupted, isPendingLimited } from "@/lib/waiting-shared"
 import type { CallState, Message, PermitRequest, PublicAgent } from "@/lib/types"
 
 const EXAMPLES = [
@@ -46,9 +48,8 @@ export function Thread({
   onMention,
   onExample,
   front = false,
+  simple = false,
   onStaff,
-  detail,
-  onDetail,
   view = "chat",
   onView,
   flow,
@@ -62,9 +63,6 @@ export function Thread({
   flow?: ReactNode
   // What the progress page draws; none in a room that has no use for it (the front desk).
   progress?: { digest: Digest; permits: PermitRequest[] }
-  // 「详细」: each wake's steps show in the thread too (only on this page).
-  detail: boolean
-  onDetail: (detail: boolean) => void
   messages: Message[]
   openAsks?: Message[]
   totalMessages?: number
@@ -84,6 +82,8 @@ export function Thread({
   onExample: (text: string) => void
   // The front desk's room (components/room/front.tsx): its own welcome.
   front?: boolean
+  // First-layer simple mode: hide pending decision controls that live in 「等你定」.
+  simple?: boolean
   // Nobody at the desk yet: open a session to sit there.
   onStaff?: () => void
 }) {
@@ -128,7 +128,7 @@ export function Thread({
     return [...merged.values()].sort((a, b) => a.seq - b.seq)
   }, [older, propMessages])
 
-  const talked = messages.some((message) => message.kind !== "system")
+  const talked = messages.some((message) => message.kind !== "system" && !message.risk)
   const gaps = useMemo(
     () => holesBetween(spansByScope[scopeKey] ?? [], propMessages[0]?.seq ?? 0),
     [spansByScope, scopeKey, propMessages],
@@ -193,7 +193,10 @@ export function Thread({
     return () => cancelAnimationFrame(frame)
   }, [])
   const anchor = useRef<number | null>(null)
-  const items = threadItems(messages)
+  // At the front desk (a chat with one AI) messages just follow each other.
+  const items: ThreadItem[] = front
+    ? messages.map((message, index) => ({ message, previous: messages[index - 1] }))
+    : threadItems(messages)
   const hidden = Math.max(0, items.length - limit)
   const shown = hidden > 0 ? items.slice(hidden) : items
   // The hole a click should fill sits above the first drawn item at or past its lower edge.
@@ -353,12 +356,14 @@ export function Thread({
       onOpenRun={onOpenRun}
       onRewake={onRewake}
       onMention={onMention}
-      detail={detail}
+      chat={front}
+      hidePendingCards={simple}
     />
     </div>
   )
 
-  // A message of an opened row on the progress page: always the one-line gist.
+  // A message of an opened row on the progress page: always the one-line gist,
+  // and skip drawing a duplicate AskCard if the row header already pins it.
   const progressLine = (message: Message, previous: Message | undefined) => (
     <ChainLine
       message={message}
@@ -366,10 +371,10 @@ export function Thread({
       messages={messages}
       agents={agents}
       names={names}
-      detail={false}
       onReply={onReply}
       onOpenRun={onOpenRun}
       onMention={onMention}
+      hideAsk={Boolean(progress?.digest.you.some((r) => r.need === "answer" && r.askId === message.id))}
     />
   )
 
@@ -381,10 +386,10 @@ export function Thread({
       messages={messages}
       agents={agents}
       names={names}
-      detail={detail}
       onReply={onReply}
       onOpenRun={onOpenRun}
       onMention={onMention}
+      hidePendingCards={simple}
     />
     </div>
   )
@@ -510,28 +515,6 @@ export function Thread({
             ))}
           </div>
         ) : null}
-        <div className={`${view !== "chat" ? "hidden" : "flex"} rounded-full p-0.5 pill`} role="radiogroup" aria-label="群聊显示">
-          {(
-            [
-              [false, "摘要"],
-              [true, "详细"],
-            ] as const
-          ).map(([value, label]) => (
-            <button
-              key={label}
-              type="button"
-              role="radio"
-              aria-checked={detail === value}
-              title={value ? "把每个模型做了什么也展开在群聊里，只有你看得到" : "群聊里只放回答"}
-              className={`rounded-full px-2.5 py-0.5 text-[0.6875rem] transition-colors ${
-                detail === value ? "bg-foreground text-background" : "text-muted-foreground hover:text-foreground"
-              }`}
-              onClick={() => onDetail(value)}
-            >
-              {label}
-            </button>
-          ))}
-        </div>
       </div>
       {searchOpen ? (
         // .raised sets position: relative, which beats `absolute` on the same element
@@ -634,7 +617,7 @@ export function Thread({
           data-dock="padding-bottom 1rem"
           className="mx-auto flex max-w-3xl flex-col gap-1 px-4 pt-6 pb-[calc(var(--dock,8rem)+1rem)] md:px-6 [&>.live-slot]:[--live-gap:0.25rem]"
         >
-          <PinnedAsks asks={pinned} />
+          {simple ? null : <PinnedAsks asks={pinned} />}
           {!talked ? (
             front ? (
               <FrontWelcome seat={deskSeat(agents)?.name ?? null} onExample={onExample} onStaff={onStaff} />
@@ -664,7 +647,7 @@ export function Thread({
               </Fragment>
             )
           })}
-          <LiveDrawer agents={live} detail={detail} onOpenRun={onOpenRun} onStop={onStop} onMention={onMention} />
+          <LiveDrawer agents={live} onOpenRun={onOpenRun} onStop={onStop} onMention={onMention} desk={front} />
         </div>
       </div>
     </div>
@@ -798,7 +781,7 @@ function ReplyChain({
             aria-expanded={open}
             onClick={toggle}
           >
-            {open ? "收起" : "展开全部"}
+            {open ? "收起" : "展开"}
             <ChevronDown className={`size-3 transition-transform ${open ? "rotate-180" : ""}`} />
           </button>
         ) : null}
@@ -834,23 +817,25 @@ function ChainLine({
   messages,
   agents,
   names,
-  detail,
   onReply,
   onOpenRun,
   onMention,
+  hideAsk = false,
+  hidePendingCards = false,
 }: {
   message: Message
   previous: Message | undefined
   messages: Message[]
   agents: PublicAgent[]
   names: string[]
-  detail: boolean
   onReply: (message: Message) => void
   onOpenRun: (runId: string) => void
   onMention: (name: string) => void
+  hideAsk?: boolean
+  hidePendingCards?: boolean
 }) {
   const fold = useFold(message.text)
-  const sum = useSummary(message, detail)
+  const sum = useSummary(message)
   const row = useRef<HTMLElement>(null)
   if (message.recalled) return <RecalledLine message={message} inChain />
   const author = agents.find((agent) => agent.id === message.authorId)
@@ -888,7 +873,6 @@ function ChainLine({
           <span className="text-muted-foreground">{clock(message.createdAt)}</span>
         </p>
         {reply ? <Quote message={reply} align="start" /> : null}
-        {detail && message.runId ? <RunTrail runId={message.runId} answer={message.text} /> : null}
         {message.text ? (
           <div className="mt-0.5">
             {sum.info ? (
@@ -909,12 +893,18 @@ function ChainLine({
         {message.attachments?.length && !sum.folded ? (
           <MessageFiles files={message.attachments} folded={sum.info ? undefined : folded(fold)} />
         ) : null}
-        {message.ask ? <AskCard message={message} /> : null}
+        {message.ask && !hideAsk ? (
+          hidePendingCards && message.ask.state === "open" ? (
+            <p className="mt-1.5 text-xs text-amber-700 dark:text-amber-300">等你回答 · 去「等你定」处理</p>
+          ) : (
+            <AskCard message={message} />
+          )
+        ) : null}
         <Reached message={message} />
         <Calls message={message} />
         <div className="mt-0.5 -ml-1 flex items-center gap-1">
           {sum.info ? <SummaryButton state={sum} node={() => row.current} /> : <FoldButton fold={fold} />}
-          {message.runId && !detail ? (
+          {message.runId ? (
             <button
               type="button"
               className="flex items-center gap-1 rounded-md px-1 text-[0.6875rem] text-muted-foreground hover:bg-muted hover:text-foreground"
@@ -945,7 +935,7 @@ function Welcome({ onExample }: { onExample: (text: string) => void }) {
     <div className="frost mb-6 rounded-2xl px-5 py-6">
       <h2 className="text-base font-semibold">一个入口，叫到每一个 AI</h2>
       <p className="mt-1.5 text-sm leading-6 text-muted-foreground">
-        Claude、DeepSeek、GPT、Grok、Gemini 各自在自己的软件里跑。它们入座以后，你在这里 @ 谁，房间就去唤起谁的会话，回答会回到这里。
+        Claude、DeepSeek、GPT、Grok、Gemini 各自在自己的软件里跑。它们入座以后，你在这里 @ 谁，房间就去叫醒谁的会话，回答会回到这里。
       </p>
       <div className="mt-4 flex flex-wrap gap-2">
         {EXAMPLES.map((example) => (
@@ -978,47 +968,48 @@ function MentionAvatar({ name, onMention, children }: { name: string; onMention:
   )
 }
 
-function MessageRow({
+export function InterruptedCard({
   message,
-  previous,
-  messages,
-  agents,
-  names,
-  onReply,
-  onOpenTask,
-  onOpenRun,
   onRewake,
-  onMention,
-  detail,
+  onOpenRun,
+  compact = false,
+  projectName,
+  onInspect,
 }: {
-  detail: boolean
   message: Message
-  previous?: Message
-  messages: Message[]
-  agents: PublicAgent[]
-  names: string[]
-  onReply: (message: Message) => void
-  onOpenTask: (taskId: string) => void
-  onOpenRun: (runId: string) => void
   onRewake: (runId: string) => void
-  onMention: (name: string) => void
+  onOpenRun: (runId: string) => void
+  compact?: boolean
+  projectName?: string
+  onInspect?: () => void
 }) {
-  const [watching, setWatching] = useState(false)
-  const fold = useFold(message.text)
-  const sum = useSummary(message, detail)
-  const row = useRef<HTMLElement>(null)
-
-  if (message.recalled) return <RecalledLine message={message} />
-
-  if (message.kind === "system" && message.limited) return <LimitedCard message={message} />
-
-  if (message.kind === "system" && message.interrupted?.length) {
-    // After a restart: what it cut off, each with a button to wake it again.
-    return (
-      <div className="my-2 self-center rounded-2xl border border-amber-500/30 bg-amber-500/[0.08] px-4 py-2.5 text-center text-xs leading-5 text-muted-foreground">
-        <p>{message.text}</p>
-        <div className="mt-2 flex flex-wrap justify-center gap-1.5">
-          {message.interrupted.map((item) =>
+  const items = message.interrupted ?? []
+  if (items.length === 0) return null
+  return (
+    <div
+      className={
+        compact
+          ? "rounded-2xl border border-amber-500/35 bg-card px-3 py-2.5 text-xs shadow-sm"
+          : "my-2 self-center rounded-2xl border border-amber-500/30 bg-amber-500/[0.08] px-4 py-2.5 text-center text-xs leading-5 text-muted-foreground"
+      }
+    >
+      <p className={compact ? "font-medium text-foreground" : ""}>
+        {projectName ? (
+          <span className="mr-1.5 inline-block rounded bg-foreground/[0.06] px-1.5 py-0.5 text-[0.625rem] leading-4 font-normal text-muted-foreground">
+            {projectName}
+          </span>
+        ) : null}
+        {message.text}
+      </p>
+      {onInspect ? (
+        <div className="mt-2 flex justify-end">
+          <Button type="button" size="xs" onClick={onInspect}>
+            去看
+          </Button>
+        </div>
+      ) : (
+        <div className={`mt-2 flex flex-wrap gap-1.5 ${compact ? "" : "justify-center"}`}>
+          {items.map((item) =>
             item.resumedAt ? (
               <span key={item.runId} className="inline-flex h-6 items-center gap-1 px-2 text-muted-foreground">
                 <Check className="size-3" />
@@ -1036,8 +1027,75 @@ function MessageRow({
             ),
           )}
         </div>
-      </div>
-    )
+      )}
+    </div>
+  )
+}
+
+function MessageRow({
+  message,
+  previous,
+  messages,
+  agents,
+  names,
+  onReply,
+  onOpenTask,
+  onOpenRun,
+  onRewake,
+  onMention,
+  chat = false,
+  hidePendingCards = false,
+}: {
+  message: Message
+  previous?: Message
+  messages: Message[]
+  agents: PublicAgent[]
+  names: string[]
+  onReply: (message: Message) => void
+  onOpenTask: (taskId: string) => void
+  onOpenRun: (runId: string) => void
+  onRewake: (runId: string) => void
+  onMention: (name: string) => void
+  // The front desk: a chat with one AI. Answers in full, no reply links, no
+  // line of whom it reached.
+  chat?: boolean
+  hidePendingCards?: boolean
+}) {
+  const [watching, setWatching] = useState(false)
+  const folding = useFold(message.text)
+  const fold = chat ? openFold() : folding
+  const gist = useSummary(message)
+  const sum = chat ? { ...gist, info: null, folded: false } : gist
+  const row = useRef<HTMLElement>(null)
+
+  if (message.recalled) return <RecalledLine message={message} />
+
+  if (message.kind === "system" && message.limited) {
+    if (hidePendingCards && isPendingLimited(message)) {
+      return (
+        <p className="my-2 self-center rounded-2xl border border-amber-500/30 bg-amber-500/[0.08] px-4 py-2 text-center text-xs leading-5 text-muted-foreground">
+          {message.text} · 去「等你定」处理
+        </p>
+      )
+    }
+    return <LimitedCard message={message} />
+  }
+
+  if (message.relay?.kind === "batch") return <BatchCard message={message} />
+  if (message.relay) return <RelayCard message={message} />
+
+  // The patrol's notes are for the desk's AI, which tells the user itself.
+  if (message.risk) return null
+
+  if (message.kind === "system" && message.interrupted?.length) {
+    if (hidePendingCards && isPendingInterrupted(message)) {
+      return (
+        <p className="my-2 self-center rounded-2xl border border-amber-500/30 bg-amber-500/[0.08] px-4 py-2 text-center text-xs leading-5 text-muted-foreground">
+          {message.text} · 去「等你定」处理
+        </p>
+      )
+    }
+    return <InterruptedCard message={message} onRewake={onRewake} onOpenRun={onOpenRun} />
   }
 
   if (message.kind === "system") {
@@ -1083,7 +1141,7 @@ function MessageRow({
   // In a chain the message it answers is usually right above it; quote it
   // only when it isn't.
   const reply =
-    message.replyTo && message.replyTo !== previous?.id
+    !chat && message.replyTo && message.replyTo !== previous?.id
       ? messages.find((item) => item.id === message.replyTo)
       : undefined
   const author = agents.find((agent) => agent.id === message.authorId)
@@ -1115,12 +1173,12 @@ function MessageRow({
             </div>
           ) : null}
           {message.attachments?.length ? <MessageFiles files={message.attachments} align="end" folded={folded(fold)} /> : null}
-          <Reached message={message} align="end" />
+          {chat ? null : <Reached message={message} align="end" />}
           <Calls message={message} align="end" />
           <div className="mt-1 flex items-center justify-end gap-2 text-[0.6875rem] text-muted-foreground">
             <FoldButton fold={fold} />
             <RecallButton message={message} />
-            {replyButton}
+            {chat ? null : replyButton}
             {!grouped ? <span>{clock(message.createdAt)}</span> : null}
           </div>
         </div>
@@ -1160,7 +1218,6 @@ function MessageRow({
           </p>
         ) : null}
         {reply ? <Quote message={reply} align="start" /> : null}
-        {detail && message.runId ? <RunTrail runId={message.runId} answer={message.text} /> : null}
         {message.text ? (
           <div
             className="bubble rounded-2xl rounded-tl-md bg-card/85 px-3.5 py-2"
@@ -1184,12 +1241,18 @@ function MessageRow({
         {message.attachments?.length && !sum.folded ? (
           <MessageFiles files={message.attachments} folded={sum.info ? undefined : folded(fold)} />
         ) : null}
-        {message.ask ? <AskCard message={message} /> : null}
-        <Reached message={message} />
+        {message.ask ? (
+          hidePendingCards && message.ask.state === "open" ? (
+            <p className="mt-1.5 text-xs text-amber-700 dark:text-amber-300">等你回答 · 去「等你定」处理</p>
+          ) : (
+            <AskCard message={message} />
+          )
+        ) : null}
+        {chat ? null : <Reached message={message} />}
         <Calls message={message} />
         <div className="mt-1 flex items-center gap-1">
           {sum.info ? <SummaryButton state={sum} node={() => row.current} /> : <FoldButton fold={fold} />}
-          {message.runId && !detail ? (
+          {message.runId ? (
             // How it got there: the tool calls of the wake that wrote this.
             <button
               type="button"
@@ -1200,7 +1263,7 @@ function MessageRow({
               查看过程
             </button>
           ) : null}
-          {replyButton}
+          {chat ? null : replyButton}
         </div>
       </div>
     </article>
@@ -1330,17 +1393,17 @@ function Reached({ message, align = "start" }: { message: Message; align?: "star
 // answer is in the room. So the line only shows while a call is on its way,
 // or when it never got an answer.
 const CALL_LOOK: Record<CallState, { text: string; tone: "going" | "wrong" | "flat" }> = {
-  queued: { text: "排着", tone: "going" },
-  held: { text: "等它来取", tone: "going" },
-  started: { text: "已叫到", tone: "going" },
+  queued: { text: "排着队", tone: "going" },
+  held: { text: "已送到", tone: "going" },
+  started: { text: "开始了", tone: "going" },
   picked: { text: "在做", tone: "going" },
-  answered: { text: "答了", tone: "flat" },
-  silent: { text: "跑完了，没在群里说话", tone: "flat" },
+  answered: { text: "已回答", tone: "flat" },
+  silent: { text: "跑完了没说话", tone: "flat" },
   retrying: { text: "重试中", tone: "going" },
-  failed: { text: "没成功", tone: "wrong" },
-  stopped: { text: "被停下", tone: "flat" },
+  failed: { text: "没叫成", tone: "wrong" },
+  stopped: { text: "你停了", tone: "flat" },
   cut: { text: "中途断了", tone: "wrong" },
-  dropped: { text: "从队列拿掉了", tone: "flat" },
+  dropped: { text: "撤掉了", tone: "flat" },
 }
 
 const CALL_TONE = {
@@ -1498,16 +1561,17 @@ function demoAgent(doing: string): PublicAgent {
 
 function LiveDrawer({
   agents: real,
-  detail,
   onOpenRun,
   onStop,
   onMention,
+  desk = false,
 }: {
   agents: PublicAgent[]
-  detail: boolean
   onOpenRun: (runId: string) => void
   onStop?: (agent: PublicAgent) => void
   onMention: (name: string) => void
+  // The front desk: its seat only reads, so no 「给全权」.
+  desk?: boolean
 }) {
   const [open, setOpen] = useState(false)
   const demo = useLiveDemo()
@@ -1521,7 +1585,7 @@ function LiveDrawer({
     .sort((a, b) => (a.runStartedAt ?? 0) - (b.runStartedAt ?? 0))
     .map((agent) => (
       <Leaving key={agent.id} leaving={leavingIds.has(agent.id)} color={seatLook(agent).color}>
-        <LiveRun agent={agent} detail={detail} onOpenRun={onOpenRun} onStop={onStop} onMention={onMention} />
+        <LiveRun agent={agent} onOpenRun={onOpenRun} onStop={onStop} onMention={onMention} desk={desk} />
       </Leaving>
     ))
   if (agents.length === 0 && gone.length === 0) return null
@@ -1576,16 +1640,16 @@ function LiveDrawer({
 
 function LiveRun({
   agent,
-  detail,
   onOpenRun,
   onStop,
   onMention,
+  desk = false,
 }: {
   agent: PublicAgent
-  detail: boolean
   onOpenRun: (runId: string) => void
   onStop?: (agent: PublicAgent) => void
   onMention: (name: string) => void
+  desk?: boolean
 }) {
   const look = seatLook(agent)
   const now = useNow(true)
@@ -1624,49 +1688,45 @@ function LiveRun({
         <p className="mb-1 flex flex-wrap items-baseline gap-x-2 text-xs">
           <span className="font-semibold">{agent.name}</span>
           <span className="text-sky-700 dark:text-sky-300">正在做</span>
-          <FullAccessToggle agent={agent} />
+          {desk ? null : <FullAccessToggle agent={agent} />}
         </p>
-        {detail ? (
-          agent.runId ? <RunTrail runId={agent.runId} /> : null
-        ) : (
-          // The bubble opens the process; the square at its end stops the run
-          // (it used to be an icon that opened the process too).
-          <div
-            className={`bubble working relative flex max-w-full items-center rounded-2xl rounded-tl-md bg-card/85 transition-[width] duration-300 ease-out motion-reduce:transition-none ${
-              width ? "" : "w-fit"
-            }`}
-            style={{ "--halo": look.color, width } as CSSProperties}
+        {/* The bubble opens the process; the square at its end stops the run
+            (it used to be an icon that opened the process too). */}
+        <div
+          className={`bubble working relative flex max-w-full items-center rounded-2xl rounded-tl-md bg-card/85 transition-[width] duration-300 ease-out motion-reduce:transition-none ${
+            width ? "" : "w-fit"
+          }`}
+          style={{ "--halo": look.color, width } as CSSProperties}
+        >
+          <button
+            type="button"
+            className="flex min-w-0 flex-1 items-center gap-2.5 self-stretch rounded-l-2xl rounded-tl-md py-2.5 pr-2.5 pl-3.5 text-left"
+            title="查看过程"
+            onClick={() => agent.runId && onOpenRun(agent.runId)}
           >
+            {inside(true)}
+          </button>
+          {onStop && !agent.demo ? (
             <button
               type="button"
-              className="flex min-w-0 flex-1 items-center gap-2.5 self-stretch rounded-l-2xl rounded-tl-md py-2.5 pr-2.5 pl-3.5 text-left"
-              title="查看过程"
-              onClick={() => agent.runId && onOpenRun(agent.runId)}
+              className="mr-2 grid size-7 shrink-0 place-items-center rounded-full text-muted-foreground transition-colors hover:bg-red-500/15 hover:text-red-600 dark:hover:text-red-400"
+              title="停止：停掉这次叫醒，排在后面的也一起取消"
+              aria-label={`停下 ${agent.name}`}
+              onClick={() => onStop(agent)}
             >
-              {inside(true)}
+              <Square className="size-3 fill-current" />
             </button>
-            {onStop && !agent.demo ? (
-              <button
-                type="button"
-                className="mr-2 grid size-7 shrink-0 place-items-center rounded-full text-muted-foreground transition-colors hover:bg-red-500/15 hover:text-red-600 dark:hover:text-red-400"
-                title="停止：停掉这次唤起，排在后面的也一起取消"
-                aria-label={`停下 ${agent.name}`}
-                onClick={() => onStop(agent)}
-              >
-                <Square className="size-3 fill-current" />
-              </button>
-            ) : (
-              <span className="mr-2 size-7 shrink-0" />
-            )}
-            <span
-              ref={measure}
-              className="pointer-events-none invisible absolute top-0 left-0 flex w-max items-center gap-2.5 py-2.5 pr-2 pl-3.5"
-              aria-hidden
-            >
-              {inside(false)}
-            </span>
-          </div>
-        )}
+          ) : (
+            <span className="mr-2 size-7 shrink-0" />
+          )}
+          <span
+            ref={measure}
+            className="pointer-events-none invisible absolute top-0 left-0 flex w-max items-center gap-2.5 py-2.5 pr-2 pl-3.5"
+            aria-hidden
+          >
+            {inside(false)}
+          </span>
+        </div>
       </div>
     </article>
   )

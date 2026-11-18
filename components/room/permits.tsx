@@ -22,7 +22,15 @@ async function post(body: Record<string, unknown>) {
   }
 }
 
-export function PermitCard({ item }: { item: PermitRequest }) {
+export function PermitCard({
+  item,
+  projectName,
+  onInspect,
+}: {
+  item: PermitRequest
+  projectName?: string
+  onInspect?: () => void
+}) {
   const [busy, setBusy] = useState(false)
   const [denying, setDenying] = useState(false)
   const [note, setNote] = useState("")
@@ -37,16 +45,42 @@ export function PermitCard({ item }: { item: PermitRequest }) {
       <p className="flex items-center gap-1.5">
         <ShieldAlert className="size-3.5 shrink-0 text-amber-600 dark:text-amber-400" />
         <span className="min-w-0 flex-1">
+          {projectName ? (
+            <span className="mr-1.5 inline-block rounded bg-foreground/[0.06] px-1.5 py-0.5 text-[0.625rem] leading-4 text-muted-foreground">
+              {projectName}
+            </span>
+          ) : null}
           <span className="font-medium">{item.agentName}</span>
           <span className="text-muted-foreground">
-            {full ? " 请求本轮完整权限" : ` 想用 ${item.tool}`}
+            {full ? " 想要这一轮的完整权限" : ` 想${item.plain?.action ?? "用一个工具"}`}
           </span>
         </span>
       </p>
-      <pre className="mt-1.5 max-h-32 overflow-auto rounded-lg bg-muted/70 px-2.5 py-1.5 font-mono text-[0.6875rem] leading-4 break-all whitespace-pre-wrap">
-        {full ? item.reason : item.input}
-      </pre>
-      {denying ? (
+      {/* The sentence first (the client's own on what it is for, or the
+          reason given for full permission); the tool name and the command
+          itself are behind 「看原始内容」. */}
+      {full || item.plain?.why ? (
+        <p className="mt-1.5 text-[0.8125rem] leading-5 break-words">{full ? item.reason : item.plain?.why}</p>
+      ) : null}
+      <details className="group mt-1.5">
+        <summary className="cursor-pointer text-[0.6875rem] text-muted-foreground select-none hover:text-foreground">
+          看原始内容
+        </summary>
+        <pre className="mt-1 max-h-32 overflow-auto rounded-lg bg-muted/70 px-2.5 py-1.5 font-mono text-[0.6875rem] leading-4 break-all whitespace-pre-wrap">
+          {full ? item.reason : `${item.tool ?? ""}\n${item.input ?? ""}`.trim()}
+        </pre>
+      </details>
+      {onInspect ? (
+        <div className="mt-2 flex justify-end">
+          <button
+            type="button"
+            className="rounded-full bg-primary px-3 py-1 font-medium text-primary-foreground hover:opacity-90"
+            onClick={onInspect}
+          >
+            去看
+          </button>
+        </div>
+      ) : denying ? (
         <form
           className="mt-2 flex items-center gap-1.5"
           onSubmit={(event) => {

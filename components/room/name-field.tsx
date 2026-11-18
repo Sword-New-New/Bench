@@ -4,12 +4,28 @@ import { useEffect, useState } from "react"
 
 import { api } from "@/components/room/api"
 import { Button } from "@/components/ui/button"
+import { DialogFooter } from "@/components/ui/dialog"
 import { Input } from "@/components/ui/input"
+import { Label } from "@/components/ui/label"
 
-// The tour's first step asks what the user goes by. It is the one thing the
-// tour saves: the name is a setting, the same in every project, and agents
-// are told it when they sit down and when they are woken.
-export function NameField({ onNext }: { onNext: () => void }) {
+// The tour's first step (and the settings menu's 「你的名字」 dialog) asks
+// what the user goes by: the same name in every project, told to agents when
+// they sit down and when they are woken.
+export function NameField({
+  onNext,
+  label = "先告诉我，你叫什么名字？",
+  submitLabel = "开始",
+  hint = "AI 会这样称呼你，房间里你说的话也署这个名字。以后可以再改。",
+  onCancel,
+  className = "mt-4",
+}: {
+  onNext: (changed?: boolean) => void
+  label?: string
+  submitLabel?: string
+  hint?: string
+  onCancel?: () => void
+  className?: string
+}) {
   const [name, setName] = useState("")
   const [saved, setSaved] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
@@ -32,13 +48,13 @@ export function NameField({ onNext }: { onNext: () => void }) {
   const submit = async () => {
     const next = name.trim()
     if (!next) return setError("写一个名字，AI 会这样叫你")
-    if (next === saved) return onNext()
+    if (next === saved) return onNext(false)
     setBusy(true)
     setError("")
     try {
       await api("/api/v1/user", { method: "POST", body: JSON.stringify({ as: "human", name: next }) })
       setSaved(next)
-      onNext()
+      onNext(true)
     } catch (failed) {
       setError(failed instanceof Error ? failed.message : "没存上，再试一次")
     } finally {
@@ -48,15 +64,15 @@ export function NameField({ onNext }: { onNext: () => void }) {
 
   return (
     <form
-      className="mt-4"
+      className={className}
       onSubmit={(event) => {
         event.preventDefault()
         void submit()
       }}
     >
-      <label htmlFor="tour-name" className="text-xs font-medium">
-        先告诉我，你叫什么名字？
-      </label>
+      <Label htmlFor="tour-name" className="text-xs font-medium">
+        {label}
+      </Label>
       <div className="mt-1.5 flex gap-2">
         <Input
           id="tour-name"
@@ -69,13 +85,25 @@ export function NameField({ onNext }: { onNext: () => void }) {
             setError("")
           }}
         />
-        <Button type="submit" size="sm" className="h-8 shrink-0" disabled={busy}>
-          开始
-        </Button>
+        {!onCancel ? (
+          <Button type="submit" size="sm" className="h-8 shrink-0" disabled={busy}>
+            {submitLabel}
+          </Button>
+        ) : null}
       </div>
-      <p className={`mt-1.5 text-xs ${error ? "text-destructive" : "text-muted-foreground"}`}>
-        {error || "AI 会这样称呼你，房间里你说的话也署这个名字。以后可以再改。"}
-      </p>
+      {error || hint ? (
+        <p className={`mt-1.5 text-xs ${error ? "text-destructive" : "text-muted-foreground"}`}>{error || hint}</p>
+      ) : null}
+      {onCancel ? (
+        <DialogFooter className="mt-4">
+          <Button type="button" variant="ghost" disabled={busy} onClick={onCancel}>
+            取消
+          </Button>
+          <Button type="submit" disabled={busy || !name.trim()}>
+            {submitLabel}
+          </Button>
+        </DialogFooter>
+      ) : null}
     </form>
   )
 }

@@ -50,7 +50,17 @@ export function PinnedAsks({ asks }: { asks: Message[] }) {
 // A question an agent asked with bench_ask, under its message. Pick an option
 // (several, when it allows) or write an answer; it goes out as a reply to the
 // question, which hands it back to the asker.
-export function AskCard({ message }: { message: Message }) {
+export function AskCard({
+  message,
+  projectName,
+  showQuestion = false,
+  onInspect,
+}: {
+  message: Message
+  projectName?: string
+  showQuestion?: boolean
+  onInspect?: () => void
+}) {
   const ask = message.ask
   const [picked, setPicked] = useState<string[]>([])
   const [text, setText] = useState("")
@@ -90,12 +100,47 @@ export function AskCard({ message }: { message: Message }) {
   const toggle = (label: string) =>
     setPicked((list) => (list.includes(label) ? list.filter((item) => item !== label) : [...list, label]))
 
+  if (onInspect) {
+    return (
+      <div className="w-full rounded-2xl border border-amber-500/40 bg-card px-3 py-2.5 text-xs shadow-sm">
+        <p className="flex flex-wrap items-center gap-1.5 font-medium text-amber-700 dark:text-amber-400">
+          <CircleHelp className="size-3.5 shrink-0" />
+          {projectName ? (
+            <span className="rounded bg-foreground/[0.06] px-1.5 py-0.5 text-[0.625rem] leading-4 text-muted-foreground">
+              {projectName}
+            </span>
+          ) : null}
+          {message.authorName} 等你回答
+        </p>
+        {showQuestion && message.text ? (
+          <p className="mt-1.5 line-clamp-4 text-[0.8125rem] leading-5 break-words whitespace-pre-wrap text-foreground">
+            {message.text}
+          </p>
+        ) : null}
+        <div className="mt-2 flex justify-end">
+          <button
+            type="button"
+            className="rounded-full bg-primary px-3 py-1 font-medium text-primary-foreground hover:opacity-90"
+            onClick={onInspect}
+          >
+            去看
+          </button>
+        </div>
+      </div>
+    )
+  }
+
   return (
-    <div className="mt-1.5 w-full max-w-md rounded-2xl border border-amber-500/40 bg-card px-3 py-2.5 text-xs shadow-sm ring-2 ring-amber-500/10">
+    <div className={`${showQuestion ? "" : "mt-1.5 "}w-full max-w-md rounded-2xl border border-amber-500/40 bg-card px-3 py-2.5 text-xs shadow-sm ring-2 ring-amber-500/10`}>
       <p className="flex items-center gap-1.5 font-medium text-amber-700 dark:text-amber-400">
         <CircleHelp className="size-3.5" />
         {message.authorName} 等你回答{ask.multi ? "（可多选）" : ""}
       </p>
+      {showQuestion && message.text ? (
+        <p className="mt-1.5 line-clamp-4 text-[0.8125rem] leading-5 break-words whitespace-pre-wrap text-foreground">
+          {message.text}
+        </p>
+      ) : null}
       {options.length > 0 ? (
         <div className="mt-2 flex flex-col gap-1.5">
           {options.map((option) => {

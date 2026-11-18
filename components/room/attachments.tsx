@@ -286,7 +286,7 @@ function FoldedFiles({ files, align, onOpen }: { files: Attachment[]; align: "st
           key={item.path}
           type="button"
           className="flex max-w-56 items-center gap-1.5 rounded-full border bg-background/60 py-0.5 pr-2.5 pl-1 text-xs hover:bg-muted"
-          title={`展开全文，看 ${item.name}`}
+          title={`展开，看 ${item.name}`}
           onClick={onOpen}
         >
           {item.kind === "image" ? (

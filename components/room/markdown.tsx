@@ -1,9 +1,9 @@
 "use client"
 
-import { createContext, Fragment, useContext, useEffect, useMemo, useState, type ReactNode } from "react"
+import { createContext, Fragment, useContext, useEffect, useMemo, useState, type MouseEvent, type ReactNode } from "react"
 import { Check, Copy, Square, SquareCheck } from "lucide-react"
 
-import { goto, openFile, showCommit } from "@/components/room/refs"
+import { goto, openFile, showCommit, useTaskTitle } from "@/components/room/refs"
 import { fileTarget, parseInline, parseMarkdown, refOf, safeHref, splitRefs, type Block, type Inline, type Ref } from "@/lib/markdown"
 import { copyText, isShell, splitMentions } from "@/lib/text"
 
@@ -232,18 +232,21 @@ function Words({ text, names, tone }: { text: string; names: string[]; tone: Ton
   )
 }
 
-const REF_TITLE = { message: "跳到这条消息", task: "在待办里看", commit: "看这个提交", file: "在编辑器里打开" }
+const REF_TITLE = { message: "跳到这条消息", task: "在待办里看", commit: "看这个提交", file: "在文件夹里显示，Ctrl 点开编辑器" }
 
 // An id, file or commit in a message, as a quiet link: dotted underline, so a
 // reply full of file names doesn't turn blue all over.
 function RefLink({ target, tone, children }: { target: Ref; tone: Tone; children: ReactNode }) {
   const from = useContext(From)
-  const open = () => {
+  const taskTitle = useTaskTitle(target.kind === "task" ? target.id : undefined)
+  const open = (event: MouseEvent) => {
     if (target.kind === "message" || target.kind === "task") goto(target.kind, target.id)
     else if (target.kind === "commit") showCommit(target.hash, from)
-    else if (target.kind === "file") void openFile(target.path, target.line, from)
+    else if (target.kind === "file") void openFile(target.path, target.line, from, event.ctrlKey || event.metaKey)
   }
-  const where = target.kind === "file" ? `${target.path}${target.line ? `:${target.line}` : ""}` : ""
+  const where =
+    target.kind === "file" ? `${target.path}${target.line ? `:${target.line}` : ""}` : target.kind === "task" && taskTitle ? target.id : ""
+  const label = taskTitle ? `「${taskTitle.length > 18 ? `${taskTitle.slice(0, 17)}…` : taskTitle}」` : children
   return (
     <button
       type="button"
@@ -253,7 +256,7 @@ function RefLink({ target, tone, children }: { target: Ref; tone: Tone; children
         tone === "inverse" ? "decoration-white/60 hover:bg-white/15" : "decoration-foreground/40 hover:bg-mention/10 hover:text-mention hover:decoration-mention"
       }`}
     >
-      {children}
+      {label}
     </button>
   )
 }

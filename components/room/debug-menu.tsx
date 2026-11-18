@@ -57,7 +57,7 @@ export function withDebug(room: RoomSnapshot, view: DebugView): RoomSnapshot {
 
 const NOTES = [
   { kind: "relay", label: "接力到上限" },
-  { kind: "failed", label: "唤起失败" },
+  { kind: "failed", label: "叫醒失败" },
   { kind: "nosession", label: "点到了但没报会话" },
 ]
 
@@ -114,10 +114,10 @@ export function DebugMenu({
         <DropdownMenuGroup>
           <DropdownMenuLabel>只改你看到的</DropdownMenuLabel>
           <DropdownMenuCheckboxItem checked={view.nudge} onCheckedChange={(nudge) => onView({ ...view, nudge })}>
-            摘要提醒条
+            房间摘要提醒条
           </DropdownMenuCheckboxItem>
           <DropdownMenuCheckboxItem checked={view.writing} onCheckedChange={(writing) => onView({ ...view, writing })}>
-            有人正在写摘要
+            有人正在写房间摘要
           </DropdownMenuCheckboxItem>
           <DropdownMenuSub>
             <DropdownMenuSubTrigger>头像状态</DropdownMenuSubTrigger>
@@ -135,7 +135,7 @@ export function DebugMenu({
               <DropdownMenuLabel className="font-normal">从「在做」切走会先放完成动画</DropdownMenuLabel>
             </DropdownMenuSubContent>
           </DropdownMenuSub>
-          <DropdownMenuItem onClick={onSummaryDone}>放一次「摘要写好了」动效</DropdownMenuItem>
+          <DropdownMenuItem onClick={onSummaryDone}>放一次「房间摘要写好了」动效</DropdownMenuItem>
           <DropdownMenuItem onClick={onLiveDemo}>放一次「正在做」卡片：换步骤、做完退场</DropdownMenuItem>
           <DropdownMenuItem onClick={onTour}>跑一遍新手引导（只在本页演，不存盘）</DropdownMenuItem>
           <DropdownMenuItem onClick={onClearSnooze}>清掉「稍后提醒」</DropdownMenuItem>

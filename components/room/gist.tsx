@@ -98,19 +98,19 @@ export function summaryOf(message: Message): Summary | null {
   if (!rest && files === 0) return null
   const hints: string[] = []
   if (files > 0) hints.push(`附 ${files} 个`)
-  if (message.taskId) hints.push(`待办 ${message.taskId.replace(/^t_/, "").slice(0, 4)}`)
+  if (message.taskId) hints.push("挂在一条待办上")
   if (rest && body.length >= 200) hints.push(`约 ${approx(body.length)} 字`)
   const by = stored && stored.by && stored.by !== "author" ? stored.by : undefined
-  if (by) hints.push(`摘要由 ${by} 补`)
+  if (by) hints.push(`结论由 ${by} 补`)
   return { text, by, hints }
 }
 
 // What a row needs to draw a reply in the 「摘要」 档: the summary (null when
 // this one is drawn whole, or in 「详细」), whether it is open, and how to
 // flip it, keeping the top of the message in view as it does.
-export function useSummary(message: Message, detail: boolean) {
+export function useSummary(message: Message) {
   const open = useOpened(message.id)
-  const info = detail ? null : summaryOf(message)
+  const info = summaryOf(message)
   return {
     info,
     open,
@@ -153,11 +153,25 @@ export function SummaryLine({
   return (
     <>
       <Reveal open={!open}>
-        <button
-          type="button"
+        {/* Not a <button>: the line can hold task ids, paths and commits,
+            which Markdown makes buttons of, and a button inside a button
+            is invalid HTML (React's hydration error, the dev overlay's
+            「2 Issues」 on 2026-11-16). A click on one of those opens it
+            and leaves the line folded. */}
+        <div
+          role="button"
+          tabIndex={0}
           className="block w-full cursor-pointer rounded-md text-left outline-offset-4"
           aria-expanded={false}
-          onClick={onToggle}
+          onClick={(event) => {
+            if ((event.target as HTMLElement).closest("button, a")) return
+            onToggle()
+          }}
+          onKeyDown={(event) => {
+            if (event.target !== event.currentTarget || (event.key !== "Enter" && event.key !== " ")) return
+            event.preventDefault()
+            onToggle()
+          }}
         >
           <div className="line-clamp-2 text-[0.9rem] leading-relaxed break-words">
             <Markdown text={summary.text} names={names} tone={tone} from={from} />
@@ -171,7 +185,7 @@ export function SummaryLine({
               <span key={hint}>{hint}</span>
             ))}
           </span>
-        </button>
+        </div>
       </Reveal>
       <Reveal open={open}>{children}</Reveal>
     </>

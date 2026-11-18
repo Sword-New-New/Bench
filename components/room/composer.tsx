@@ -34,6 +34,7 @@ export function Composer({
   onFiles,
   speakers = [],
   placeholder,
+  sole,
 }: {
   agents: PublicAgent[]
   value: string
@@ -52,6 +53,9 @@ export function Composer({
   speakers?: string[]
   // In place of the usual hint (the front desk's room: 「问前台…」).
   placeholder?: string
+  // The one seat everything said here goes to (the front desk): a command
+  // needs no @.
+  sole?: string
 }) {
   const [picked, setPicked] = useState(false)
   const [dragging, setDragging] = useState(false)
@@ -305,7 +309,7 @@ export function Composer({
           ref={inputRef}
           id="composer"
           value={value}
-          placeholder={dragging ? "松手就附上" : (placeholder ?? "说点什么，@ 谁就唤起谁 · / 是命令 · 可以粘贴图片、拖文件进来 · Enter 发送")}
+          placeholder={dragging ? "松手就附上" : (placeholder ?? "说点什么，@ 谁就叫醒谁 · / 是命令 · 可以粘贴图片、拖文件进来 · Enter 发送")}
           className="max-h-60 min-h-14 resize-none border-0 bg-transparent px-4 pt-3.5 shadow-none placeholder:text-foreground/45 focus-visible:ring-0 dark:bg-transparent"
           onFocus={() => {
             const ids = new Set(targets.map((item) => item.seat.id))
@@ -403,11 +407,11 @@ export function Composer({
         <p className="pill mx-auto mt-1.5 w-fit max-w-3xl rounded-full px-3 py-0.5 text-[0.6875rem] text-muted-foreground">
           {slash === null
             ? null
-            : slash.targets.length === 0
+            : slash.targets.length === 0 && !sole
               ? `/${slash.command.name} 要发给谁？@ 一个席位，或点下面的名字`
               : slash.command.needsText && !slash.text
                 ? `/${slash.command.name} 后面写上${slash.command.hint}`
-                : `/${slash.command.name} 只发给 ${slash.targets.join("、")}，不进群聊`}
+                : `/${slash.command.name} 只发给 ${slash.targets.length ? slash.targets.join("、") : sole}，不进群聊`}
         </p>
       </Reveal>
       <Reveal open={unknown.length > 0}>
@@ -416,7 +420,8 @@ export function Composer({
           {fallback ? `，会改叫 @${fallback.name}` : "，这句不会叫醒谁"}
         </p>
       </Reveal>
-      <Reveal open={Boolean(fallback) && unknown.length === 0 && (value.trim().length > 0 || files.length > 0)}>
+      {/* At the front desk everything goes to its one seat: nothing to say about it. */}
+      <Reveal open={Boolean(fallback) && !sole && unknown.length === 0 && (value.trim().length > 0 || files.length > 0)}>
         <p className="pill mx-auto mt-1.5 w-fit max-w-3xl rounded-full px-3 py-0.5 text-[0.6875rem] text-muted-foreground">
           没 @ 人，发给 @{fallback?.name}
         </p>

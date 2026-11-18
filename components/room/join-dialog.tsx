@@ -4,8 +4,10 @@ import { useEffect, useState, useSyncExternalStore } from "react"
 import { Check, Copy, Loader2, Play, Plus, Search, X } from "lucide-react"
 import { toast } from "sonner"
 
+import { AdvancedSection } from "@/components/room/advanced"
 import { api } from "@/components/room/api"
 import { Avatar } from "@/components/room/bits"
+import { shortDir } from "@/components/room/project-menu"
 import { Button } from "@/components/ui/button"
 import {
   Dialog,
@@ -162,6 +164,7 @@ export function JoinDialog({
   spawnable,
   userName,
   busy,
+  expandAdvanced = false,
   onOpenChange,
   onSpawn,
   onReset,
@@ -177,6 +180,8 @@ export function JoinDialog({
   // What the user goes by; the prompt tells the agent.
   userName: string
   busy: boolean
+  // Open 「高级」 immediately (used by the guided tour or preset join row).
+  expandAdvanced?: boolean
   onOpenChange: (open: boolean) => void
   onSpawn: (kind: string) => void
   onReset: () => void
@@ -189,6 +194,7 @@ export function JoinDialog({
   const [query, setQuery] = useState("")
   const [running, setRunning] = useState(false)
   const [results, setResults] = useState<RegisterResult[] | null>(null)
+  const [advOpen, setAdvOpen] = useState(false)
   if (open !== wasOpen) {
     setWasOpen(open)
     if (!open) setConfirmReset(false)
@@ -196,6 +202,7 @@ export function JoinDialog({
       setPicked(preset ? [preset] : [])
       setQuery("")
       setResults(null)
+      setAdvOpen(Boolean(expandAdvanced || preset))
     }
   }
 
@@ -216,11 +223,7 @@ export function JoinDialog({
   // One you came here from (preset) stays, so its row's 「接入」 still lands.
   const seatedKinds = new Set(agents.filter((agent) => !agent.demo).map((agent) => kindOf(agent)?.id))
   const joined = KINDS.filter((kind) => seatedKinds.has(kind.id) && kind.id !== preset)
-  const shown = KINDS.filter(
-    (kind) =>
-      !joined.includes(kind) &&
-      (words ? matches(kind, words) : true),
-  )
+  const shown = KINDS.filter((kind) => !joined.includes(kind) && (words ? matches(kind, words) : true))
   // Keep the command in list order, not click order.
   const chosen = KINDS.filter((kind) => picked.includes(kind.id))
   const toggle = (id: string) => {
@@ -250,118 +253,137 @@ export function JoinDialog({
         <DialogHeader>
           <DialogTitle>接入 AI</DialogTitle>
           <DialogDescription>
-            给选中的客户端写入一次 bench 配置，再在它会话里发一句即可入座「{projectName}」。
+            {spawnable.length > 0
+              ? `选一个 AI，房间替你开好会话直接入座「${projectName}」；需要接已有会话或看脚本配置，展开「高级」。`
+              : `给选中的客户端写入一次 bench 配置，再在它会话里发一句即可入座「${projectName}」。`}
           </DialogDescription>
         </DialogHeader>
-        <section className="space-y-2" data-tour="j-pick">
-          <div className="flex items-center gap-2">
-            <h3 className="shrink-0 text-sm font-medium">1. 选客户端</h3>
-            <div className="relative ml-auto w-44">
-              <Search className="pointer-events-none absolute top-1/2 left-2 size-3.5 -translate-y-1/2 text-muted-foreground" />
-              <Input
-                value={query}
-                placeholder="搜客户端"
-                aria-label="搜 agent"
-                className="h-7 pl-7 text-xs"
-                onChange={(event) => setQuery(event.target.value)}
-              />
-            </div>
-          </div>
-          <div className="grid grid-cols-2 gap-1 sm:grid-cols-3">
-            {shown.map((kind) => (
-              <KindTile
-                key={kind.id}
-                kind={kind}
-                picked={picked.includes(kind.id)}
-                seated={agents.filter((agent) => !agent.demo && kindOf(agent)?.id === kind.id).length}
-                onToggle={() => toggle(kind.id)}
-              />
-            ))}
-          </div>
-          {joined.length ? (
-            <p className="text-[0.6875rem] leading-4 text-muted-foreground">
-              已入座：{joined.map((kind) => kind.label).join("、")}（要加开去左栏点「开新会话」）。
-            </p>
-          ) : null}
-          {shown.length === 0 && words && !joined.some((kind) => matches(kind, words)) ? (
-            <div className="rounded-xl border px-3 py-2.5">
-              <p className="text-xs leading-5 text-muted-foreground">
-                列表里没有「{query.trim()}」：把下面说明贴给它即可入座（点名不会自动叫醒）。
-              </p>
-              <PromptBox prompt={prompt} />
-            </div>
-          ) : null}
-        </section>
-        <section className="space-y-2" data-tour="j-register">
-          <h3 className="text-sm font-medium">2. 写入客户端配置（每家一次）</h3>
-          {chosen.length > 0 ? (
-            <>
-              <div className="flex items-center gap-2">
-                <div className="min-w-0 flex-1">
-                  <CopyLine text={`${root}/scripts/register-mcp.sh ${chosen.map((kind) => kind.id).join(" ")}`} />
-                </div>
-                <Button type="button" size="sm" className="shrink-0" disabled={running} onClick={runHere}>
-                  {running ? <Loader2 className="animate-spin" /> : <Play />}
-                  {running ? "运行中…" : "运行"}
-                </Button>
-              </div>
-              {results ? <Results results={results} /> : null}
-              <p className="text-xs leading-5 text-muted-foreground">会向对应客户端配置注册 bench 工具，所有项目共用。</p>
-            </>
-          ) : (
-            <p className="rounded-lg border border-dashed px-3 py-2.5 text-xs text-muted-foreground">先在上面选客户端（可多选）。</p>
-          )}
-        </section>
-        <section className="space-y-2" data-tour="j-say">
-          <h3 className="text-sm font-medium">3. 在它会话里发这句</h3>
-          <CopyLine text={ask} />
-          <p className="text-xs leading-5 text-muted-foreground">
-            {project?.dir
-              ? `工作目录在 ${project.dir} 内的会话可省略项目名；`
-              : "项目设好目录后，同目录会话可省略项目名；"}
-            原在别的项目会自动转来。
-          </p>
-        </section>
+
         {spawnable.length > 0 ? (
-          <section className="space-y-2">
-            <h3 className="text-sm font-medium">或后台直接开新会话</h3>
-            <div className="flex flex-wrap gap-1.5">
+          <section className="space-y-2.5">
+            <h3 className="text-sm font-medium">房间替你开一个</h3>
+            <div className="flex flex-wrap gap-2">
               {spawnable.map((id) => {
                 const kind = kindById(id)
                 return (
-                  <Button key={id} type="button" variant="outline" size="sm" className="rounded-full" onClick={() => onSpawn(id)}>
-                    <Plus />
-                    {kind?.label ?? id}
+                  <Button key={id} type="button" variant="outline" size="sm" className="h-9 gap-2 rounded-full pr-3.5 pl-2.5" onClick={() => onSpawn(id)}>
+                    {kind ? <Avatar name={kind.label} color={kind.color} kind={kind} size="sm" /> : <Plus />}
+                    <span>{kind?.label ?? id}</span>
                   </Button>
                 )
               })}
             </div>
             <p className="text-xs leading-5 text-muted-foreground">
-              后台建好会话直接入座{project?.dir ? `（默认在 ${project.dir}）` : ""}。
+              后台建好会话直接入座{project?.dir ? `（工作目录：${shortDir(project.dir)}）` : ""}，之后在群里 @ 它就能对话。
             </p>
+            {joined.length ? (
+              <p className="text-[0.6875rem] leading-4 text-muted-foreground">
+                已入座：{joined.map((kind) => kind.label).join("、")}。
+              </p>
+            ) : null}
           </section>
         ) : null}
-        <details className="rounded-xl border px-3 py-2">
-          <summary className="cursor-pointer text-sm">
-            其他客户端：复制说明贴给它
-          </summary>
-          <PromptBox prompt={prompt} />
-        </details>
-        <div className="flex items-center justify-between gap-2 border-t pt-3">
-          <span className="text-xs text-muted-foreground">房间地址 {origin}</span>
-          {confirmReset ? (
-            <div className="flex items-center gap-2">
-              <span className="text-xs text-muted-foreground">席位、对话和待办都会删掉</span>
-              <Button type="button" variant="destructive" size="sm" disabled={busy} onClick={onReset}>
-                确认清空
-              </Button>
+
+        <AdvancedSection open={advOpen} onToggle={() => setAdvOpen((v) => !v)}>
+          <div className="space-y-4">
+            <section className="space-y-2" data-tour="j-pick">
+              <div className="flex items-center gap-2">
+                <h3 className="shrink-0 text-sm font-medium">1. 选客户端</h3>
+                <div className="relative ml-auto w-44">
+                  <Search className="pointer-events-none absolute top-1/2 left-2 size-3.5 -translate-y-1/2 text-muted-foreground" />
+                  <Input
+                    value={query}
+                    placeholder="搜客户端"
+                    aria-label="搜 agent"
+                    className="h-7 pl-7 text-xs"
+                    onChange={(event) => setQuery(event.target.value)}
+                  />
+                </div>
+              </div>
+              <div className="grid grid-cols-2 gap-1 sm:grid-cols-3">
+                {shown.map((kind) => (
+                  <KindTile
+                    key={kind.id}
+                    kind={kind}
+                    picked={picked.includes(kind.id)}
+                    seated={agents.filter((agent) => !agent.demo && kindOf(agent)?.id === kind.id).length}
+                    onToggle={() => toggle(kind.id)}
+                  />
+                ))}
+              </div>
+              {shown.length === 0 && words && !joined.some((kind) => matches(kind, words)) ? (
+                <div className="rounded-xl border px-3 py-2.5">
+                  <p className="text-xs leading-5 text-muted-foreground">
+                    列表里没有「{query.trim()}」：把下面说明贴给它即可入座（点名不会自动叫醒）。
+                  </p>
+                  <PromptBox prompt={prompt} />
+                </div>
+              ) : null}
+            </section>
+
+            <section className="space-y-2" data-tour="j-register">
+              <h3 className="text-sm font-medium">2. 写入客户端配置（每家一次）</h3>
+              {chosen.length > 0 ? (
+                <>
+                  <div className="flex items-center gap-2">
+                    <div className="min-w-0 flex-1">
+                      <CopyLine text={`${root}/scripts/register-mcp.sh ${chosen.map((kind) => kind.id).join(" ")}`} />
+                    </div>
+                    <Button type="button" size="sm" className="shrink-0" disabled={running} onClick={runHere}>
+                      {running ? <Loader2 className="animate-spin" /> : <Play />}
+                      {running ? "运行中…" : "运行"}
+                    </Button>
+                  </div>
+                  {results ? <Results results={results} /> : null}
+                  <p className="text-xs leading-5 text-muted-foreground">会向对应客户端配置注册 bench 工具，所有项目共用。</p>
+                </>
+              ) : (
+                <p className="rounded-lg border border-dashed px-3 py-2.5 text-xs text-muted-foreground">先在上面选客户端（可多选）。</p>
+              )}
+            </section>
+
+            <section className="space-y-2" data-tour="j-say">
+              <h3 className="text-sm font-medium">3. 在它会话里发这句</h3>
+              <CopyLine text={ask} />
+              <p className="text-xs leading-5 text-muted-foreground">
+                {project?.dir
+                  ? `工作目录在 ${project.dir} 内的会话可省略项目名；`
+                  : "项目设好目录后，同目录会话可省略项目名；"}
+                原在别的项目会自动转来。
+              </p>
+            </section>
+
+            <details className="rounded-xl border px-3 py-2">
+              <summary className="cursor-pointer text-sm">其他客户端：复制说明贴给它</summary>
+              <PromptBox prompt={prompt} />
+            </details>
+
+            <p className="text-xs text-muted-foreground">
+              房间地址：<code className="font-mono">{origin}</code>
+            </p>
+
+            {/* Keep destructive project reset isolated on its own row away from other buttons. */}
+            <div className="border-t pt-3">
+              {confirmReset ? (
+                <div className="flex flex-wrap items-center gap-2">
+                  <span className="text-xs text-muted-foreground">席位、对话和待办都会删掉</span>
+                  <div className="ml-auto flex items-center gap-2">
+                    <Button type="button" variant="ghost" size="sm" disabled={busy} onClick={() => setConfirmReset(false)}>
+                      取消
+                    </Button>
+                    <Button type="button" variant="destructive" size="sm" disabled={busy} onClick={onReset}>
+                      确认清空
+                    </Button>
+                  </div>
+                </div>
+              ) : (
+                <Button type="button" variant="ghost" size="sm" className="text-destructive hover:text-destructive" onClick={() => setConfirmReset(true)}>
+                  清空记录
+                </Button>
+              )}
             </div>
-          ) : (
-            <Button type="button" variant="ghost" size="sm" onClick={() => setConfirmReset(true)}>
-              清空记录
-            </Button>
-          )}
-        </div>
+          </div>
+        </AdvancedSection>
       </DialogContent>
     </Dialog>
   )

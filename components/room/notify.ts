@@ -57,7 +57,7 @@ export async function setNotify(on: boolean): Promise<"on" | "off" | "blocked"> 
   return result
 }
 
-type Seen = { end?: string; waiting: number }
+type Seen = { end?: string; waiting: number; notice?: string }
 
 export function useProjectNotices(projects: Project[] | null, current: string | null, open: (id: string) => void) {
   const seen = useRef(new Map<string, Seen>())
@@ -72,7 +72,7 @@ export function useProjectNotices(projects: Project[] | null, current: string | 
     const away = document.hidden || !document.hasFocus()
     for (const project of projects) {
       const before = seen.current.get(project.id)
-      seen.current.set(project.id, { end: project.lastEnd?.id, waiting: project.waiting })
+      seen.current.set(project.id, { end: project.lastEnd?.id, waiting: project.waiting, notice: project.notice?.id })
       // First sight (page just opened, project just made): what's already
       // there isn't news.
       if (!before) continue
@@ -106,8 +106,13 @@ export function useProjectNotices(projects: Project[] | null, current: string | 
       if (end && end.id !== before.end) {
         show({ title: `${end.name} 做完了`, body: end.text || "这一轮结束了", tag: `bench-end-${end.id}`, color: end.color || "#22c55e", tone: "done" })
       }
+      // The desk's AI pushing a line to the user (lib/front.ts frontNotify), signed 前台.
+      const notice = project.notice
+      if (notice && notice.id !== before.notice) {
+        show({ title: "提醒你", body: notice.text, tag: `bench-front-${notice.id}`, color: "#b45309", tone: "waiting" })
+      }
       if (project.waiting > before.waiting) {
-        show({ title: `${project.waiting} 件等你处理`, body: "权限、提问或待验收", tag: `bench-wait-${project.id}`, color: "#f59e0b", tone: "waiting" })
+        show({ title: `${project.waiting} 件等你处理`, body: "权限、提问或等你验收", tag: `bench-wait-${project.id}`, color: "#f59e0b", tone: "waiting" })
       }
     }
   }, [projects, current])

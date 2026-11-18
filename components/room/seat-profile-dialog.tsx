@@ -4,9 +4,10 @@ import { useEffect, useRef, useState } from "react"
 import { ArrowRightLeft, BookOpen, FolderOpen, History, Loader2, RotateCcw } from "lucide-react"
 import { toast } from "sonner"
 
+import { AdvancedSection } from "@/components/room/advanced"
 import { api, type AdapterInfo } from "@/components/room/api"
 import { Avatar } from "@/components/room/bits"
-import { ModelField } from "@/components/room/model-field"
+import { ModelAdvancedFields, ModelField } from "@/components/room/model-field"
 import { Button } from "@/components/ui/button"
 import {
   Dialog,
@@ -57,6 +58,8 @@ export function SeatProfileDialog({
   const [tab, setTab] = useState<"profile" | "rebind">("profile")
   const [loading, setLoading] = useState(false)
   const [saving, setSaving] = useState(false)
+  const [profileAdvOpen, setProfileAdvOpen] = useState(false)
+  const [rebindAdvOpen, setRebindAdvOpen] = useState(false)
 
   // Profile fields
   const [persona, setPersona] = useState("")
@@ -66,6 +69,7 @@ export function SeatProfileDialog({
   // Rebind fields
   const [kind, setKind] = useState<string>("codex")
   const [model, setModel] = useState("")
+  const [customModel, setCustomModel] = useState(false)
   const [effort, setEffort] = useState("")
   const [workdir, setWorkdir] = useState("")
   const [editDir, setEditDir] = useState(false)
@@ -96,9 +100,12 @@ export function SeatProfileDialog({
 
       setTarget(detail)
       setTab(detail.tab ?? "profile")
+      setProfileAdvOpen(false)
+      setRebindAdvOpen(false)
       setNowTs(Date.now())
       if (candidate) setKind(candidate.id)
       setModel("")
+      setCustomModel(false)
       setEffort("")
       setTask("")
       setEditDir(false)
@@ -199,7 +206,7 @@ export function SeatProfileDialog({
 
   return (
     <Dialog open={Boolean(target && agent)} onOpenChange={(open) => !open && close()}>
-      <DialogContent className="sm:max-w-lg">
+      <DialogContent className="max-h-[calc(100dvh-2rem)] overflow-y-auto sm:max-w-lg">
         <DialogHeader>
           <DialogTitle className="flex items-center gap-2">
             <span>席位设置</span>
@@ -210,7 +217,7 @@ export function SeatProfileDialog({
             </span>
           </DialogTitle>
           <DialogDescription>
-            职责、待办与长期记忆留在席位上；换客户端只交接这些，不带旧会话聊天记录。
+            分工、待办与长期记忆留在席位上；换客户端只交接这些，不带旧会话聊天记录。
           </DialogDescription>
         </DialogHeader>
 
@@ -251,7 +258,7 @@ export function SeatProfileDialog({
             ) : (
               <>
                 <div className="space-y-1.5">
-                  <Label htmlFor="seat-persona">职责与规范（新会话或换客户端时自动注入）</Label>
+                  <Label htmlFor="seat-persona">分工（新会话或换客户端时自动注入）</Label>
                   <Textarea
                     id="seat-persona"
                     value={persona}
@@ -262,9 +269,7 @@ export function SeatProfileDialog({
                   />
                 </div>
                 <div className="space-y-1.5">
-                  <Label htmlFor="seat-memory">
-                    长期记忆（AI 可用 bench_memory 追加，也可手改）
-                  </Label>
+                  <Label htmlFor="seat-memory">长期记忆（AI 可记录经验，也可手改）</Label>
                   <Textarea
                     id="seat-memory"
                     value={memory}
@@ -275,9 +280,11 @@ export function SeatProfileDialog({
                   />
                 </div>
                 {markdownPath ? (
-                  <p className="truncate text-[0.6875rem] text-muted-foreground" title={markdownPath}>
-                    只读副本（直接改它无效）：<span className="font-mono">{shortPath(markdownPath)}</span>
-                  </p>
+                  <AdvancedSection open={profileAdvOpen} onToggle={() => setProfileAdvOpen((v) => !v)}>
+                    <p className="truncate text-[0.6875rem] text-muted-foreground" title={markdownPath}>
+                      只读副本（直接改它无效）：<span className="font-mono">{shortPath(markdownPath)}</span>
+                    </p>
+                  </AdvancedSection>
                 ) : null}
               </>
             )}
@@ -328,6 +335,7 @@ export function SeatProfileDialog({
                       onClick={() => {
                         setKind(item.id)
                         setModel("")
+                        setCustomModel(false)
                         setEffort("")
                       }}
                     >
@@ -347,82 +355,104 @@ export function SeatProfileDialog({
             <ModelField
               kind={kind}
               value={model}
-              onChange={setModel}
-              effort={effort}
-              onEffort={setEffort}
+              onChange={(next) => {
+                setCustomModel(false)
+                setModel(next)
+              }}
               id="rebind-model"
+              advancedMode="external"
             />
 
-            <div className="space-y-1">
-              <div className="flex items-center justify-between">
-                <Label className="text-xs">工作目录</Label>
-                <button
-                  type="button"
-                  className="text-[0.6875rem] text-muted-foreground hover:text-foreground"
-                  onClick={() => setEditDir((v) => !v)}
-                >
-                  {editDir ? "收起" : "修改"}
-                </button>
-              </div>
-              {editDir ? (
-                <Input
-                  value={workdir}
-                  onChange={(event) => setWorkdir(event.target.value)}
-                  placeholder="/home/you/project"
-                  className="font-mono text-xs"
-                />
-              ) : (
-                <p className="flex items-center gap-1.5 truncate rounded-lg bg-muted px-2.5 py-1.5 font-mono text-xs" title={workdir}>
-                  <FolderOpen className="size-3.5 shrink-0 text-muted-foreground" />
-                  <span className="truncate">{workdir ? shortPath(workdir) : "默认项目目录"}</span>
-                </p>
-              )}
-            </div>
+            <AdvancedSection
+              open={rebindAdvOpen}
+              onToggle={() => setRebindAdvOpen((v) => !v)}
+              note={agent?.previousBindings?.length ? `${agent.previousBindings.length} 个历史会话` : undefined}
+            >
+              <ModelAdvancedFields
+                kind={kind}
+                value={model}
+                onChange={setModel}
+                customActive={customModel}
+                onCustomChange={(next) => {
+                  setCustomModel(Boolean(next))
+                  setModel(next)
+                }}
+                effort={effort}
+                onEffort={setEffort}
+                id="rebind-model"
+              />
 
-            {!target?.fromRunId ? (
-              <div className="space-y-1.5">
-                <Label htmlFor="rebind-task">顺带交代一句（选填）</Label>
-                <Input
-                  id="rebind-task"
-                  value={task}
-                  onChange={(event) => setTask(event.target.value)}
-                  placeholder="填了会立刻 @ 它；不填则等你点名"
-                  className="text-xs"
-                />
-              </div>
-            ) : null}
-
-            {agent?.previousBindings && agent.previousBindings.length > 0 ? (
-              <div className="space-y-1.5 rounded-xl border bg-muted/30 p-2.5">
-                <p className="flex items-center gap-1.5 text-[0.6875rem] font-medium text-muted-foreground">
-                  <History className="size-3.5" />
-                  历史会话（原额度恢复后可切回）
-                </p>
-                <div className="space-y-1">
-                  {agent.previousBindings.map((b) => {
-                    const bKind = KINDS.find((item) => item.id === b.agentName)
-                    return (
-                      <div key={`${b.agentName}-${b.index}`} className="flex items-center justify-between gap-2 rounded-lg px-1.5 py-1 text-xs hover:bg-muted/70">
-                        <span className="min-w-0 truncate">
-                          <span className="font-medium">{bKind?.label ?? b.agentName}</span>
-                          <span className="text-muted-foreground"> · {b.model} · {ago(b.switchedAt, nowTs)}</span>
-                        </span>
-                        <Button
-                          type="button"
-                          size="xs"
-                          variant="outline"
-                          disabled={saving}
-                          onClick={() => void doRestore(b.index)}
-                        >
-                          <RotateCcw className="size-3" />
-                          切回
-                        </Button>
-                      </div>
-                    )
-                  })}
+              <div className="space-y-1">
+                <div className="flex items-center justify-between">
+                  <Label className="text-xs">工作目录</Label>
+                  <button
+                    type="button"
+                    className="text-[0.6875rem] text-muted-foreground hover:text-foreground"
+                    onClick={() => setEditDir((v) => !v)}
+                  >
+                    {editDir ? "收起" : "修改"}
+                  </button>
                 </div>
+                {editDir ? (
+                  <Input
+                    value={workdir}
+                    onChange={(event) => setWorkdir(event.target.value)}
+                    placeholder="/home/you/project"
+                    className="font-mono text-xs"
+                  />
+                ) : (
+                  <p className="flex items-center gap-1.5 truncate rounded-lg bg-muted px-2.5 py-1.5 font-mono text-xs" title={workdir}>
+                    <FolderOpen className="size-3.5 shrink-0 text-muted-foreground" />
+                    <span className="truncate">{workdir ? shortPath(workdir) : "默认项目目录"}</span>
+                  </p>
+                )}
               </div>
-            ) : null}
+
+              {!target?.fromRunId ? (
+                <div className="space-y-1.5">
+                  <Label htmlFor="rebind-task">顺带交代一句（选填）</Label>
+                  <Input
+                    id="rebind-task"
+                    value={task}
+                    onChange={(event) => setTask(event.target.value)}
+                    placeholder="填了会立刻 @ 它；不填则等你点名"
+                    className="text-xs"
+                  />
+                </div>
+              ) : null}
+
+              {agent?.previousBindings && agent.previousBindings.length > 0 ? (
+                <div className="space-y-1.5 rounded-xl border bg-muted/30 p-2.5">
+                  <p className="flex items-center gap-1.5 text-[0.6875rem] font-medium text-muted-foreground">
+                    <History className="size-3.5" />
+                    历史会话（原额度恢复后可切回）
+                  </p>
+                  <div className="space-y-1">
+                    {agent.previousBindings.map((b) => {
+                      const bKind = KINDS.find((item) => item.id === b.agentName)
+                      return (
+                        <div key={`${b.agentName}-${b.index}`} className="flex items-center justify-between gap-2 rounded-lg px-1.5 py-1 text-xs hover:bg-muted/70">
+                          <span className="min-w-0 truncate">
+                            <span className="font-medium">{bKind?.label ?? b.agentName}</span>
+                            <span className="text-muted-foreground"> · {b.model} · {ago(b.switchedAt, nowTs)}</span>
+                          </span>
+                          <Button
+                            type="button"
+                            size="xs"
+                            variant="outline"
+                            disabled={saving}
+                            onClick={() => void doRestore(b.index)}
+                          >
+                            <RotateCcw className="size-3" />
+                            切回
+                          </Button>
+                        </div>
+                      )
+                    })}
+                  </div>
+                </div>
+              ) : null}
+            </AdvancedSection>
 
             <DialogFooter>
               <Button type="button" variant="ghost" disabled={saving} onClick={close}>

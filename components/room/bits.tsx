@@ -134,7 +134,7 @@ export function FoldButton({ fold }: { fold: Fold }) {
       onClick={fold.toggle}
     >
       {fold.open ? <ChevronUp className="size-3" /> : <ChevronDown className="size-3" />}
-      {fold.open ? "收起" : "展开全文"}
+      {fold.open ? "收起" : "展开"}
     </button>
   )
 }
@@ -174,5 +174,16 @@ export function MessageBody({
       )}
     </>
   )
+}
+
+// Local periodic clock so only the subtree showing relative times redraws,
+// instead of ticking from the top-level RoomApp every 10 seconds.
+export function useTick(ms: number) {
+  const [now, setNow] = useState(() => Date.now())
+  useEffect(() => {
+    const id = window.setInterval(() => setNow(Date.now()), ms)
+    return () => window.clearInterval(id)
+  }, [ms])
+  return now
 }
 

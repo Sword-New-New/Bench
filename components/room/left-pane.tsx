@@ -17,7 +17,8 @@ import { ProjectWreck } from "@/components/room/project-wreck"
 import type { Project, ProjectInfo } from "@/lib/types"
 
 // The left column has two tiers, one at a time, 300 wide like the right one:
-// - 「房间」: the open project's seats (roster.tsx), with 「← 项目」 at the top;
+// - 「房间」: the open project's seats (roster.tsx), with a back arrow (「← 项目」
+//   below) at the top;
 // - 「项目」: a card per project with its bench (project-rail.tsx).
 // A click on a card walks into that room, 「← 项目」 walks back out. The
 // middle and the right column always show the open project; looking around
@@ -76,7 +77,10 @@ export function LeftPane({
   // The room tier: the roster, with this at the top of it.
   roster: (head: ReactNode) => ReactNode
 }) {
-  const [tier, setTier] = useState<Tier>("room")
+  const [chosenTier, setTier] = useState<Tier>("room")
+  // The desk has no seats column of its own (its one AI is over the chat):
+  // here the pane is the project list.
+  const tier: Tier = current.front ? "projects" : chosenTier
   const [motion, setMotion] = useState<"in" | "out" | null>(null)
   const [picking, setPicking] = useState<string | null>(null)
   const pickingRef = useRef<string | null>(null)
@@ -202,16 +206,20 @@ export function LeftPane({
           .filter(Boolean)
           .join(" · ")}
         aria-label={["项目列表", waiting ? `别的项目里 ${waiting} 件等你处理` : "", busy ? "有人在做" : ""].filter(Boolean).join("，")}
-        className="tier-back relative -ml-1.5 flex h-6 shrink-0 items-center gap-0.5 rounded-full pr-2 pl-1 text-xs font-medium text-muted-foreground transition-colors hover:bg-foreground/[0.06] hover:text-foreground"
+        className="tier-back -ml-1.5 flex h-6 min-w-6 shrink-0 items-center justify-center gap-0.5 rounded-full px-1 text-xs font-medium text-muted-foreground transition-colors hover:bg-foreground/[0.06] hover:text-foreground"
       >
+        {/* Just the arrow: with 「项目」 spelled out, the count and a dot on
+            top of it, the row had no room left for the project's name
+            (AverageJoe 2026-11-16). One mark at a time: how much waits
+            elsewhere, else that someone works there. */}
         <ChevronLeft className="size-4" />
-        项目
         {waiting ? (
-          <span className="ml-1 grid h-4 min-w-4 place-items-center rounded-full bg-destructive px-1 text-[0.625rem] leading-none font-semibold text-white">
+          <span className="grid h-4 min-w-4 place-items-center rounded-full bg-destructive px-1 text-[0.625rem] leading-none font-semibold text-white">
             {waiting > 99 ? "99+" : waiting}
           </span>
+        ) : busy ? (
+          <span className="mr-1 size-1.5 rounded-full bg-cyan-500" aria-hidden="true" />
         ) : null}
-        {busy ? <span className="absolute top-0.5 right-0.5 size-1.5 rounded-full bg-cyan-500" aria-hidden="true" /> : null}
       </button>
       <span className="min-w-0">
         <ProjectTitle project={current} shared strong />

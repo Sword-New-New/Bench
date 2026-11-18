@@ -4,6 +4,7 @@ import { useEffect, useState } from "react"
 import { Loader2 } from "lucide-react"
 import { toast } from "sonner"
 
+import { AdvancedSection } from "@/components/room/advanced"
 import { api } from "@/components/room/api"
 import { Button } from "@/components/ui/button"
 import {
@@ -25,7 +26,6 @@ import type { PublicAgent } from "@/lib/types"
 type Choice = { id: string; label: string; note?: string }
 
 const DEFAULT = "__default"
-const OTHER = "__other"
 
 type Found = { models: Choice[]; fallback: string | null; efforts?: string[] }
 
@@ -55,7 +55,7 @@ function wan(tokens: number) {
   return `${Number((tokens / 10_000).toFixed(1))} 万`
 }
 
-function useChoices(kind: string | null) {
+export function useModelChoices(kind: string | null) {
   const [found, setFound] = useState<Found | null>(null)
   useEffect(() => {
     if (!kind) return
@@ -70,29 +70,38 @@ function useChoices(kind: string | null) {
   return found
 }
 
-// `value` "" is the default; so is `effort` "". The effort menu shows only for
-// kinds whose CLI takes one (lib/models.ts EFFORTS), the context ones only for
-// Claude Code and Codex.
-export function ModelField({
+// Developer knobs for model picking: custom model id, reasoning effort, and
+// context window / auto-compact threshold. Rendered inside 「高级」 when
+// collapsible, or inline when already inside a parent 「高级」 section.
+export function ModelAdvancedFields({
   kind,
   value,
   onChange,
+  customActive,
+  onCustomChange,
   effort = "",
   onEffort,
   limits = NO_LIMITS,
   onLimits,
+  found: givenFound,
   id = "model-field",
 }: {
   kind: string | null
   value: string
   onChange: (value: string) => void
+  customActive?: boolean
+  onCustomChange?: (value: string) => void
   effort?: string
   onEffort?: (value: string) => void
   limits?: Limits
   onLimits?: (value: Limits) => void
+  found?: Found | null
   id?: string
 }) {
-  const found = useChoices(kind)
+  const fetched = useModelChoices(givenFound === undefined ? kind : null)
+  const found = givenFound === undefined ? fetched : givenFound
+  const choices = found?.models ?? null
+  const listed = choices?.some((choice) => choice.id === value) ?? false
   const efforts = found?.efforts ?? []
   const effortItems = [
     { value: DEFAULT, label: "默认（随客户端）" },
@@ -104,68 +113,27 @@ export function ModelField({
   ]
   const pct = limits.pct ?? PCT_SHOWN
   const point = limits.window ? Math.round((Number(limits.window) * pct) / 100) : null
-  const choices = found?.models ?? null
-  // What the default is, when the room can tell.
-  const fallback = found?.fallback?.replace(/^[\w-]+:/, "")
-  const listed = choices?.some((choice) => choice.id === value) ?? false
-  // Typing one in: chosen from the menu, or a value the list doesn't have.
-  const [typing, setTyping] = useState(false)
-  const other = typing || (Boolean(value) && choices !== null && !listed)
-  const selected = other ? OTHER : value || DEFAULT
-
-  const items = [
-    { value: DEFAULT, label: fallback ? `默认（${fallback}）` : "默认" },
-    ...(choices ?? []).map((choice) => ({ value: choice.id, label: choice.note ? `${choice.label} · ${choice.note}` : choice.label })),
-    { value: OTHER, label: "自定义…" },
-  ]
+  const shownCustom = customActive || (Boolean(value) && choices !== null && !listed) ? value : ""
 
   return (
-    <div className="space-y-1.5">
-      <Label htmlFor={id}>模型</Label>
-      {choices === null ? (
-        <p className="flex items-center gap-1.5 py-1 text-xs text-muted-foreground">
-          <Loader2 className="size-3 animate-spin" />
-          读取模型…
-        </p>
-      ) : (
-        <Select
-          items={items}
-          value={selected}
-          onValueChange={(next) => {
-            if (next === OTHER) {
-              setTyping(true)
-              if (listed) onChange("")
-              return
-            }
-            setTyping(false)
-            onChange(next === DEFAULT || !next ? "" : next)
-          }}
-        >
-          <SelectTrigger id={id} className="w-full min-w-0 text-sm">
-            <SelectValue className="truncate" />
-          </SelectTrigger>
-          <SelectContent>
-            {items.map((item) => (
-              <SelectItem key={item.value} value={item.value}>
-                {item.label}
-              </SelectItem>
-            ))}
-          </SelectContent>
-        </Select>
-      )}
-      {other ? (
+    <div className="space-y-3">
+      <div className="space-y-1.5">
+        <Label htmlFor={`${id}-custom`}>自定义模型 id</Label>
         <Input
-          value={value}
-          onChange={(event) => onChange(event.target.value.trim())}
-          placeholder={kind === "claude" ? "比如 claude-opus-5-5 或 opus" : "模型 id"}
-          aria-label="模型 id"
+          id={`${id}-custom`}
+          value={shownCustom}
+          onChange={(event) => {
+            const next = event.target.value.trim()
+            if (onCustomChange) onCustomChange(next)
+            else onChange(next)
+          }}
+          placeholder={kind === "claude" ? "留空用上方所选；如 claude-opus-5-5" : "留空用上方所选；手填模型 id"}
           className="font-mono text-xs"
           maxLength={80}
-          autoFocus
         />
-      ) : null}
+      </div>
       {onEffort && efforts.length ? (
-        <div className="space-y-1.5 pt-2">
+        <div className="space-y-1.5">
           <Label htmlFor={`${id}-effort`}>思考强度</Label>
           <Select items={effortItems} value={effort || DEFAULT} onValueChange={(next) => onEffort(next === DEFAULT || !next ? "" : next)}>
             <SelectTrigger id={`${id}-effort`} className="w-full min-w-0 text-sm">
@@ -182,7 +150,7 @@ export function ModelField({
         </div>
       ) : null}
       {onLimits && kind && WINDOW_KINDS.includes(kind) ? (
-        <div className="space-y-1.5 pt-2">
+        <div className="space-y-1.5">
           <Label htmlFor={`${id}-window`}>最大上下文</Label>
           <Select
             items={windowItems}
@@ -244,6 +212,102 @@ export function ModelField({
   )
 }
 
+// `value` "" is the default; so is `effort` "". By default keeps only the model
+// picker outside and tucks custom id, effort, and context limits under 「高级」.
+export function ModelField({
+  kind,
+  value,
+  onChange,
+  effort = "",
+  onEffort,
+  limits = NO_LIMITS,
+  onLimits,
+  id = "model-field",
+  advancedMode = "collapsible",
+}: {
+  kind: string | null
+  value: string
+  onChange: (value: string) => void
+  effort?: string
+  onEffort?: (value: string) => void
+  limits?: Limits
+  onLimits?: (value: Limits) => void
+  id?: string
+  advancedMode?: "collapsible" | "inline" | "external"
+}) {
+  const found = useModelChoices(kind)
+  const choices = found?.models ?? null
+  const fallback = found?.fallback?.replace(/^[\w-]+:/, "")
+  const listed = choices?.some((choice) => choice.id === value) ?? false
+  const [typingCustom, setTypingCustom] = useState(false)
+  const [advOpen, setAdvOpen] = useState(false)
+
+  const items = [
+    { value: DEFAULT, label: fallback ? `默认（${fallback}）` : "默认" },
+    ...(choices ?? []).map((choice) => ({ value: choice.id, label: choice.note ? `${choice.label} · ${choice.note}` : choice.label })),
+    ...(value && choices !== null && !listed ? [{ value, label: `自定义：${value}` }] : []),
+  ]
+
+  const advanced = (
+    <ModelAdvancedFields
+      kind={kind}
+      value={value}
+      onChange={onChange}
+      customActive={typingCustom}
+      onCustomChange={(next) => {
+        setTypingCustom(Boolean(next))
+        onChange(next)
+      }}
+      effort={effort}
+      onEffort={onEffort}
+      limits={limits}
+      onLimits={onLimits}
+      found={found}
+      id={id}
+    />
+  )
+
+  return (
+    <div className="space-y-3">
+      <div className="space-y-1.5">
+        <Label htmlFor={id}>模型</Label>
+        {choices === null ? (
+          <p className="flex items-center gap-1.5 py-1 text-xs text-muted-foreground">
+            <Loader2 className="size-3 animate-spin" />
+            读取模型…
+          </p>
+        ) : (
+          <Select
+            items={items}
+            value={value || DEFAULT}
+            onValueChange={(next) => {
+              setTypingCustom(false)
+              onChange(next === DEFAULT || !next ? "" : next)
+            }}
+          >
+            <SelectTrigger id={id} className="w-full min-w-0 text-sm">
+              <SelectValue className="truncate" />
+            </SelectTrigger>
+            <SelectContent>
+              {items.map((item) => (
+                <SelectItem key={item.value} value={item.value}>
+                  {item.label}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+        )}
+      </div>
+      {advancedMode === "inline" ? advanced : null}
+      {advancedMode === "collapsible" ? (
+        <AdvancedSection open={advOpen} onToggle={() => setAdvOpen((v) => !v)}>
+          {advanced}
+        </AdvancedSection>
+      ) : null}
+    </div>
+  )
+}
+
 // 「换模型…」 from a seat's menu. Takes effect from its next wake.
 export function ModelDialog({ agent, onClose }: { agent: PublicAgent | null; onClose: () => void }) {
   const [value, setValue] = useState("")
@@ -289,15 +353,13 @@ export function ModelDialog({ agent, onClose }: { agent: PublicAgent | null; onC
 
   return (
     <Dialog open={agent !== null} onOpenChange={(open) => !open && onClose()}>
-      <DialogContent className="sm:max-w-sm">
+      <DialogContent className="max-h-[calc(100dvh-2rem)] overflow-y-auto sm:max-w-sm">
         <DialogHeader>
           <DialogTitle className="flex items-center gap-2">
             <span>换模型</span>
             <span className="text-xs font-normal text-muted-foreground">{agent?.name}</span>
           </DialogTitle>
-          <DialogDescription>
-            下次叫醒生效，原会话对话保留。
-          </DialogDescription>
+          <DialogDescription>下次叫醒生效，原会话对话保留。</DialogDescription>
         </DialogHeader>
         <form
           className="min-w-0 space-y-4"
@@ -307,6 +369,7 @@ export function ModelDialog({ agent, onClose }: { agent: PublicAgent | null; onC
           }}
         >
           <ModelField
+            key={agent?.id ?? "closed"}
             kind={agent?.agentName ?? null}
             value={value}
             onChange={setValue}

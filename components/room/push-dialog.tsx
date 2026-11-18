@@ -4,6 +4,7 @@ import { useEffect, useRef, useState } from "react"
 import { AlertCircle, CheckCircle2, Send, Smartphone, Trash2 } from "lucide-react"
 import { toast } from "sonner"
 
+import { AdvancedSection } from "@/components/room/advanced"
 import { api, human, storedHumanKey } from "@/components/room/api"
 import { Button } from "@/components/ui/button"
 import {
@@ -47,6 +48,7 @@ export function PushDialog() {
   const [loading, setLoading] = useState(false)
   const [saving, setSaving] = useState(false)
   const [testing, setTesting] = useState(false)
+  const [advOpen, setAdvOpen] = useState(false)
   const [saved, setSaved] = useState<PublicPushState | null>(null)
 
   const [enabled, setEnabled] = useState(false)
@@ -97,6 +99,7 @@ export function PushDialog() {
 
   useEffect(() => {
     const onOpen = () => {
+      setAdvOpen(false)
       setLoading(true)
       setOpen(true)
     }
@@ -231,6 +234,8 @@ export function PushDialog() {
         (entry): entry is [FieldKey, PushFieldSpec] => Boolean(entry[1]),
       )
     : []
+  const requiredFields = fieldEntries.filter(([, spec]) => Boolean(spec.required))
+  const optionalFields = fieldEntries.filter(([, spec]) => !spec.required)
 
   const fieldValues: Record<FieldKey, string> = { target, token, extra }
   const hasStoredAnything = Boolean(
@@ -238,16 +243,45 @@ export function PushDialog() {
   )
   const busy = loading || saving || testing
 
+  const renderField = ([key, spec]: [FieldKey, PushFieldSpec]) => {
+    const alreadyFilled = sameAsSaved && saved?.filled[key]
+    const val = fieldValues[key]
+    return (
+      <div key={key} className="space-y-1.5">
+        <div className="flex items-center justify-between gap-2">
+          <Label htmlFor={`push-field-${key}`} className="text-xs">
+            {spec.label}
+            {spec.required ? <span className="ml-0.5 text-destructive">*</span> : null}
+          </Label>
+          {alreadyFilled && !val ? (
+            <span className="rounded-full bg-emerald-500/15 px-2 py-0.5 text-[0.625rem] text-emerald-700 dark:text-emerald-300">
+              已填（留空不变）
+            </span>
+          ) : null}
+        </div>
+        <Input
+          id={`push-field-${key}`}
+          type="password"
+          autoComplete="off"
+          value={val}
+          placeholder={alreadyFilled ? "留空不变，重填则覆盖" : spec.placeholder}
+          className="font-mono text-xs"
+          onChange={(event) => handleSecretInput(key, event.target.value)}
+        />
+      </div>
+    )
+  }
+
   return (
     <Dialog open={open} onOpenChange={setOpen}>
-      <DialogContent className="sm:max-w-lg">
+      <DialogContent className="max-h-[calc(100dvh-2rem)] overflow-y-auto sm:max-w-lg">
         <DialogHeader>
           <DialogTitle className="flex items-center gap-2">
             <Smartphone className="size-4" />
             推送到手机
           </DialogTitle>
           <DialogDescription>
-            页面不在前台时，提问、待验收或权限满 30 秒未处理会外发推送（密钥只存本机 <code className="font-mono text-xs">data/push.json</code>）。
+            页面不在前台时，提问、等你验收或权限满 30 秒未处理会外发推送（密钥只存本机 <code className="font-mono text-xs">data/push.json</code>）。
           </DialogDescription>
         </DialogHeader>
 
@@ -270,86 +304,76 @@ export function PushDialog() {
               />
             </label>
 
-            <div className="space-y-2">
-              <Label className="text-xs text-muted-foreground">推送方式</Label>
-              <div className="flex flex-wrap gap-1.5">
-                {channels.map((item) => {
-                  const active = item.id === channel
-                  return (
-                    <button
-                      key={item.id}
-                      type="button"
-                      onClick={() => {
-                        setChannel(item.id)
-                        setTarget("")
-                        setToken("")
-                        setExtra("")
-                      }}
-                      className={`chip rounded-full border px-2.5 py-1 text-xs transition-colors ${
-                        active
-                          ? "border-foreground/30 bg-foreground text-background font-medium"
-                          : "border-border bg-muted/40 text-foreground/80"
-                      }`}
-                    >
-                      {item.label}
-                    </button>
-                  )
-                })}
-              </div>
-              {currentSpec ? <p className="text-xs text-muted-foreground">{currentSpec.hint}</p> : null}
-            </div>
-
+            {/* Default shows only the simplest channel (ntfy: cross-platform, no account/group needed, single required topic URL) or the currently saved one; other channels and options stay in 「高级」. */}
             <div className="space-y-3 rounded-xl border p-3">
-              {fieldEntries.map(([key, spec]) => {
-                const alreadyFilled = sameAsSaved && saved.filled[key]
-                const val = fieldValues[key]
-                return (
-                  <div key={key} className="space-y-1.5">
-                    <div className="flex items-center justify-between gap-2">
-                      <Label htmlFor={`push-field-${key}`} className="text-xs">
-                        {spec.label}
-                        {spec.required ? <span className="ml-0.5 text-destructive">*</span> : null}
-                      </Label>
-                      {alreadyFilled && !val ? (
-                        <span className="rounded-full bg-emerald-500/15 px-2 py-0.5 text-[0.625rem] text-emerald-700 dark:text-emerald-300">
-                          已填（留空不变）
-                        </span>
-                      ) : null}
-                    </div>
-                    <Input
-                      id={`push-field-${key}`}
-                      type="password"
-                      autoComplete="off"
-                      value={val}
-                      placeholder={alreadyFilled ? "留空不变，重填则覆盖" : spec.placeholder}
-                      className="font-mono text-xs"
-                      onChange={(event) => handleSecretInput(key, event.target.value)}
-                    />
-                  </div>
-                )
-              })}
+              <div className="space-y-1">
+                <div className="text-xs font-medium">
+                  {currentSpec?.label ?? "ntfy"}
+                  {channel === "ntfy" ? <span className="ml-1.5 font-normal text-muted-foreground">（免注册，填个主题地址就行）</span> : null}
+                </div>
+                {currentSpec ? <p className="text-xs text-muted-foreground">{currentSpec.hint}</p> : null}
+              </div>
+              {requiredFields.map(renderField)}
             </div>
 
-            <div className="space-y-2 rounded-xl border p-3 text-xs">
-              <label className="flex cursor-pointer items-center gap-2">
-                <input
-                  type="checkbox"
-                  className="accent-current"
-                  checked={onEnd}
-                  onChange={(event) => setOnEnd(event.target.checked)}
-                />
-                <span>【本轮结束】也推</span>
-              </label>
-              <label className="flex cursor-pointer items-center gap-2">
-                <input
-                  type="checkbox"
-                  className="accent-current"
-                  checked={titleOnly}
-                  onChange={(event) => setTitleOnly(event.target.checked)}
-                />
-                <span>只推标题，不带正文</span>
-              </label>
-            </div>
+            <AdvancedSection
+              open={advOpen}
+              onToggle={() => setAdvOpen((v) => !v)}
+              note={channel !== "ntfy" ? currentSpec?.label : undefined}
+            >
+              <div className="space-y-2">
+                <Label className="text-xs text-muted-foreground">推送方式</Label>
+                <div className="flex flex-wrap gap-1.5">
+                  {channels.map((item) => {
+                    const active = item.id === channel
+                    return (
+                      <button
+                        key={item.id}
+                        type="button"
+                        onClick={() => {
+                          setChannel(item.id)
+                          setTarget("")
+                          setToken("")
+                          setExtra("")
+                        }}
+                        className={`chip rounded-full border px-2.5 py-1 text-xs transition-colors ${
+                          active
+                            ? "border-foreground/30 bg-foreground text-background font-medium"
+                            : "border-border bg-muted/40 text-foreground/80"
+                        }`}
+                      >
+                        {item.label}
+                      </button>
+                    )
+                  })}
+                </div>
+              </div>
+
+              {optionalFields.length > 0 ? (
+                <div className="space-y-3 rounded-xl border p-3">{optionalFields.map(renderField)}</div>
+              ) : null}
+
+              <div className="space-y-2 rounded-xl border p-3 text-xs">
+                <label className="flex cursor-pointer items-center gap-2">
+                  <input
+                    type="checkbox"
+                    className="accent-current"
+                    checked={onEnd}
+                    onChange={(event) => setOnEnd(event.target.checked)}
+                  />
+                  <span>【本轮结束】也推</span>
+                </label>
+                <label className="flex cursor-pointer items-center gap-2">
+                  <input
+                    type="checkbox"
+                    className="accent-current"
+                    checked={titleOnly}
+                    onChange={(event) => setTitleOnly(event.target.checked)}
+                  />
+                  <span>只推标题，不带正文</span>
+                </label>
+              </div>
+            </AdvancedSection>
 
             {saved.lastError ? (
               <div

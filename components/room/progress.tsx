@@ -1,19 +1,19 @@
 "use client"
 
 import { useEffect, useMemo, useRef, useState, useSyncExternalStore, type ReactNode } from "react"
-import { Check, ChevronDown, Loader2, MessageCircle, Square } from "lucide-react"
+import { Check, ChevronDown, Loader2, MessageCircle, RotateCcw, Square } from "lucide-react"
 import { toast } from "sonner"
 
 import { api } from "@/components/room/api"
 import { AskCard } from "@/components/room/ask-card"
-import { keepTopInView } from "@/components/room/bits"
+import { keepTopInView, useTick } from "@/components/room/bits"
 import { nudgeSeat } from "@/components/room/nudge"
 import { PermitCard } from "@/components/room/permits"
 import { GOTO_EVENT, type Goto } from "@/components/room/refs"
 import { Reveal } from "@/components/room/reveal"
 import { Button } from "@/components/ui/button"
 import { Textarea } from "@/components/ui/textarea"
-import { ago, clock } from "@/lib/status"
+import { ago, clock, plainCheckText } from "@/lib/status"
 import type { Digest, DigestRow, DigestState } from "@/lib/digest"
 import { gistOf } from "@/lib/text"
 import type { Message, PermitRequest, PublicAgent } from "@/lib/types"
@@ -84,6 +84,20 @@ function useOpen(key: string) {
   )
 }
 
+async function reopenDeputy(taskId: string) {
+  try {
+    await api("/api/v1/deputy", {
+      method: "POST",
+      body: JSON.stringify({ as: "human", action: "reopen", taskId }),
+    })
+    toast.success("已重开，回到等你验收")
+    return true
+  } catch (error) {
+    toast.error(error instanceof Error ? error.message : "重开失败")
+    return false
+  }
+}
+
 async function review(taskId: string, pass: boolean, note: string) {
   try {
     await api(`/api/v1/tasks/${taskId}`, {
@@ -96,15 +110,6 @@ async function review(taskId: string, pass: boolean, note: string) {
     toast.error(error instanceof Error ? error.message : "没发出去")
     return false
   }
-}
-
-function useTick(ms: number) {
-  const [now, setNow] = useState(() => Date.now())
-  useEffect(() => {
-    const id = window.setInterval(() => setNow(Date.now()), ms)
-    return () => window.clearInterval(id)
-  }, [ms])
-  return now
 }
 
 export function ProgressView({
@@ -387,7 +392,14 @@ function Row({
           aria-expanded={opened}
           onClick={toggle}
         >
-          <span className="block truncate text-sm font-semibold">{row.title}</span>
+          <span className="flex items-center gap-1.5 text-sm font-semibold">
+            <span className="min-w-0 truncate">{row.title}</span>
+            {row.deputy ? (
+              <span className="shrink-0 rounded-full bg-emerald-500/15 px-2 py-0.5 text-[0.625rem] leading-4 font-medium text-emerald-700 dark:text-emerald-300">
+                前台代签
+              </span>
+            ) : null}
+          </span>
           <span className="mt-0.5 line-clamp-2 text-xs leading-5 text-muted-foreground">
             {row.owner ? <span className="font-medium text-foreground/80">{row.owner.name}</span> : null}
             {row.owner ? " · " : ""}
@@ -397,7 +409,10 @@ function Row({
             {row.since ? <span>停了 {ago(row.since, now).replace("前", "")}</span> : <span>{clock(row.at)}</span>}
             {row.attachments > 0 ? <span>附 {row.attachments} 个</span> : null}
             {row.messageIds.length > 0 ? <span>{row.messageIds.length} 条对话</span> : null}
-            {row.check ? <span>复验 {CHECK[row.check.state] ?? row.check.state}</span> : null}
+            {row.check ? <span>{CHECK[row.check.state] ?? row.check.state}</span> : null}
+            {row.deputy?.checkName || row.check?.name ? (
+              <span>检查人 {row.deputy?.checkName ?? row.check?.name}</span>
+            ) : null}
           </span>
         </button>
         <div className="flex shrink-0 flex-col items-end gap-1.5">
@@ -410,6 +425,23 @@ function Row({
             </span>
           ) : null}
           <div className="flex items-center gap-1">
+            {row.state === "done" && row.deputy ? (
+              <Button
+                type="button"
+                size="xs"
+                variant="outline"
+                disabled={busy}
+                title="撤销代签，回到等你验收"
+                onClick={async () => {
+                  setBusy(true)
+                  await reopenDeputy(row.id)
+                  setBusy(false)
+                }}
+              >
+                <RotateCcw className="size-3" />
+                重开
+              </Button>
+            ) : null}
             {row.need === "review" && !rejecting ? (
               <>
                 <Button
@@ -442,7 +474,7 @@ function Row({
                   过程
                 </Button>
                 {onStop ? (
-                  <Button type="button" size="xs" variant="ghost" title="停止：停掉这次唤起，排在后面的也一起取消" aria-label={`停下 ${owner.name}`} onClick={() => onStop(owner)}>
+                  <Button type="button" size="xs" variant="ghost" title="停止：停掉这次叫醒，排在后面的也一起取消" aria-label={`停下 ${owner.name}`} onClick={() => onStop(owner)}>
                     <Square className="size-2.5 fill-current" />
                   </Button>
                 ) : null}
@@ -494,6 +526,17 @@ function Row({
       ) : null}
       <Reveal open={opened}>
         <div className="border-t bg-background/40">
+          {row.deputy ? (
+            <div className="border-b border-foreground/[0.06] bg-emerald-500/[0.06] px-4 py-2 text-xs leading-5">
+              <p className="font-medium text-emerald-800 dark:text-emerald-200">
+                前台代签
+                {row.deputy.checkName ?? row.check?.name ? (
+                  <span className="font-normal text-muted-foreground"> · 检查人：{row.deputy.checkName ?? row.check?.name}</span>
+                ) : null}
+              </p>
+              <p className="text-foreground/85">原因：{plainCheckText(row.deputy.why)}</p>
+            </div>
+          ) : null}
           {messages.length === 0 ? (
             <p className="px-4 py-3 text-xs text-muted-foreground">这件事还没有对话。</p>
           ) : (
@@ -522,13 +565,13 @@ function askBlock(message: Message) {
 }
 
 const CHECK: Record<string, string> = {
-  queued: "排队中",
-  running: "在复验",
-  passed: "过了",
-  failed: "没过",
-  unverified: "没法确认",
-  skipped: "没做",
-  error: "出错",
+  queued: "检查排着",
+  running: "检查中",
+  passed: "查过，没问题",
+  failed: "查出问题",
+  unverified: "没查出结论",
+  skipped: "没检查",
+  error: "检查没跑成",
 }
 
 // 「你刚说的」: over the composer on the progress page, so a line you send does
@@ -586,12 +629,12 @@ export function JustSaid({ messages, agents, digest }: { messages: Message[]; ag
 
 const CALL: Record<string, string> = {
   queued: "排着队",
-  held: "在守着，已送到",
+  held: "已送到",
   started: "开始了",
-  picked: "收到了",
+  picked: "在做",
   answered: "已回答",
   silent: "跑完了没说话",
-  retrying: "网络出错，自动重试",
+  retrying: "重试中",
   failed: "没叫成",
   stopped: "你停了",
   cut: "中途断了",

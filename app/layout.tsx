@@ -16,7 +16,7 @@ const geistMono = Geist_Mono({
 
 export const metadata: Metadata = {
   title: "并坐",
-  description: "同一台电脑上的 agent 共用的房间。彼此看见进度，按模型分工，把任务交到具体的人。",
+  description: "同一台电脑上的 agent 共用的房间。彼此看见进度，按模型分工，把待办交到具体的人。",
 };
 
 export default function RootLayout({ children }: LayoutProps<"/">) {

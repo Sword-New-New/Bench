@@ -1,11 +1,25 @@
 "use client"
 
-import { useSyncExternalStore } from "react"
-import { ArrowLeft, ConciergeBell } from "lucide-react"
+import { useEffect, useState, useSyncExternalStore } from "react"
+import { ArrowLeft, ArrowRightLeft, BookOpen, Check, ChevronDown, ClipboardCheck, ConciergeBell, Cpu, Ellipsis, ExternalLink, ListTree, LogOut, RotateCcw, ShieldAlert, Shrink, Square } from "lucide-react"
+import { toast } from "sonner"
 
+import { api } from "@/components/room/api"
+import { Avatar, seatLook, useTick } from "@/components/room/bits"
+import { CONTEXT_WARN, ContextLine, contextFacts, useContexts } from "@/components/room/context"
 import { unreadIn, useSeenAt } from "@/components/room/project-rail"
+import { openProjectAt } from "@/components/room/refs"
+import { openSeatProfileFor } from "@/components/room/seat-profile-dialog"
 import { Button } from "@/components/ui/button"
-import type { Project, ProjectInfo } from "@/lib/types"
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuSeparator,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu"
+import { clock, plainCheckText } from "@/lib/status"
+import type { Project, ProjectInfo, PublicAgent } from "@/lib/types"
 
 // The front desk (前台): one seat that looks across every project for the
 // user. Its room is a project marked `front` (lib/store.ts), pinned at the top
@@ -139,6 +153,377 @@ export function FrontButton({
   )
 }
 
+// The desk is a chat with its one AI (AverageJoe 2026-11-16, t_31cd7f9e),
+// not a group: no seat column or to-dos beside it. This bar over the chat is
+// who is on duty and what can be done with it: stop a reply, see how it got
+// there, and, since the desk has no seat column, what a seat's menu holds
+// elsewhere: how full its context is, compact it, another model, another
+// client in the same seat, or let it go to seat another (only one sits here;
+// lib/store.ts checkFrontSeat). With nobody at the desk the bar is where one
+// is picked: the welcome below only shows before anything was said.
+export function FrontBar({
+  seat,
+  showDeputyBar = true,
+  refreshKey,
+  onStop,
+  onOpenRun,
+  onLeave,
+  onStaff,
+  onCompact,
+  onModel,
+}: {
+  seat: PublicAgent | undefined
+  showDeputyBar?: boolean
+  refreshKey?: string
+  onStop: (agent: PublicAgent) => void
+  onOpenRun: (runId: string) => void
+  onLeave: (agent: PublicAgent) => void
+  onStaff: () => void
+  onCompact: (agent: PublicAgent) => void
+  onModel: (agent: PublicAgent) => void
+}) {
+  const now = useTick(10_000)
+  // Read again when another AI sits down, or a reply starts or ends.
+  const contexts = useContexts(`${seat?.id ?? ""}:${seat?.runId ?? ""}`)
+  const box = "mx-auto flex w-full max-w-3xl items-center gap-3 px-4 py-2 md:px-6"
+  if (!seat) {
+    return (
+      <>
+        <div className={box} data-desk="empty">
+          <ConciergeBell className="size-4 text-primary" />
+          <span className="text-sm text-muted-foreground">还没有人值班</span>
+          <Button type="button" size="sm" className="ml-auto rounded-full" onClick={onStaff}>
+            挑一个 AI
+          </Button>
+        </div>
+        {showDeputyBar ? <DeputyTodayBar refreshKey={`empty:${refreshKey ?? ""}`} /> : null}
+      </>
+    )
+  }
+  const look = seatLook(seat)
+  const working = Boolean(seat.runId)
+  const context = contexts[seat.id]
+  const facts = context ? contextFacts(context, now) : null
+  // Same rule as the seat menu's 「压缩上下文」 (roster.tsx).
+  const compactable = Boolean(context && seat.callable && !seat.runId && !seat.standby)
+  const icon = "flex h-7 items-center gap-1 rounded-full px-2.5 text-xs text-muted-foreground transition-colors hover:bg-foreground/[0.06] hover:text-foreground"
+  return (
+    <>
+      <div className={box}>
+        <Avatar name={seat.name} color={look.color} label={look.label} kind={look.kind} status={seat.status} />
+        <div className="min-w-0 flex-1">
+          <p className="flex items-baseline gap-2 text-sm">
+            <span className="font-semibold">{seat.name}</span>
+            <span className="truncate text-xs text-muted-foreground">{look.kind?.label ?? seat.model}</span>
+          </p>
+          <p className="truncate text-xs text-muted-foreground">{working ? seat.doing || "在回你" : "在值班 · 直接说就行"}</p>
+        </div>
+        {working && seat.runId ? (
+          <>
+            <button type="button" className={icon} onClick={() => seat.runId && onOpenRun(seat.runId)}>
+              <ListTree className="size-3.5" />
+              <span className="hidden sm:inline">过程</span>
+            </button>
+            <button type="button" className={icon} onClick={() => onStop(seat)}>
+              <Square className="size-3" />
+              <span className="hidden sm:inline">停下</span>
+            </button>
+          </>
+        ) : null}
+        <ContextLine context={context} now={now} className="hidden shrink-0 sm:flex" />
+        {facts && facts.near >= CONTEXT_WARN && compactable ? (
+          <button
+            type="button"
+            className="shrink-0 rounded-full bg-amber-500/15 px-2 text-[0.6875rem] leading-5 font-medium text-amber-700 hover:bg-amber-500/25 dark:text-amber-400"
+            title={facts.title}
+            onClick={() => onCompact(seat)}
+          >
+            压缩
+          </button>
+        ) : null}
+        <AutoAcceptToggle className={icon} />
+        <PatrolToggle className={icon} />
+        <DropdownMenu>
+          <DropdownMenuTrigger className={`${icon} px-1.5`} aria-label={`${seat.name} 的菜单`}>
+            <Ellipsis className="size-4" />
+          </DropdownMenuTrigger>
+          <DropdownMenuContent align="end" className="w-auto min-w-40">
+            {compactable ? (
+              <DropdownMenuItem title={facts?.title} onClick={() => onCompact(seat)}>
+                <Shrink />
+                压缩上下文
+              </DropdownMenuItem>
+            ) : null}
+            {seat.callable ? (
+              <DropdownMenuItem onClick={() => onModel(seat)}>
+                <Cpu />
+                换模型…
+              </DropdownMenuItem>
+            ) : null}
+            <DropdownMenuItem title="它的分工和长期记忆" onClick={() => openSeatProfileFor(seat.id, { tab: "profile" })}>
+              <BookOpen />
+              编辑档案…
+            </DropdownMenuItem>
+            <DropdownMenuItem title="席位和聊天都留着，换一家来接" onClick={() => openSeatProfileFor(seat.id, { tab: "rebind" })}>
+              <ArrowRightLeft />
+              换客户端…
+            </DropdownMenuItem>
+            <DropdownMenuSeparator />
+            <DropdownMenuItem variant="destructive" title="它离开，再挑一个新的" onClick={() => onLeave(seat)}>
+              <LogOut />
+              换人…
+            </DropdownMenuItem>
+          </DropdownMenuContent>
+        </DropdownMenu>
+      </div>
+      {showDeputyBar ? <DeputyTodayBar refreshKey={`${seat.id}:${seat.runId ?? ""}:${refreshKey ?? ""}`} /> : null}
+    </>
+  )
+}
+
+export type DeputyPassItem = {
+  project: string
+  projectName: string
+  taskId: string
+  title: string
+  at: number
+  why: string
+  checkName?: string
+}
+
+const DEPUTY_CHANGED_EVENT = "bench-deputy-changed"
+
+export function useDeputyToday(refreshKey: string) {
+  const [passes, setPasses] = useState<DeputyPassItem[]>([])
+  const [busyId, setBusyId] = useState<string | null>(null)
+  const [bump, setBump] = useState(0)
+
+  useEffect(() => {
+    const onChanged = () => setBump((n) => n + 1)
+    window.addEventListener(DEPUTY_CHANGED_EVENT, onChanged)
+    return () => window.removeEventListener(DEPUTY_CHANGED_EVENT, onChanged)
+  }, [])
+
+  useEffect(() => {
+    let live = true
+    const start = new Date()
+    start.setHours(0, 0, 0, 0)
+    api<{ passes?: DeputyPassItem[] }>(`/api/v1/deputy?since=${start.getTime()}`)
+      .then((res) => {
+        if (!live) return
+        setPasses(Array.isArray(res.passes) ? res.passes : [])
+      })
+      .catch(() => {
+        if (live) setPasses([])
+      })
+    return () => {
+      live = false
+    }
+  }, [refreshKey, bump])
+
+  const reopen = async (item: DeputyPassItem) => {
+    if (busyId) return
+    const key = `${item.project}:${item.taskId}`
+    setBusyId(key)
+    try {
+      await api("/api/v1/deputy", {
+        method: "POST",
+        body: JSON.stringify({
+          as: "human",
+          action: "reopen",
+          project: item.project,
+          taskId: item.taskId,
+        }),
+      })
+      setPasses((prev) => prev.filter((p) => !(p.project === item.project && p.taskId === item.taskId)))
+      window.dispatchEvent(new Event(DEPUTY_CHANGED_EVENT))
+      toast.success("已重开，回到等你验收")
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "重开失败")
+    } finally {
+      setBusyId(null)
+    }
+  }
+
+  return { passes, busyId, reopen }
+}
+
+export function DeputyPassList({
+  passes,
+  busyId,
+  onReopen,
+}: {
+  passes: DeputyPassItem[]
+  busyId: string | null
+  onReopen: (item: DeputyPassItem) => void
+}) {
+  return (
+    <ul className="divide-y divide-foreground/[0.06]">
+      {passes.map((item) => {
+        const key = `${item.project}:${item.taskId}`
+        return (
+          <li key={key} data-deputy-pass={item.taskId} className="flex items-start gap-2 py-1.5 first:pt-0.5 last:pb-0.5">
+            <div className="min-w-0 flex-1">
+              <div className="flex flex-wrap items-baseline gap-x-1.5 gap-y-0.5">
+                <span className="rounded bg-foreground/[0.06] px-1.5 py-0.5 text-[0.625rem] leading-4 text-muted-foreground">
+                  {item.projectName}
+                </span>
+                <span className="font-medium text-foreground" title={item.taskId}>
+                  {item.title}
+                </span>
+                <span className="text-[0.6875rem] text-muted-foreground">· {clock(item.at)}</span>
+              </div>
+              <p className="mt-0.5 text-[0.6875rem] leading-4 text-muted-foreground">
+                {plainCheckText(item.why)}
+                {item.checkName ? ` · 检查人：${item.checkName}` : ""}
+              </p>
+            </div>
+            <div className="flex shrink-0 items-center gap-1">
+              <Button
+                type="button"
+                size="xs"
+                variant="outline"
+                onClick={() => openProjectAt(item.project, item.taskId)}
+              >
+                <ExternalLink className="size-3" />
+                去看
+              </Button>
+              <Button
+                type="button"
+                size="xs"
+                variant="outline"
+                disabled={busyId === key}
+                title="撤销代签，回到等你验收"
+                onClick={() => onReopen(item)}
+              >
+                <RotateCcw className="size-3" />
+                重开
+              </Button>
+            </div>
+          </li>
+        )
+      })}
+    </ul>
+  )
+}
+
+// Shown at the top of the front-desk chat when the desk has signed off any
+// tasks today (`GET /api/v1/deputy?since=startOfToday`). Hidden when 0.
+function DeputyTodayBar({ refreshKey }: { refreshKey: string }) {
+  const { passes, busyId, reopen } = useDeputyToday(refreshKey)
+  const [open, setOpen] = useState(false)
+
+  if (passes.length === 0) return null
+
+  return (
+    <div data-deputy-today className="mx-auto w-full max-w-3xl px-4 pb-1.5 md:px-6">
+      <div className="rounded-xl border border-emerald-500/25 bg-emerald-500/[0.06] px-3 py-1.5 text-xs">
+        <button
+          type="button"
+          aria-expanded={open}
+          onClick={() => setOpen((v) => !v)}
+          className="flex w-full items-center justify-between gap-2 text-left font-medium text-emerald-800 hover:opacity-85 dark:text-emerald-200"
+        >
+          <span className="inline-flex items-center gap-1.5">
+            <Check className="size-3.5 shrink-0" />
+            今天代你通过 {passes.length} 件
+          </span>
+          <ChevronDown className={`size-3.5 shrink-0 transition-transform ${open ? "rotate-180" : ""}`} />
+        </button>
+
+        {open ? (
+          <div className="mt-2 border-t border-foreground/[0.06] pt-1.5">
+            <DeputyPassList passes={passes} busyId={busyId} onReopen={(item) => void reopen(item)} />
+          </div>
+        ) : null}
+      </div>
+    </div>
+  )
+}
+
+// 「查过没问题的，自动替我收下」 (lib/deputy.ts): the one switch for the whole
+// room. On: every ordinary project's request for review is checked by
+// another AI, and the room passes the ones that pass (「前台代签」, reopenable).
+// What was already waiting when it went on stays for the user.
+function AutoAcceptToggle({ className }: { className: string }) {
+  const [on, setOn] = useState<boolean | null>(null)
+  useEffect(() => {
+    let live = true
+    api<{ auto?: boolean }>("/api/v1/deputy?since=" + Date.now())
+      .then((data) => live && setOn(Boolean(data.auto)))
+      .catch(() => {})
+    return () => {
+      live = false
+    }
+  }, [])
+  if (on === null) return null
+  return (
+    <button
+      type="button"
+      className={`${className} ${on ? "text-emerald-700 dark:text-emerald-300" : ""}`}
+      title={on ? "查过没问题的，正在自动替你收下。点了关掉" : "查过没问题的，自动替我收下"}
+      onClick={() => {
+        const next = !on
+        setOn(next)
+        api<{ queued?: number }>("/api/v1/deputy", { method: "POST", body: JSON.stringify({ as: "human", action: "auto", on: next }) })
+          .then((data) =>
+            toast.success(
+              !next
+                ? "不再自动收下"
+                : data.queued
+                  ? `以后查过没问题的会自动收下。之前等着的 ${data.queued} 件正在检查，查完出一张清单给你整批点`
+                  : "查过没问题的会自动替你收下，之前等着的还留给你",
+            ),
+          )
+          .catch((error: Error) => {
+            setOn(!next)
+            toast.error(error.message)
+          })
+      }}
+    >
+      <ClipboardCheck className="size-3.5" />
+      <span className="hidden sm:inline">{on ? "自动收下开着" : "自动收下"}</span>
+    </button>
+  )
+}
+
+// 「主动提醒」: the patrol (lib/patrol.ts) looks over the projects every few
+// minutes and tells the desk's AI, which brings up what matters. To the user
+// it is the desk keeping an eye out; off until turned on.
+function PatrolToggle({ className }: { className: string }) {
+  const [on, setOn] = useState<boolean | null>(null)
+  useEffect(() => {
+    let live = true
+    api<{ on: boolean }>("/api/v1/patrol")
+      .then((data) => live && setOn(data.on))
+      .catch(() => {})
+    return () => {
+      live = false
+    }
+  }, [])
+  if (on === null) return null
+  return (
+    <button
+      type="button"
+      className={`${className} ${on ? "text-amber-700 dark:text-amber-300" : ""}`}
+      title={on ? "前台在盯着各项目，有要紧的会主动告诉你。点了关掉" : "让前台盯着各项目，有要紧的主动告诉你"}
+      onClick={() => {
+        const next = !on
+        setOn(next)
+        api("/api/v1/patrol", { method: "POST", body: JSON.stringify({ as: "human", action: next ? "on" : "off" }) })
+          .then(() => toast.success(next ? "前台会主动提醒你了" : "前台不再主动提醒"))
+          .catch((error: Error) => {
+            setOn(!next)
+            toast.error(error.message)
+          })
+      }}
+    >
+      <ShieldAlert className="size-3.5" />
+      <span className="hidden sm:inline">{on ? "提醒开着" : "主动提醒"}</span>
+    </button>
+  )
+}
+
 // The front room's empty state: what to ask it now, and what it can't do yet.
 export function FrontWelcome({
   seat,
@@ -154,14 +539,14 @@ export function FrontWelcome({
     <div className="frost mb-6 rounded-2xl px-5 py-6">
       <h2 className="flex items-center gap-2 text-base font-semibold">
         <ConciergeBell className="size-4 text-primary" />
-        前台 · 只读阶段
+        前台
       </h2>
       <p className="mt-1.5 text-sm leading-6 text-muted-foreground">
         {seat ? `${seat} 在这里值班，` : "先接一个 AI 进来值班，"}
-        替你看所有项目：各项目做到哪了、谁停着、有什么在等你。每件事都会带上项目名和编号，要处理的它会告诉你去哪个房间。
+        替你看所有项目：各项目做到哪了、谁停着、有什么在等你。
       </p>
       <p className="mt-1 text-xs leading-5 text-muted-foreground/80">
-        现在它只能看：还不能替你派活、验收或批权限。别的房间照常，随时能直接进去。
+        能替你起草转达、整理验收清单；开着右上角「自动收下」时，查过没问题的会直接收下。别的房间照常，卡片上有「去看」直达。
       </p>
       {seat ? (
         <div className="mt-4 flex flex-wrap gap-2">
@@ -170,7 +555,7 @@ export function FrontWelcome({
               key={example}
               type="button"
               className="pill chip rounded-full px-3 py-1.5 text-left text-xs"
-              onClick={() => onExample(`@${seat} ${example}`)}
+              onClick={() => onExample(example)}
             >
               {example}
             </button>

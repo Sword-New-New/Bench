@@ -1,6 +1,8 @@
-import { useState } from "react"
-import { Check, ChevronDown, Loader2 } from "lucide-react"
+import { useEffect, useMemo, useRef, useState } from "react"
+import { Check, ChevronDown, Loader2, RotateCcw } from "lucide-react"
+import { toast } from "sonner"
 
+import { api } from "@/components/room/api"
 import { Reveal } from "@/components/room/reveal"
 import { Button } from "@/components/ui/button"
 import {
@@ -11,7 +13,7 @@ import {
 } from "@/components/ui/dropdown-menu"
 import { Textarea } from "@/components/ui/textarea"
 import { awaitingReview } from "@/lib/review"
-import { TASK_STATUS_LABEL, clock } from "@/lib/status"
+import { TASK_STATUS_LABEL, clock, plainCheckText } from "@/lib/status"
 import type { PublicAgent, Task, TaskCheck, TaskStatus, TaskStep, TaskStepState } from "@/lib/types"
 
 // Cards are frosted glass like the rest of the page (they were sticky notes
@@ -35,6 +37,8 @@ const INSET = "rounded-xl bg-foreground/[0.04] ring-1 ring-foreground/[0.06]"
 
 export function TasksPanel({
   tasks,
+  doneTotal,
+  projectId,
   agents,
   highlightId,
   busy,
@@ -47,6 +51,8 @@ export function TasksPanel({
   header,
 }: {
   tasks: Task[]
+  doneTotal?: number
+  projectId?: string
   agents: PublicAgent[]
   highlightId: string | null
   busy: boolean
@@ -61,20 +67,89 @@ export function TasksPanel({
   // A wake's steps (the check before the user's sign-off).
   onOpenRun?: (runId: string) => void
 }) {
+  const [olderState, setOlderState] = useState<{ projectId?: string; list: Task[]; exhausted: boolean }>({
+    projectId,
+    list: [],
+    exhausted: false,
+  })
+  const [loadingOlder, setLoadingOlder] = useState(false)
+  const detailsRef = useRef<HTMLDetailsElement>(null)
+
+  const olderDone = useMemo(
+    () => (olderState.projectId === projectId ? olderState.list : []),
+    [olderState, projectId],
+  )
+  const exhausted = olderState.projectId === projectId ? olderState.exhausted : false
+
   const active = tasks.filter((task) => task.status !== "done")
-  const done = tasks.filter((task) => task.status === "done")
+  const done = useMemo(() => {
+    const base = tasks.filter((task) => task.status === "done")
+    const seen = new Set(base.map((t) => t.id))
+    const merged = [...base]
+    for (const item of olderDone) {
+      if (item.status === "done" && !seen.has(item.id)) {
+        seen.add(item.id)
+        merged.push(item)
+      }
+    }
+    return merged.sort((a, b) => b.updatedAt - a.updatedAt)
+  }, [tasks, olderDone])
+
+  const totalDone = Math.max(doneTotal ?? 0, done.length)
+  const remainingDone = Math.max(0, totalDone - done.length)
+  const canLoadMore = !exhausted && remainingDone > 0
+  const isDoneHighlighted = Boolean(highlightId && done.some((t) => t.id === highlightId))
+
+  useEffect(() => {
+    if (isDoneHighlighted && detailsRef.current) {
+      detailsRef.current.open = true
+    }
+  }, [isDoneHighlighted])
+
+  const loadOlder = async () => {
+    if (loadingOlder) return
+    setLoadingOlder(true)
+    try {
+      const last = done.at(-1)
+      const qs = new URLSearchParams({ done: "1", limit: "30" })
+      if (last) qs.set("before", last.id)
+      const res = await api<{ tasks?: Task[]; doneTotal?: number; hasMore?: boolean }>(`/api/v1/tasks?${qs.toString()}`)
+      const fetched = Array.isArray(res.tasks) ? res.tasks : []
+      setOlderState((prev) => {
+        const currentList = prev.projectId === projectId ? prev.list : []
+        const seen = new Set(currentList.map((t) => t.id))
+        const nextList = [...currentList]
+        for (const item of fetched) {
+          if (!seen.has(item.id)) {
+            seen.add(item.id)
+            nextList.push(item)
+          }
+        }
+        return {
+          projectId,
+          list: nextList,
+          exhausted: fetched.length === 0 || res.hasMore === false,
+        }
+      })
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "加载历史待办失败")
+    } finally {
+      setLoadingOlder(false)
+    }
+  }
+
   return (
     <div className="flex h-full min-h-0 flex-col">
       <div className="flex items-baseline justify-between px-4 pt-3 pb-3">
         <h2 className="text-xs font-semibold tracking-wider text-muted-foreground uppercase">待办</h2>
         <span className="text-[0.6875rem] text-muted-foreground">
-          {active.length} 进行中{done.length > 0 ? ` · ${done.length} 完成` : ""}
+          {active.length} 进行中{totalDone > 0 ? ` · ${totalDone} 完成` : ""}
         </span>
       </div>
       <div className="min-h-0 flex-1 overflow-y-auto px-1 pt-2 pb-6">
       {header}
       <div className="space-y-3 px-3">
-        {tasks.length === 0 ? (
+        {active.length === 0 && totalDone === 0 ? (
           <div className="rounded-2xl border border-dashed border-foreground/15 px-3 py-4 text-xs leading-5 text-muted-foreground">
             暂无待办。让 AI 做新功能时会自动建单并分步推进。
           </div>
@@ -94,11 +169,20 @@ export function TasksPanel({
             onOpenRun={onOpenRun}
           />
         ))}
-        {done.length > 0 ? (
-          <details className="group/done pt-1">
+        {totalDone > 0 ? (
+          <details
+            ref={detailsRef}
+            onToggle={(event) => {
+              const isOpen = (event.currentTarget as HTMLDetailsElement).open
+              if (isOpen && done.length === 0 && canLoadMore && !loadingOlder) {
+                void loadOlder()
+              }
+            }}
+            className="group/done pt-1"
+          >
             <summary className="flex cursor-pointer list-none items-center gap-1.5 px-1 text-xs text-muted-foreground hover:text-foreground [&::-webkit-details-marker]:hidden">
               <ChevronDown className="size-3.5 -rotate-90 transition-transform group-open/done:rotate-0" />
-              已完成 {done.length}
+              已完成 {totalDone}
             </summary>
             <div className="mt-3 space-y-3">
               {done.map((task) => (
@@ -116,6 +200,18 @@ export function TasksPanel({
                   onOpenRun={onOpenRun}
                 />
               ))}
+              {canLoadMore ? (
+                <button
+                  type="button"
+                  data-load-older
+                  disabled={loadingOlder}
+                  onClick={() => void loadOlder()}
+                  className="flex w-full items-center justify-center gap-1.5 rounded-xl border border-dashed border-foreground/15 py-2 text-xs text-muted-foreground hover:bg-foreground/[0.04] hover:text-foreground disabled:opacity-50"
+                >
+                  {loadingOlder ? <Loader2 className="size-3.5 animate-spin" /> : null}
+                  <span>更早的（还有 {remainingDone} 条）</span>
+                </button>
+              ) : null}
             </div>
           </details>
         ) : null}
@@ -159,19 +255,22 @@ function TaskCard({
     >
       <div className="flex items-start gap-2">
         <span className={`mt-[7px] size-2 shrink-0 rounded-full ${waiting ? "bg-amber-500" : DOT[task.status]}`} aria-hidden />
-        <h3 className="min-w-0 flex-1 text-sm leading-5 font-medium">{task.title}</h3>
+        <h3 className="min-w-0 flex-1 text-sm leading-5 font-medium" title={task.id}>
+          {task.title}
+        </h3>
         <span className={`mt-px shrink-0 rounded-full px-2 py-0.5 text-[0.625rem] leading-4 font-medium ${waiting ? WAITING_CHIP : CHIP[task.status]}`}>
-          {waiting ? "待验收" : TASK_STATUS_LABEL[task.status]}
+          {waiting ? "等你验收" : task.status === "done" && task.review?.deputy ? "前台代签" : TASK_STATUS_LABEL[task.status]}
         </span>
       </div>
       <p className="mt-0.5 pl-4 text-[0.6875rem] text-muted-foreground">
         {task.ownerName ? task.ownerName : "未设负责人"}
-        <span className="opacity-60"> · {task.id}</span>
         {task.createdByName !== task.ownerName ? ` · ${task.createdByName} 建` : ""}
         {task.forkedFrom ? ` · 复制自「${task.forkedFrom.title}」` : ""}
       </p>
       {waiting ? (
         <ReviewBox task={task} busy={busy} onReview={(pass, note) => onReview(task, pass, note)} onOpenRun={onOpenRun} />
+      ) : task.status === "done" && task.review?.deputy ? (
+        <DeputyBox task={task} busy={busy} />
       ) : task.review?.state === "rejected" && task.status !== "done" ? (
         <p className="mt-2.5 rounded-xl bg-red-500/10 px-2.5 py-1.5 text-[0.6875rem] leading-5 text-red-800 ring-1 ring-red-500/20 dark:text-red-200">
           {clock(task.review.at)} 打回：{task.review.note}
@@ -308,7 +407,7 @@ function ReviewBox({
             autoFocus
             value={reason}
             onChange={(event) => setReason(event.target.value)}
-            placeholder={`哪里不对？发给 ${task.ownerName ?? "负责人"} 重改`}
+            placeholder={`哪里不对？会转给 ${task.ownerName ?? "负责人"}，它照着改`}
             aria-label="打回原因"
             rows={2}
             className="min-h-0 resize-none bg-background/60 text-xs"
@@ -346,13 +445,13 @@ function ReviewBox({
 // Another seat's check before the sign-off (「请验收时先复验」, lib/summon.ts
 // checkTask): one line in the review box, its reasons folded under it.
 const CHECK_TEXT: Record<TaskCheck["state"], string> = {
-  queued: "复验排着",
-  running: "复验中",
-  passed: "复验通过",
-  failed: "复验没过",
-  unverified: "复验没验到",
-  skipped: "没复验",
-  error: "复验没跑成",
+  queued: "检查排着",
+  running: "检查中",
+  passed: "查过，没问题",
+  failed: "查出问题",
+  unverified: "没查出结论",
+  skipped: "没检查",
+  error: "检查没跑成",
 }
 const CHECK_TONE: Record<TaskCheck["state"], string> = {
   queued: "text-sky-700 dark:text-sky-300",
@@ -363,21 +462,95 @@ const CHECK_TONE: Record<TaskCheck["state"], string> = {
   skipped: "text-muted-foreground",
   error: "text-red-700 dark:text-red-300",
 }
+const CHECK_KIND_TEXT: Record<NonNullable<TaskCheck["kind"]>, string> = {
+  run: "跑得出",
+  look: "要人看",
+  you: "只能本人签",
+}
+
+function DeputyBox({ task, busy }: { task: Task; busy: boolean }) {
+  const [open, setOpen] = useState(false)
+  const [reopening, setReopening] = useState(false)
+  const deputy = task.review?.deputy
+  if (!deputy) return null
+  const checker = deputy.checkName ?? task.check?.name
+  const reopen = async () => {
+    if (busy || reopening) return
+    setReopening(true)
+    try {
+      await api("/api/v1/deputy", {
+        method: "POST",
+        body: JSON.stringify({ as: "human", action: "reopen", taskId: task.id }),
+      })
+      toast.success("已重开，回到等你验收")
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "重开失败")
+    } finally {
+      setReopening(false)
+    }
+  }
+  return (
+    <div className="mt-2.5 rounded-xl bg-emerald-500/[0.08] px-2.5 py-2 text-[0.6875rem] leading-5 ring-1 ring-emerald-500/25">
+      <div className="flex flex-wrap items-center gap-1.5">
+        <button
+          type="button"
+          aria-expanded={open}
+          onClick={() => setOpen((v) => !v)}
+          className="inline-flex min-w-0 flex-1 items-center gap-1 text-left font-medium text-emerald-800 hover:opacity-85 dark:text-emerald-200"
+        >
+          <span className="shrink-0">前台代签</span>
+          {checker ? <span className="truncate font-normal text-muted-foreground">· 检查 {checker}</span> : null}
+          <ChevronDown className={`size-3 shrink-0 text-muted-foreground transition-transform ${open ? "rotate-180" : ""}`} />
+        </button>
+        <Button
+          type="button"
+          size="xs"
+          variant="outline"
+          disabled={busy || reopening}
+          title="撤销代签，回到等你验收"
+          onClick={() => void reopen()}
+        >
+          <RotateCcw className="size-3" />
+          重开
+        </Button>
+      </div>
+      {open ? (
+        <div className="mt-1.5 space-y-0.5 text-foreground/85">
+          <p className="whitespace-pre-wrap">原因：{plainCheckText(deputy.why)}</p>
+          {checker ? <p className="text-muted-foreground">检查人：{checker}</p> : null}
+        </div>
+      ) : null}
+    </div>
+  )
+}
 
 function CheckLine({ check, onOpenRun }: { check: TaskCheck; onOpenRun?: (runId: string) => void }) {
   const [open, setOpen] = useState(false)
   const going = check.state === "queued" || check.state === "running"
+  const hasGaps = Boolean(check.gaps && check.gaps.trim() && check.gaps.trim() !== "无")
   // A verdict's reasons fold; a skip or a failure is one short reason, shown.
-  const folds = Boolean(check.note) && (check.state === "passed" || check.state === "failed" || check.state === "unverified")
+  const folds =
+    (Boolean(check.note) || hasGaps) &&
+    (check.state === "passed" || check.state === "failed" || check.state === "unverified")
   return (
     <div className="rounded-lg bg-background/40 px-2 py-1 ring-1 ring-foreground/[0.06]">
-      <div className="flex items-start gap-1.5">
+      <div className="flex flex-wrap items-center gap-1.5">
         {going ? <Loader2 className="size-3 shrink-0 animate-spin text-sky-600 dark:text-sky-300" /> : null}
         <span className={`shrink-0 font-medium ${CHECK_TONE[check.state]}`}>{CHECK_TEXT[check.state]}</span>
+        {check.kind ? (
+          <span className="shrink-0 rounded bg-foreground/[0.07] px-1.5 py-0.5 text-[0.625rem] leading-3.5 text-foreground/80">
+            {CHECK_KIND_TEXT[check.kind]}
+          </span>
+        ) : null}
+        {hasGaps ? (
+          <span className="shrink-0 rounded bg-amber-500/15 px-1.5 py-0.5 text-[0.625rem] leading-3.5 text-amber-800 dark:text-amber-300">
+            有没验到的
+          </span>
+        ) : null}
         {/* With a verdict: who checked (the reasons fold below). Skipped or
             failed: the reason, which names the seat itself. */}
         <span className={`min-w-0 flex-1 text-muted-foreground ${folds || !check.note ? "truncate" : "line-clamp-2"}`}>
-          {!folds && check.note ? check.note.replace(/^复验没跑成[:：]\s*/, "") : (check.name ?? "")}
+          {!folds && check.note ? plainCheckText(check.note).replace(/^检查没跑成[:：]\s*/, "") : (check.name ?? "")}
         </span>
         {folds ? (
           <button
@@ -399,7 +572,12 @@ function CheckLine({ check, onOpenRun }: { check: TaskCheck; onOpenRun?: (runId:
           </button>
         ) : null}
       </div>
-      {folds && open ? <p className="mt-1 max-h-48 overflow-y-auto whitespace-pre-wrap text-foreground/80">{check.note}</p> : null}
+      {folds && open ? (
+        <div className="mt-1 max-h-48 space-y-1 overflow-y-auto whitespace-pre-wrap text-foreground/80">
+          {check.note ? <p>{plainCheckText(check.note)}</p> : null}
+          {hasGaps ? <p className="text-amber-800 dark:text-amber-300">没验到的：{check.gaps}</p> : null}
+        </div>
+      ) : null}
     </div>
   )
 }

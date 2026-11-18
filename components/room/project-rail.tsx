@@ -323,10 +323,10 @@ function Card({ item, buttonRef, onPick, onEdit, ahead }: { item: Item; buttonRe
   )
 }
 
-// What the front desk may do for now (its first stage: it looks, it doesn't act).
+// What the front desk does: cross-project overview and legwork.
 export function FrontStage() {
   return (
-    <span className="shrink-0 rounded-full bg-foreground/[0.06] px-1.5 text-[0.625rem] leading-4 font-medium text-muted-foreground">只读阶段</span>
+    <span className="shrink-0 rounded-full bg-foreground/[0.06] px-1.5 text-[0.625rem] leading-4 font-medium text-muted-foreground">跨项目</span>
   )
 }
 

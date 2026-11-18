@@ -4,6 +4,7 @@ import { useEffect, useState } from "react"
 import { Check, ChevronsUpDown, ConciergeBell, FolderOpen, FolderSearch, Loader2, Plus, Settings2 } from "lucide-react"
 import { toast } from "sonner"
 
+import { AdvancedSection } from "@/components/room/advanced"
 import { api } from "@/components/room/api"
 import { Button } from "@/components/ui/button"
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog"
@@ -36,6 +37,7 @@ export function ProjectMenu({
   onCreate,
   onEdit,
   onEnableFront,
+  alwaysShowName = false,
 }: {
   projects: Project[]
   current: ProjectInfo | null
@@ -44,6 +46,8 @@ export function ProjectMenu({
   onEdit: () => void
   // No front desk yet: an item that opens one.
   onEnableFront?: () => void
+  // Keep showing the project's name on xl+ viewports (used when the left project rail is hidden).
+  alwaysShowName?: boolean
 }) {
   return (
     <DropdownMenu>
@@ -58,7 +62,7 @@ export function ProjectMenu({
       >
         <span className="min-w-0">
           {/* On xl the project rail already shows the name; the path and the menu stay. */}
-          <span className="block truncate text-[0.9375rem] leading-tight font-semibold xl:hidden">{current?.name ?? "并坐"}</span>
+          <span className={`block truncate text-[0.9375rem] leading-tight font-semibold ${alwaysShowName ? "" : "xl:hidden"}`}>{current?.name ?? "并坐"}</span>
           <span className="hidden truncate text-xs text-muted-foreground sm:block">{placeLine(current)}</span>
         </span>
         <ChevronsUpDown className="size-3.5 shrink-0 text-muted-foreground" />
@@ -76,8 +80,8 @@ export function ProjectMenu({
                 <span className="block truncate text-xs text-muted-foreground">
                   {project.front
                     ? project.seats === 0
-                      ? "无人值班 · 只读"
-                      : "跨项目总览 · 只读"
+                      ? "无人值班 · 跨项目"
+                      : "跨项目总览"
                     : project.seats === 0
                       ? "暂无席位"
                       : `${project.seats} 个席位 · ${project.online} 在线${project.working ? ` · ${project.working} 在做` : ""}`}
@@ -121,13 +125,14 @@ export function ProjectPlace({ project }: { project: ProjectInfo | null }) {
 
 // Under the name: the folder; for the front desk, what it is for now.
 function placeLine(project: ProjectInfo | null) {
-  if (project?.front) return "前台 · 只读总览"
+  if (project?.front) return "前台 · 跨项目总览"
   return project?.dir ? shortDir(project.dir) : "并坐"
 }
 
 // New project, or the open one's name, folder and deletion. `editing` null is
 // a new project.
 const NO_CHECK = "none"
+const AUTO_CHECK = "auto"
 
 export function ProjectDialog({
   open,
@@ -149,9 +154,12 @@ export function ProjectDialog({
   const [sending, setSending] = useState(false)
   const [confirming, setConfirming] = useState(false)
   const [browsing, setBrowsing] = useState(false)
+  const [advOpen, setAdvOpen] = useState(false)
   // 「请验收时先复验」: the seats to choose from, who checks now, and the pick.
   const [seats, setSeats] = useState<PublicAgent[] | null>(null)
   const [checker, setChecker] = useState(NO_CHECK)
+  const [projectCheckMode, setProjectCheckMode] = useState<"auto" | undefined>(undefined)
+  // 「让前台代签」: whether the front desk may sign off batch-lane tasks.
   // 「谁来补摘要句」: the seat that writes gists of long replies, or nobody.
   const [gister, setGister] = useState(NO_CHECK)
 
@@ -163,8 +171,10 @@ export function ProjectDialog({
     setName(editing?.name ?? "")
     setDir(editing?.dir ?? "")
     setConfirming(false)
+    setAdvOpen(false)
     setSeats(null)
-    setChecker(NO_CHECK)
+    setProjectCheckMode(editing?.check)
+    setChecker(editing?.check === "auto" ? AUTO_CHECK : NO_CHECK)
     setGister(NO_CHECK)
   }
   const editingId = open ? editing?.id : undefined
@@ -175,7 +185,9 @@ export function ProjectDialog({
       .then((room) => {
         if (!live) return
         setSeats(room.agents)
-        setChecker(room.agents.find((agent) => agent.checker)?.id ?? NO_CHECK)
+        setProjectCheckMode(room.project.check)
+        const seatPick = room.agents.find((agent) => agent.checker)?.id
+        setChecker(room.project.check === "auto" ? AUTO_CHECK : (seatPick ?? NO_CHECK))
         setGister(room.agents.find((agent) => agent.gister)?.id ?? NO_CHECK)
       })
       .catch(() => live && setSeats([]))
@@ -183,14 +195,24 @@ export function ProjectDialog({
       live = false
     }
   }, [editingId])
-  const checkerNow = seats?.find((agent) => agent.checker)?.id ?? NO_CHECK
+  const seatCheckerNow = seats?.find((agent) => agent.checker)?.id ?? NO_CHECK
+  const checkerNow = projectCheckMode === "auto" ? AUTO_CHECK : seatCheckerNow
   const gisterNow = seats?.find((agent) => agent.gister)?.id ?? NO_CHECK
 
   const save = async () => {
     if (!name.trim() || sending) return
     setSending(true)
     try {
-      const body = { as: "human", name: name.trim(), dir: dir.trim() }
+      const body = {
+        as: "human",
+        name: name.trim(),
+        dir: dir.trim(),
+        ...(editing && !editing.front
+          ? {
+              check: checker === AUTO_CHECK ? "auto" : null,
+            }
+          : {}),
+      }
       const result = editing
         ? await api<{ project: ProjectInfo }>(`/api/v1/projects/${editing.id}`, {
             method: "POST",
@@ -198,11 +220,17 @@ export function ProjectDialog({
           })
         : await api<{ project: ProjectInfo }>("/api/v1/projects", { method: "POST", body: JSON.stringify(body) })
       if (editing && seats && checker !== checkerNow) {
-        const seat = checker === NO_CHECK ? checkerNow : checker
-        await api(`/api/v1/agents/${seat}`, {
-          method: "POST",
-          body: JSON.stringify({ as: "human", action: "checker", on: checker !== NO_CHECK }),
-        })
+        if (checker !== NO_CHECK && checker !== AUTO_CHECK) {
+          await api(`/api/v1/agents/${checker}`, {
+            method: "POST",
+            body: JSON.stringify({ as: "human", action: "checker", on: true }),
+          })
+        } else if (seatCheckerNow !== NO_CHECK) {
+          await api(`/api/v1/agents/${seatCheckerNow}`, {
+            method: "POST",
+            body: JSON.stringify({ as: "human", action: "checker", on: false }),
+          })
+        }
       }
       if (editing && seats && gister !== gisterNow) {
         const seat = gister === NO_CHECK ? gisterNow : gister
@@ -253,7 +281,7 @@ export function ProjectDialog({
 
   return (
     <Dialog open={open} onOpenChange={(next) => !next && onClose()}>
-      <DialogContent className="sm:max-w-md">
+      <DialogContent className="max-h-[calc(100dvh-2rem)] overflow-y-auto sm:max-w-md">
         <DialogHeader>
           <DialogTitle className="flex items-center gap-2">
             <span>{editing ? "项目设置" : "新建项目"}</span>
@@ -303,55 +331,64 @@ export function ProjectDialog({
               同目录 AI 入座自动归入此项目，后台新开会话也默认在此。
             </p>
           </div>
-          {editing && seats?.length ? (
-            <div className="space-y-1.5">
-              <Label htmlFor="project-checker">验收前复验</Label>
-              <Select
-                items={[{ value: NO_CHECK, label: "不复验" }, ...seats.map((agent) => ({ value: agent.id, label: `${agent.name} · ${agent.model}` }))]}
-                value={checker}
-                onValueChange={(next) => setChecker(next ? String(next) : NO_CHECK)}
-              >
-                <SelectTrigger id="project-checker" className="w-full min-w-0 text-sm">
-                  <SelectValue className="truncate" />
-                </SelectTrigger>
-                <SelectContent>
-                  <SelectItem value={NO_CHECK}>不复验</SelectItem>
-                  {seats.map((agent) => (
-                    <SelectItem key={agent.id} value={agent.id}>
-                      {agent.name} · {agent.model}
-                    </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
-              <p className="text-[0.6875rem] leading-4 text-muted-foreground">
-                请验收时先叫醒它后台验一遍（耗一次叫醒额度，选便宜模型；它自己的待办不复验）。
-              </p>
-            </div>
-          ) : null}
-          {editing && seats?.length ? (
-            <div className="space-y-1.5">
-              <Label htmlFor="project-gister">补摘要句</Label>
-              <Select
-                items={[{ value: NO_CHECK, label: "不用" }, ...seats.map((agent) => ({ value: agent.id, label: `${agent.name} · ${agent.model}` }))]}
-                value={gister}
-                onValueChange={(next) => setGister(next ? String(next) : NO_CHECK)}
-              >
-                <SelectTrigger id="project-gister" className="w-full min-w-0 text-sm">
-                  <SelectValue className="truncate" />
-                </SelectTrigger>
-                <SelectContent>
-                  <SelectItem value={NO_CHECK}>不用</SelectItem>
-                  {seats.map((agent) => (
-                    <SelectItem key={agent.id} value={agent.id}>
-                      {agent.name} · {agent.model}
-                    </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
-              <p className="text-[0.6875rem] leading-4 text-muted-foreground">
-                长回复首行非结论时，攒几条叫醒它补一句摘要（耗叫醒额度，选便宜模型）。
-              </p>
-            </div>
+          {editing && (!editing.front || Boolean(seats?.length)) ? (
+            <AdvancedSection open={advOpen} onToggle={() => setAdvOpen((v) => !v)}>
+              {!editing.front ? (
+                <div className="space-y-1.5">
+                  <Label htmlFor="project-checker">请验收前先让另一个 AI 检查</Label>
+                  <Select
+                    items={[
+                      { value: NO_CHECK, label: "不检查" },
+                      { value: AUTO_CHECK, label: "自动挑" },
+                      ...(seats ?? []).map((agent) => ({ value: agent.id, label: `${agent.name} · ${agent.model}` })),
+                    ]}
+                    value={checker}
+                    onValueChange={(next) => setChecker(next ? String(next) : NO_CHECK)}
+                  >
+                    <SelectTrigger id="project-checker" className="w-full min-w-0 text-sm">
+                      <SelectValue className="truncate" />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value={NO_CHECK}>不检查</SelectItem>
+                      <SelectItem value={AUTO_CHECK}>自动挑</SelectItem>
+                      {(seats ?? []).map((agent) => (
+                        <SelectItem key={agent.id} value={agent.id}>
+                          {agent.name} · {agent.model}
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                  <p className="text-[0.6875rem] leading-4 text-muted-foreground">
+                    请验收前先叫醒另一席位检查一遍（耗一次叫醒额度，选自动挑会优先挑不同家客户端）。
+                  </p>
+                </div>
+              ) : null}
+              {seats?.length ? (
+                <div className="space-y-1.5">
+                  <Label htmlFor="project-gister">补一句话结论</Label>
+                  <Select
+                    items={[{ value: NO_CHECK, label: "不用" }, ...seats.map((agent) => ({ value: agent.id, label: `${agent.name} · ${agent.model}` }))]}
+                    value={gister}
+                    onValueChange={(next) => setGister(next ? String(next) : NO_CHECK)}
+                  >
+                    <SelectTrigger id="project-gister" className="w-full min-w-0 text-sm">
+                      <SelectValue className="truncate" />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value={NO_CHECK}>不用</SelectItem>
+                      {seats.map((agent) => (
+                        <SelectItem key={agent.id} value={agent.id}>
+                          {agent.name} · {agent.model}
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                  <p className="text-[0.6875rem] leading-4 text-muted-foreground">
+                    长回复首行不是结论时，攒几条叫醒它补一句结论（耗叫醒额度，选便宜模型）。
+                  </p>
+                </div>
+              ) : null}
+            </AdvancedSection>
           ) : null}
           <DialogFooter className="items-center">
             {editing && canDelete ? (

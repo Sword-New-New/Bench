@@ -16,8 +16,9 @@ import { execFileSync, spawn } from "node:child_process"
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs"
 import os from "node:os"
 import path from "node:path"
-import { pathToFileURL } from "node:url"
+import { fileURLToPath, pathToFileURL } from "node:url"
 
+const repoDir = process.env.BENCH_ROOT || path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..")
 const origin = process.env.BENCH_URL || ""
 const keyFile = process.env.BENCH_KEY_FILE || ""
 if (origin && /:4399\b/.test(origin)) {
@@ -64,8 +65,8 @@ async function runHttpAndMcpPart() {
 
   const mcpProcs = []
   const startMcp = (uuidTag) => {
-    const child = spawn(process.execPath, ["scripts/bench-mcp.mjs", "--agent", "claude"], {
-      cwd: process.cwd(),
+    const child = spawn(process.execPath, [path.join(repoDir, "scripts/bench-mcp.mjs"), "--agent", "claude"], {
+      cwd: repoDir,
       env: {
         ...process.env,
         BENCH_URL: origin,
@@ -411,8 +412,8 @@ function runInProcessPatrolAndLifecyclePart() {
     "utf8",
   )
 
-  const repoRootUrl = pathToFileURL(process.cwd() + "/").href
-  const aliasHref = pathToFileURL(path.join(process.cwd(), "scripts/ts-alias.mjs")).href
+  const repoRootUrl = pathToFileURL(repoDir + "/").href
+  const aliasHref = pathToFileURL(path.join(repoDir, "scripts/ts-alias.mjs")).href
 
   writeFileSync(
     runner,
@@ -662,6 +663,39 @@ assert.ok(
 )
 assert.equal(await patrol.sweep(false, R_hang + 3 * 60 * MIN), null, "同一次挂住只报一次")
 store.inProject(pHang.id, () => summon.stopAgent(hangSlow.agent.id))
+
+// 10) Blocked tasks do NOT count as unfinished work (t_a3ab3c44): when only
+//     blocked and/or awaiting-review tasks remain, treat as all handed over
+//     (low-priority note + auto-unwatch, NEVER report "全停了还有 N 件没做完").
+const pBlocked = store.createProject({ as: "human", name: "只剩卡住旧单房" }).project
+const blkCoord = store.inProject(pBlocked.id, () =>
+  store.join({ name: "旧单统筹", model: "mock", role: "统筹", agentName: "codebuddy", uuid: "u_blkcoord" }),
+)
+const blkWorker = store.inProject(pBlocked.id, () =>
+  store.join({ name: "旧单开发", model: "mock", role: "开发", agentName: "codebuddy", uuid: "u_blkwork" }),
+)
+store.inProject(pBlocked.id, () => {
+  const tBlk1 = store.createTask({ as: "human", title: "卡住的旧待办甲", owner: blkCoord.agent.name, steps: ["一步", "请用户验收"] }).task
+  const tBlk2 = store.createTask({ as: "human", title: "卡住的旧待办乙", owner: blkWorker.agent.name, steps: ["一步", "请用户验收"] }).task
+  const tRev = store.createTask({ as: "human", title: "等验收的待办丙", owner: blkWorker.agent.name, steps: ["一步", "请用户验收"] }).task
+  store.actOnTask({ agentId: blkCoord.agent.id, token: blkCoord.token, taskId: tBlk1.id, action: "block", note: "等外部接口" })
+  store.actOnTask({ agentId: blkWorker.agent.id, token: blkWorker.token, taskId: tBlk2.id, action: "block", note: "已挂起" })
+  store.actOnTask({ agentId: blkWorker.agent.id, token: blkWorker.token, taskId: tRev.id, action: "step", step: 1, state: "done", note: "完" })
+  store.actOnTask({ agentId: blkWorker.agent.id, token: blkWorker.token, taskId: tRev.id, action: "review", note: "页面上能看到结果" })
+})
+const T_blk = R_hang + 4 * 60 * MIN
+watch.setProjectWatch({ agentId: deskSeat.id, token: deskToken, project: pBlocked.id, seat: blkCoord.agent.name }, T_blk)
+const frontWakesBeforeBlk = readLines(${JSON.stringify(frontLog)}).length
+const blkSweep = await patrol.sweep(false, T_blk + 20 * MIN)
+assert.ok(blkSweep, "只剩卡住和等验收的待办时应按活都交了留一条记录")
+assert.ok(
+  !blkSweep.text.includes("没做完") && blkSweep.text.includes("只剩卡住旧单房 的活都交了，在等用户"),
+  \`只剩卡住和等验收待办时绝不该误报全停没做完，实际：\${blkSweep.text}\`,
+)
+assert.equal(blkSweep.mentions.length, 0, "只剩卡住和等验收待办时不该叫醒前台")
+assert.equal(watch.getWatchedProject(pBlocked.id), undefined, "只剩卡住和等验收待办时应从盯防表自动去掉")
+assert.equal(readLines(${JSON.stringify(frontLog)}).length, frontWakesBeforeBlk, "不该拉起前台进程")
+assert.equal(await patrol.sweep(false, T_blk + 60 * MIN), null, "后续扫描也不再重复报")
 process.exit(0)
 `,
     "utf8",

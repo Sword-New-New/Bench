@@ -80,13 +80,16 @@ fi
 (
   cd "$dir/copy"
   for key in $(compgen -e); do
-    # BENCH_RETRY_MS / BENCH_GIST_MS / BENCH_CONTINUE_* / BENCH_WATCH_* only shorten test waits.
+    # BENCH_RETRY_MS / BENCH_GIST_MS / BENCH_CONTINUE_* / BENCH_WATCH_* / BENCH_CHECK_* only shorten test waits.
     # BENCH_FIRST_KINDS / BENCH_FIRST_PARENT stand in for the installed clients and the desktop (lib/first-open.ts).
-    case "$key" in HOME|PATH|USER|LOGNAME|LANG|LC_*|TERM|http_proxy|https_proxy|all_proxy|no_proxy|HTTP_PROXY|HTTPS_PROXY|ALL_PROXY|NO_PROXY|BENCH_RETRY_MS|BENCH_GIST_MS|BENCH_FIRST_KINDS|BENCH_FIRST_PARENT|BENCH_CONTINUE_*|BENCH_WATCH_*) ;;
+    case "$key" in HOME|PATH|USER|LOGNAME|LANG|LC_*|TERM|http_proxy|https_proxy|all_proxy|no_proxy|HTTP_PROXY|HTTPS_PROXY|ALL_PROXY|NO_PROXY|BENCH_RETRY_MS|BENCH_GIST_MS|BENCH_FIRST_KINDS|BENCH_FIRST_PARENT|BENCH_CONTINUE_*|BENCH_WATCH_*|BENCH_CHECK_*|BENCH_BACKUP_*) ;;
       *) unset "$key";;
     esac
   done
   export BENCH_DATA_DIR="$dir/data" XDG_STATE_HOME="$dir/state" BENCH_URL="http://127.0.0.1:$port" NEXT_TELEMETRY_DISABLED=1
+  # The desk hears of check verdicts after 3 quiet minutes in the real room;
+  # test-room waits seconds for it.
+  export BENCH_CHECK_QUIET_MS="${BENCH_CHECK_QUIET_MS:-300}"
   exec setsid node node_modules/next/dist/bin/next dev -p "$port" -H 127.0.0.1
 ) </dev/null >"$dir/dev.log" 2>&1 9>&- &
 pid=$!

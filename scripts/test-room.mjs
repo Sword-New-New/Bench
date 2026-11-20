@@ -317,6 +317,35 @@ async function steps(stamp) {
     })
   }
 
+  // 「等你定」: one card per thing, ordered, a stale question asked twice
+  // (lib/waiting-shared.ts; the checks run in-process in scripts/test-waiting.mjs).
+  {
+    const { execFileSync } = await import("node:child_process")
+    const pathMod = await import("node:path")
+    const { fileURLToPath } = await import("node:url")
+    const waitingTest = fileURLToPath(new URL("./test-waiting.mjs", import.meta.url))
+    const repoDir = pathMod.resolve(pathMod.dirname(waitingTest), "..")
+    execFileSync(process.execPath, [waitingTest], { cwd: repoDir, env: { ...process.env, BENCH_ROOT: repoDir }, encoding: "utf8" })
+    const peekDoingTest = fileURLToPath(new URL("./test-peek-doing.mjs", import.meta.url))
+    execFileSync(process.execPath, [peekDoingTest], { cwd: repoDir, env: { ...process.env, BENCH_ROOT: repoDir }, encoding: "utf8" })
+  }
+
+  // 「你不在的这段时间」: the card's data comes from GET /api/v1/away, read-only
+  // and without the key; the lines themselves are tested in-process in
+  // scripts/test-away.mjs.
+  {
+    const revBefore = (await request(`/api/v1/room?project=${project}`)).data.rev
+    const away = await request(`/api/v1/away?since=${Date.now() - 3600_000}&project=${project}`, { key: false })
+    assert(
+      away.status === 200 && away.data.scope === "project" && Array.isArray(away.data.lines) && away.data.lines.every((line) => line.text && line.target),
+      `GET /api/v1/away 结构不对：${away.status} ${JSON.stringify(away.data).slice(0, 200)}`,
+    )
+    const deskAway = await request(`/api/v1/away?since=${Date.now() - 3600_000}`, { key: false })
+    assert(deskAway.status === 200 && deskAway.data.scope === "front" && Array.isArray(deskAway.data.projects), "不带 project 是前台总览")
+    assert((await request("/api/v1/away?since=abc", { key: false })).status === 400, "since 不对要返回 400")
+    assert((await request(`/api/v1/room?project=${project}`)).data.rev === revBefore, "读 /api/v1/away 不该改房间版本")
+  }
+
   // 「说人话」: what an agent writes for the user is checked, and sent back
   // with a way to rewrite it when it reads as code. Only agents are held to it.
   const plainTask = (title, steps, who = asAlpha) =>
@@ -959,7 +988,7 @@ async function steps(stamp) {
   // verdict goes by a mark in the task's title.
   const mockCheckName = `mockcheck_${stamp}`
   const mockCheckAltName = `mockcheck2_${stamp}`
-  const checkCmd = `node -e "const t = process.argv[2] || ''; if (t.includes('【慢复验】')) { setTimeout(() => console.log('复验结论：通过\\n类别：跑得出\\n慢复验通过\\n没验到的：无'), 900); } else if (t.includes('【没过】')) { console.log('想了想\\n复验结论：没过\\n按钮没反应\\n没验到的：无'); } else if (t.includes('【没验到】')) { console.log('复验结论：没验到\\n要真机\\n没验到的：全部'); } else if (t.includes('【乱答】')) { console.log('挺好的'); } else if (t.includes('【跑得出】')) { console.log('复验结论：通过\\n类别：跑得出\\n接口断言全过\\n没验到的：无'); } else if (t.includes('【要人看带漏验】')) { console.log('复验结论：通过\\n类别：要人看\\n功能正常\\n没验到的：浅色窄屏排版未看'); } else if (t.includes('【只能本人签】')) { console.log('复验结论：通过\\n类别：只能本人签\\n涉及口令校验\\n没验到的：无'); } else { console.log('复验结论：通过\\n看过了\\n没验到的：无'); }" {uuid} {text}`
+  const checkCmd = `node -e "const t = process.argv[2] || ''; if (t.includes('【改好】')) { console.log('复验结论：通过\\n类别：跑得出\\n改好了\\n没验到的：无'); } else if (t.includes('【慢复验】')) { setTimeout(() => console.log('复验结论：通过\\n类别：跑得出\\n慢复验通过\\n没验到的：无'), 900); } else if (t.includes('【没过】')) { console.log('想了想\\n复验结论：没过\\n按钮没反应\\n没验到的：无'); } else if (t.includes('【没验到】')) { console.log('复验结论：没验到\\n要真机\\n没验到的：全部'); } else if (t.includes('【乱答】')) { console.log('挺好的'); } else if (t.includes('【跑得出】')) { console.log('复验结论：通过\\n类别：跑得出\\n接口断言全过\\n没验到的：无'); } else if (t.includes('【要人看带漏验】')) { console.log('复验结论：通过\\n类别：要人看\\n功能正常\\n没验到的：浅色窄屏排版未看'); } else if (t.includes('【只能本人签】')) { console.log('复验结论：通过\\n类别：只能本人签\\n涉及口令校验\\n没验到的：无'); } else { console.log('复验结论：通过\\n看过了\\n没验到的：无'); }" {uuid} {text}`
   // A woken Codex turn (scripts/codex-app.mjs) against a fake app-server: it
   // says what sandbox and approvals it was given, asks for a command and a
   // file change, and answers with what the room decided.
@@ -1662,6 +1691,45 @@ createInterface({ input: process.stdin }).on("line", async (line) => {
     await askReview(doer, failTask)
     const again = await checked(failTask)
     assert(again?.at !== failed.at && again?.state === "failed", "打回后再请验收该重新复验")
+    assert(!again.prev && !again.round, `打回后重新计数，不该带上一次的结论，实际 ${JSON.stringify(again)}`)
+    // 没过 → 不打回、改好再请验收：重查（t_a58c8546），带上一次的结论；通过后再请不再查。
+    const askWith = (seat, id, note) => request(`/api/v1/tasks/${id}`, { method: "POST", body: { agentId: seat.id, token: seat.token, action: "review", note } })
+    const fixTask = await taskFor(doer, "【没过】要改的")
+    await askReview(doer, fixTask)
+    const fixFailed = await checked(fixTask)
+    assert(fixFailed?.state === "failed", `先该没过，实际 ${JSON.stringify(fixFailed)}`)
+    assert((await askWith(doer, fixTask, "【改好】按钮修好了，点一下就有反应")).status === 200, "再请验收失败")
+    const fixAgain = await checked(fixTask)
+    assert(
+      fixAgain?.at !== fixFailed.at && fixAgain?.state === "passed" && fixAgain.round === 1 && fixAgain.prev?.state === "failed" && fixAgain.prev.note?.startsWith("按钮没反应"),
+      `没过的改好再请验收该重查一遍并留上一次的结论，实际 ${JSON.stringify(fixAgain)}`,
+    )
+    const fixLane = (await request(`/api/v1/room?project=${project}`)).data.tasks.find((t) => t.id === fixTask)
+    assert(fixLane.review?.state === "waiting", "重查通过也不该自动收下")
+    await askWith(doer, fixTask, "【改好】再说一遍")
+    await new Promise((resolve) => setTimeout(resolve, 500))
+    assert((await checkOf(fixTask))?.at === fixAgain.at, "重查通过后再请验收，不该再查")
+    // 最多重查两次，第三次再请保留现有结论。
+    const stuckTask = await taskFor(doer, "【没过】改不好的")
+    await askReview(doer, stuckTask)
+    let stuck = await checked(stuckTask)
+    for (const round of [1, 2]) {
+      await askReview(doer, stuckTask)
+      const next = await checked(stuckTask)
+      assert(next?.at !== stuck.at && next?.state === "failed" && next.round === round, `第 ${round} 次重查该排上，实际 ${JSON.stringify(next)}`)
+      stuck = next
+    }
+    await askReview(doer, stuckTask)
+    await new Promise((resolve) => setTimeout(resolve, 500))
+    const capped = await checkOf(stuckTask)
+    assert(capped?.at === stuck.at && capped.round === 2, `重查两次后再请验收不该再查，实际 ${JSON.stringify(capped)}`)
+    await request(`/api/v1/tasks/${stuckTask}`, { method: "POST", body: { as: "human", action: "reject", note: "再改" } })
+    await askReview(doer, stuckTask)
+    const reset = await checked(stuckTask)
+    assert(reset?.at !== capped.at && !reset.round && !reset.prev, `打回后重新计数，实际 ${JSON.stringify(reset)}`)
+    await askReview(doer, stuckTask)
+    const resetAgain = await checked(stuckTask)
+    assert(resetAgain?.round === 1, `打回后再没过，再请验收又能重查，实际 ${JSON.stringify(resetAgain)}`)
     const unTask = await taskFor(doer, "【没验到】的")
     await askReview(doer, unTask)
     assert((await checked(unTask))?.state === "unverified", "复验该是没验到")
@@ -3220,10 +3288,23 @@ createInterface({ input: process.stdin }).on("line", async (line) => {
       })
       assert(
         httpPeekPage1.status === 200 &&
-          httpPeekPage1.data.talk.messages.length === 30 &&
+          httpPeekPage1.data.talk.messages.length === 10 &&
           httpPeekPage1.data.talk.hasMore === true &&
-          typeof httpPeekPage1.data.talk.oldestSeq === "number",
-        `HTTP /api/v1/peek 第一页应返回最近 30 条且 hasMore=true`,
+          typeof httpPeekPage1.data.talk.oldestSeq === "number" &&
+          httpPeekPage1.data.text.includes(`用 before=${httpPeekPage1.data.talk.oldestSeq} 翻`),
+        `HTTP /api/v1/peek 默认精简第一页应返回最近 10 条并写明 before 翻页提示`,
+      )
+
+      const httpPeekFull1 = await frontReq("/api/v1/peek", {
+        method: "POST",
+        body: { agentId: frontWakeSeat.data.agent.id, token: frontWakeSeat.data.token, project: bizProjectId, full: true },
+      })
+      assert(
+        httpPeekFull1.status === 200 &&
+          httpPeekFull1.data.talk.messages.length === 30 &&
+          httpPeekFull1.data.talk.hasMore === true &&
+          typeof httpPeekFull1.data.talk.oldestSeq === "number",
+        `HTTP /api/v1/peek 传 full:true 应保留旧行为返回最近 30 条且 hasMore=true`,
       )
 
       const httpPeekPage2 = await frontReq("/api/v1/peek", {
@@ -3232,7 +3313,8 @@ createInterface({ input: process.stdin }).on("line", async (line) => {
           agentId: frontWakeSeat.data.agent.id,
           token: frontWakeSeat.data.token,
           project: bizProjectId,
-          before: httpPeekPage1.data.talk.oldestSeq,
+          full: true,
+          before: httpPeekFull1.data.talk.oldestSeq,
         },
       })
       assert(
@@ -3494,6 +3576,11 @@ createInterface({ input: process.stdin }).on("line", async (line) => {
     execSubTest(process.execPath, [pathSub.join(process.cwd(), "scripts/test-watch.mjs")], {
       cwd: process.cwd(),
       env: { ...process.env, BENCH_URL: origin, BENCH_KEY_FILE: keyPath },
+      encoding: "utf8",
+    })
+    execSubTest(process.execPath, [pathSub.join(process.cwd(), "scripts/test-backup.mjs")], {
+      cwd: process.cwd(),
+      env: { ...process.env },
       encoding: "utf8",
     })
   }

@@ -612,12 +612,19 @@ const tools = [
   {
     name: "bench_peek",
     description:
-      "只读查看单个项目的完整近况（仅「前台」项目里的席位可用，普通项目的席位调用会返回 403）：房间摘要全文、未完成待办与验收/复验状态、等用户的每一件（提问与选项、权限申请、等验收待办）、各席位状态与欠活、没叫成或中途断了的点名、最近 30 条对话（带消息 id，支持 before 往前翻页）。",
+      "只读查看单个项目近况（仅「前台」席位可用，普通项目的席位调用会返回 403）。默认返回精简要点（总长 8000 字内：600 字内摘要、不重复的等验收与未完成待办、席位状态与欠活、断掉的点名、最近 10 条截短对话；超长先砍旧对话并写明「还有 N 条，用 before 翻」）；传 part（summary / tasks / seats / talk）单独取某一栏完整内容（太长时用 page 或 before 翻页）；传 full: true 返回旧版完整全文。",
     inputSchema: {
       type: "object",
       properties: {
         project: { type: "string", description: "要看的项目名字或 id（p_…）" },
-        before: { type: "number", description: "可选：往前翻看更早对话时填上一页最早一条的 seq" },
+        part: {
+          type: "string",
+          enum: ["summary", "tasks", "seats", "talk"],
+          description: "可选：单独取某一栏完整内容（summary 摘要 / tasks 待办与等验收 / seats 席位与断掉的点名 / talk 对话）",
+        },
+        page: { type: "number", description: "可选：传了 part 且该栏超过一页时，填页码（从 1 开始）" },
+        before: { type: "number", description: "可选：往前翻看更早对话时填上一页提示的 seq" },
+        full: { type: "boolean", description: "可选：传 true 返回不截断的旧版完整全文" },
       },
       required: ["project"],
     },
@@ -1055,6 +1062,9 @@ async function runTool(name, args = {}, signal) {
       const data = await seatCall("/api/v1/peek", {
         project: args.project,
         before: args.before !== undefined ? args.before : undefined,
+        ...(args.part !== undefined ? { part: args.part } : {}),
+        ...(args.page !== undefined ? { page: args.page } : {}),
+        ...(args.full !== undefined ? { full: args.full } : {}),
       })
       return data.text
     }

@@ -25,12 +25,10 @@ if not errorlevel 1 (
   pause
   exit /b 1
 )
-if not exist node_modules (
-  call npm install
-  if errorlevel 1 (
-    pause
-    exit /b 1
-  )
+node scripts\ensure-deps.mjs
+if errorlevel 1 (
+  pause
+  exit /b 1
 )
 echo 房间地址 http://127.0.0.1:4399（用带口令的链接打开）
 start "" /b cmd /c "timeout /t 4 /nobreak >nul & node scripts\open-room.mjs"

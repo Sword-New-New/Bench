@@ -42,9 +42,7 @@ if command -v curl >/dev/null 2>&1; then
   fi
 fi
 
-if [[ ! -d node_modules ]]; then
-  npm install || pause_exit
-fi
+node scripts/ensure-deps.mjs || pause_exit
 
 echo "房间地址 $URL（用带口令的链接打开）"
 (sleep 4 && node scripts/open-room.mjs) &

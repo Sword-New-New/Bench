@@ -63,6 +63,150 @@ fi
 # What the user still has to do by hand after this, said once at the end.
 todo=""
 
+backup_file() {
+  local file="$1"
+  [[ -f "$file" ]] || return 0
+  "$node" "$root/scripts/merge-mcp.mjs" --backup "$file"
+}
+
+guard_json_and_backup() {
+  local file="$1"
+  [[ -f "$file" ]] || return 0
+  if ! "$node" -e '
+    const fs = require("node:fs")
+    const raw = fs.readFileSync(process.argv[1], "utf8")
+    if (!raw.trim()) process.exit(0)
+    const parsed = JSON.parse(raw)
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) process.exit(2)
+  ' "$file" >/dev/null 2>&1; then
+    echo "⚠ $file 不是合法 JSON 对象（可能带注释或已损坏），没有改它、也没覆盖。" >&2
+    echo "  请修好或手动把 bench MCP 加进去：命令 $node，参数 $script --agent $kind" >&2
+    return 1
+  fi
+  backup_file "$file"
+}
+
+guard_toml_and_backup() {
+  local file="$1"
+  [[ -f "$file" ]] || return 0
+  if ! "$node" -e '
+    const fs = require("node:fs")
+    const raw = fs.readFileSync(process.argv[1], "utf8")
+    if (raw.includes("\u0000")) process.exit(2)
+    let inMultiline = ""
+    let bracketDepth = 0
+    const stripComment = (s) => {
+      let q = ""
+      for (let i = 0; i < s.length; i++) {
+        const ch = s[i]
+        if (q) {
+          if (q === "\"" && ch === "\\") { i++; continue }
+          if (ch === q) q = ""
+          continue
+        }
+        if (ch === "\"" || ch === "\x27") q = ch
+        else if (ch === "#") return s.slice(0, i)
+      }
+      return s
+    }
+    const scanExpr = (rhs) => {
+      let q = ""
+      for (let j = 0; j < rhs.length; j++) {
+        const ch = rhs[j]
+        if (q) {
+          if (q === "\"" && ch === "\\") { j++; continue }
+          if (ch === q) q = ""
+          continue
+        }
+        if (rhs.startsWith("\"\"\"", j) || rhs.startsWith("\x27\x27\x27", j)) {
+          const mark = rhs.slice(j, j + 3)
+          const end = rhs.indexOf(mark, j + 3)
+          if (end >= 0) { j = end + 2; continue }
+          inMultiline = mark
+          return true
+        }
+        if (ch === "\"" || ch === "\x27") q = ch
+        else if (ch === "#") return true
+        else if (ch === "[" || ch === "{") bracketDepth++
+        else if (ch === "]" || ch === "}") {
+          bracketDepth--
+          if (bracketDepth < 0) return false
+        }
+      }
+      return !q
+    }
+    for (const line of raw.split(/\r?\n/)) {
+      if (inMultiline) {
+        let i = 0
+        while (i < line.length) {
+          if (inMultiline === "\"\"\"" && line[i] === "\\") { i += 2; continue }
+          if (line.startsWith(inMultiline, i)) { i += 3; inMultiline = ""; break }
+          i++
+        }
+        continue
+      }
+      const trimmed = line.trim()
+      if (!trimmed || trimmed.startsWith("#")) continue
+      if (bracketDepth > 0) {
+        if (!scanExpr(line)) process.exit(2)
+        continue
+      }
+      if (trimmed.startsWith("[")) {
+        const head = stripComment(trimmed).trim()
+        const dbl = head.startsWith("[[") && head.endsWith("]]") && head.length > 4
+        const sgl = !head.startsWith("[[") && head.endsWith("]") && head.length > 2
+        if (!dbl && !sgl) process.exit(2)
+        // Verify quotes inside header are closed.
+        if (!stripComment(head)) process.exit(2)
+        let q = ""
+        for (let i = 0; i < head.length; i++) {
+          const ch = head[i]
+          if (q) {
+            if (q === "\"" && ch === "\\") { i++; continue }
+            if (ch === q) q = ""
+          } else if (ch === "\"" || ch === "\x27") q = ch
+        }
+        if (q) process.exit(2)
+        continue
+      }
+      const eq = trimmed.indexOf("=")
+      if (eq <= 0) process.exit(2)
+      const lhs = trimmed.slice(0, eq).trim()
+      const rhs = trimmed.slice(eq + 1).trim()
+      if (!lhs || !rhs) process.exit(2)
+      if (!scanExpr(rhs)) process.exit(2)
+    }
+    if (inMultiline || bracketDepth !== 0) process.exit(2)
+  ' "$file" >/dev/null 2>&1; then
+    echo "⚠ $file 的 TOML 内容读不懂（可能语法有误或未闭合），没有改它、也没覆盖。" >&2
+    echo "  请修好或手动加入 [mcp_servers.bench]（command = \"$node\"，args = [\"$script\", \"--agent\", \"$kind\"]）。" >&2
+    return 1
+  fi
+  backup_file "$file"
+}
+
+guard_yaml_list_and_backup() {
+  local file="$1"
+  [[ -f "$file" ]] || return 0
+  if ! "$node" -e '
+    const fs = require("node:fs")
+    const raw = fs.readFileSync(process.argv[1], "utf8")
+    if (raw.includes("\u0000")) process.exit(2)
+    const lines = raw
+      .split(/\r?\n/)
+      .map((l) => l.trim())
+      .filter((l) => l && !l.startsWith("#"))
+    if (lines.length === 0) process.exit(0)
+    if (lines.length === 1 && lines[0] === "[]") process.exit(0)
+    if (!/^-(?:\s|$)/.test(lines[0])) process.exit(2)
+  ' "$file" >/dev/null 2>&1; then
+    echo "⚠ $file 不是可识别的 YAML 列表，读不懂它的结构，没有改它、也没覆盖。" >&2
+    echo "  请手动把 @deepseek-ai/dsh-mcp-client 的 bench 项加进去。" >&2
+    return 1
+  fi
+  backup_file "$file"
+}
+
 # Merge the bench entry into a JSON config: merge_json FILE [TOP_JSON] [STYLE] [SERVER_JSON].
 merge_json() {
   "$node" "$root/scripts/merge-mcp.mjs" "$1" "${3:-mcpServers}" "$kind" "${2:-{\}}" "${4:-{\}}"
@@ -72,39 +216,37 @@ case "$kind" in
   claude)
     bin="$(command -v claude || ls -d "$HOME"/.config/Claude/claude-code/*/*/claude 2>/dev/null | sort -V | tail -1 || true)"
     [[ -n "$bin" ]] || { echo "找不到 claude 可执行文件" >&2; exit 1; }
+    guard_json_and_backup "$HOME/.claude.json"
     "$bin" mcp remove --scope user bench >/dev/null 2>&1 || true
     "$bin" mcp add --scope user bench -- "$node" "$script" --agent claude
     ;;
   codex)
     bin="$(command -v codex || echo /usr/lib/chatgpt/resources/codex)"
+    [[ -x "$bin" ]] || { echo "找不到 codex 可执行文件" >&2; exit 1; }
+    codex_cfg="${CODEX_HOME:-$HOME/.codex}/config.toml"
+    guard_toml_and_backup "$codex_cfg"
     "$bin" mcp remove bench >/dev/null 2>&1 || true
     "$bin" mcp add bench -- "$node" "$script" --agent codex
     # bench_wait blocks up to ~9 minutes; Codex's default tool timeout is 60 s.
     "$node" -e '
       const fs = require("node:fs")
       const file = process.argv[1]
+      if (!fs.existsSync(file)) process.exit(0)
       const text = fs.readFileSync(file, "utf8")
       const next = text.replace(/(\[mcp_servers\.bench\]\n(?:(?!\[)[^\n]*\n)*)/, (block) =>
         /tool_timeout_sec/.test(block) ? block : block.replace(/\n*$/, "\ntool_timeout_sec = 600\n\n"))
       fs.writeFileSync(file, next)
-    ' "${CODEX_HOME:-$HOME/.codex}/config.toml"
+    ' "$codex_cfg"
     ;;
   antigravity)
     bin="$(command -v agy || echo "$HOME/.local/bin/agy")"
+    [[ -x "$bin" ]] || { echo "找不到 agy 可执行文件" >&2; exit 1; }
+    guard_json_and_backup "$HOME/.gemini/antigravity/mcp_config.json"
     "$bin" mcp add bench "$node" "$script" --agent antigravity
     ;;
   cursor)
-    # Cursor reads ~/.cursor/mcp.json; merge our entry, keep everything else.
-    "$node" -e '
-      const fs = require("node:fs")
-      const [file, node, script] = process.argv.slice(1)
-      let config = {}
-      try { config = JSON.parse(fs.readFileSync(file, "utf8")) } catch {}
-      config.mcpServers = { ...(config.mcpServers || {}), bench: { command: node, args: [script, "--agent", "cursor"] } }
-      fs.mkdirSync(require("node:path").dirname(file), { recursive: true })
-      fs.writeFileSync(file, JSON.stringify(config, null, 2) + "\n")
-      console.log("已写入 " + file)
-    ' "$HOME/.cursor/mcp.json" "$node" "$script"
+    # Cursor reads ~/.cursor/mcp.json; use merge_json so comments/bad JSON stop safely and backup runs first.
+    merge_json "$HOME/.cursor/mcp.json"
     ;;
   dsh)
     # DeepSeek Harness loads MCP servers through its dsh-mcp-client plugin,
@@ -117,7 +259,7 @@ case "$kind" in
         echo "$profile 已经有 bench，跳过"
         continue
       fi
-      cp "$patch" "$patch.bak-bench-$(date +%Y%m%d%H%M%S)"
+      guard_yaml_list_and_backup "$patch"
       # An empty layer is written as a literal `[]`; a list item can't follow it.
       sed -i '/^\[\][[:space:]]*$/d' "$patch"
       [[ -z "$(tail -c1 "$patch")" ]] || echo >> "$patch"
@@ -140,6 +282,7 @@ EOF
   qoder)
     # The `qoder` on PATH may be the desktop app; only qodercli is surely the CLI.
     if command -v qodercli >/dev/null; then
+      guard_json_and_backup "$HOME/.qoder/settings.json"
       qodercli mcp remove -s user bench >/dev/null 2>&1 || true
       qodercli mcp add -s user bench -- "$node" "$script" --agent qoder
     else
@@ -148,6 +291,7 @@ EOF
     ;;
   codebuddy)
     if command -v codebuddy >/dev/null; then
+      guard_json_and_backup "$HOME/.codebuddy/.mcp.json"
       codebuddy mcp remove -s user bench >/dev/null 2>&1 || true
       codebuddy mcp add -s user bench -- "$node" "$script" --agent codebuddy
     else
@@ -163,6 +307,7 @@ EOF
     ;;
   qwen)
     if command -v qwen >/dev/null; then
+      guard_json_and_backup "$HOME/.qwen/settings.json"
       qwen mcp remove -s user bench >/dev/null 2>&1 || true
       qwen mcp add -s user bench "$node" "$script" --agent qwen
     else
@@ -174,6 +319,11 @@ EOF
     ;;
   devin)
     command -v devin >/dev/null || { echo "找不到 devin" >&2; exit 1; }
+    for devin_cfg in "$HOME/.devin/mcp.json" "${XDG_CONFIG_HOME:-$HOME/.config}/devin/mcp.json"; do
+      if [[ -f "$devin_cfg" ]]; then
+        guard_json_and_backup "$devin_cfg"
+      fi
+    done
     devin mcp remove bench -s user >/dev/null 2>&1 || true
     devin mcp add bench -s user -- "$node" "$script" --agent devin
     ;;
@@ -182,12 +332,14 @@ EOF
     ;;
   gemini)
     command -v gemini >/dev/null || { echo "找不到 gemini（npm i -g @google/gemini-cli）" >&2; exit 1; }
+    guard_json_and_backup "$HOME/.gemini/settings.json"
     gemini mcp remove -s user bench >/dev/null 2>&1 || true
     gemini mcp add -s user --trust bench "$node" "$script" --agent gemini
     ;;
   copilot)
     # /usr/bin/copilot can be a stub that only says the real CLI is missing.
     if copilot --version >/dev/null 2>&1; then
+      guard_json_and_backup "${COPILOT_HOME:-$HOME/.copilot}/mcp-config.json"
       copilot mcp remove bench >/dev/null 2>&1 || true
       copilot mcp add bench --tools '*' -- "$node" "$script" --agent copilot
     else
@@ -205,6 +357,7 @@ EOF
     ;;
   droid)
     if command -v droid >/dev/null; then
+      guard_json_and_backup "$HOME/.factory/mcp.json"
       droid mcp remove bench >/dev/null 2>&1 || true
       droid mcp add bench "$node" "$script" --agent droid
     else

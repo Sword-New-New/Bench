@@ -15,7 +15,11 @@
     "start": "next start -p 4399 -H 127.0.0.1",
     "lint": "eslint",
     "test": "node scripts/test-room.mjs",
-    "open": "node scripts/open-room.mjs"
+    "open": "node scripts/open-room.mjs",
+    "stop": "node scripts/stop-bench.mjs",
+    "restore": "node scripts/restore-bench.mjs",
+    "setup": "node scripts/setup-bench.mjs",
+    "update": "node scripts/update-bench.mjs"
   },
   "dependencies": {
     "@base-ui/react": "^1.9.0",

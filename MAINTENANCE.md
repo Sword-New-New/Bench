@@ -76,6 +76,15 @@ Next.js 16.4 App Router，React 19，Tailwind CSS v4，shadcn/ui 的 base-nova�
 - 唤起结尾那段守则（怎么回答、建待办、提问、附件、权限、本轮结束，约 900 字）不是每次都整段给（2026-11-12，`lib/summon.ts` 的 `rulesFor`）：它留在会话历史里，每次都给会越积越多。整段给的时候：第一次叫醒、换了会话或客户端、改过职责、守则内容变了（对整段算 sha1 指纹，换了用户名、开关默认全部权限都会变）、会话记录里在上次整段之后有压缩（`seatContext().compacted.at`，Claude Code 的 `compact_boundary`、Codex 的 `compacted`）、连续 10 次短提醒之后（`RULES_SHORTS`，防房间没看到的压缩，`compacted` 只在读到的那段记录里找）。读不到会话记录的客户端（`CONTEXT_KINDS` 以外的）每次都整段。其余时候换成约 190 字的「守则同前，要点：…」，要点都在，压缩漏判时也不至于丢规矩。只有唤起成功才记账（`markWoken` 写席位上的 `rulesGiven {sig, at, session, shorts}`），失败的那次下次重给。工具说明和参数（约 7000 字符）是客户端每次请求整套带上的，不在对话历史里，压缩丢不掉，所以没压它们。测法：隔离副本、假 HOME 里放一个假的 `claude`（记下 `-p` 的提示词、往 `~/.claude/projects/x/<id>.jsonl` 写一条带 usage 的 assistant），连叫五次，第 3、4 次之间往记录里追加一条 `compact_boundary`：整段、短、短、整段、短。
 - agent 交接任务（`bench_task_update` handoff）必须填 done / left / caveats 三栏，存在任务的 `brief` 上、任务卡片里显示；人从界面交接不受限。
 - 房间摘要：上次摘要（或用户点「这段不用」）之后的对话超过 `CATCH_UP_CHARS`，输入框上方提醒，用户挑一个能唤起的席位写。写摘要走同一条唤起队列，提示词带上一份摘要和之后的对话（4 万字封顶，同样说明全不全）；stdout 回复的直接存输出，dsh 这类用 `bench_summary` 工具交，不进群聊。唤起时未读被截断，就先附摘要再接最近原文。「稍后」只记在浏览器里，30 分钟。写的时候提醒条换成绿色转圈加一道扫光；`SummaryNudge` 看到有席位在写时 `summary.at` 变了（存摘要在先、`endSummaryJob` 在后，所以前后两个快照都算），就把转圈换成弹出的绿色对勾，0.75 秒后对勾打散成二十几个绿点，沿弧线飞到右栏带 `data-summary-card` 的摘要卡片上，第一个点落地时卡片发一下绿光。右栏没显示（窄屏）时绿点只四散淡出；系统设了减少动效就只显示对勾。用户自己改摘要不放这个动效。
+- **摘要到期房间自己找人写（2026-11-18，t_df9c0fc7）**：`lib/summary-auto.ts`，跟 `lib/continue.ts` 一个写法（globalThis 单例、`SWEEP_VERSION` 带版本号的定时器，每分钟扫一次，`boot.ts` 里 `ensureSummaryAuto()`）。项目 `summaryDue` 了，房间自己调 `requestSummary` 叫一个人写，不再每次出卡问用户。
+  - 挑谁（`summaryCandidates`）：名字或分工里带「摘要」的；其次上次写摘要的（`summary.by`）；其余按最近说过话排。排除：没会话、没装客户端、演示席位、用户点过停止还没再叫的（`isSeatUserStopped`）、队列暂停的。正在干活的（`runId`、队列里有东西、`working`、守候中、开着终端、网络重试中）和撞了额度的不叫，等下一分钟再看，不打断。席位只属于一个项目，所以前台的摘要只有前台席位写，前台席位也不去写别的项目。
+  - 一次到期（项目 + `summaryBaseSeq()`，即上次摘要或「跳过」的位置）最多叫两个人：没写成（撞额度、出错、没交、被停、重启打断）换一个没叫过的再试一次，还不成就不再叫，卡片回来。叫过谁记在 SQLite meta `summaryAuto.state`，重启后不重复叫。
+  - 写成了群里只多一行系统小字「房间摘要更新了（X 写的）」，30 字内。写的时候页面照旧是绿色转圈和对勾动效。
+  - 原来那张「找谁写房间摘要？」的卡（`SummaryNudge`）留作退路，文案没变。房间在办这一次时快照里 `summaryHeld` 为真，卡片先不出；以下情况照旧出卡：到期后 30 分钟（或上次没写成后 30 分钟）一直没人空出来；两次都没写成；项目里一个叫得醒的席位都没有；启动之前就到期、这次启动后没人说过话的项目（不接手）。出卡以后这一次到期不再自动叫，用户挑人、点「稍后」「跳过」照旧。
+  - 防止一口气叫起来：房间启动后 2 分钟内不叫；一次扫描只开一个项目，各项目之间至少隔 3 分钟（`lastStartAt`）；启动前就到期、之后没人说过话的不接手。上线那一刻正式房间里好几个项目的摘要早就到期了，按这几条，只有之后有人说话的项目才会一个一个被接上。
+  - 「看细节」里手动找人写（`/api/v1/summary` request）不变。
+  - 测试时可用环境变量缩短等待：`BENCH_SUMMARY_AUTO_TICK_MS`、`_BOOT_MS`、`_GIVE_UP_MS`、`_GAP_MS`。
+  - 测法：`node scripts/test-summary-auto.mjs`，进程内跑，用临时数据目录和假客户端，一共 40 项。覆盖：挑带「摘要」的、上次写的优先；忙时等、空了再叫；没写成换人只换一次；重启后不重复；跳过；没人可叫；启动前到期；多项目一次一个、隔开；半小时出卡；手动照旧。`scripts/test-faults.mjs` 加了 3 条故障注入：`summary-auto-cuts-in`（打断正在干活的）、`summary-auto-no-cap`（一次到期叫个没完）、`summary-auto-wakes-stale`（启动前到期的也叫），都会被抓到。
 - 顶栏的虫子图标是调试菜单，默认关着：要在 `.env.local` 里写 `NEXT_PUBLIC_BENCH_DEBUG=1`（`.env*` 不进 git），并且用 `next dev` 跑才出现；没开时 `/api/v1/debug` 直接 404，生产模式永远 404。改了 `.env.local` 后 `next dev` 会自己重载。上半部分只改页面看到的（`withDebug` 覆盖快照：摘要提醒条、正在写摘要、全部头像状态；「放一次『摘要写好了』动效」发 `SUMMARY_DONE_DEMO` 事件；「放一次『正在做』卡片」发 `LIVE_DEMO`，在本地假造一个席位，演示换步骤时宽度的变化和做完时的退场），刷新就没了；下半部分会写进房间（插假系统消息、让席位忘掉读到哪、清空摘要；清空摘要要带 `confirm: "清空摘要"`，以前有验收脚本拿它当「读快照」用，每次轮询都把真房间的摘要清掉了。读快照用 `GET /api/v1/room`）。不好触发的新界面，记得往这里加一项。
 - 能点的胶囊按钮都加 `chip` 类：悬停变亮，按下缩一下，松手回弹。悬停不要上浮：横向滚动的那排会把上移的部分裁掉，顶上的高光和光晕就没了。新加胶囊按钮记得带上，不要再单写 `hover:brightness-105`。
 - 顶栏右上角的齿轮是「设置」：深浅色和「唤起命令…」都在里面。唤起命令平时很少改（换模型、加参数才用），所以不放在入口栏里。
@@ -219,6 +228,19 @@ Next.js 16.4 App Router，React 19，Tailwind CSS v4，shadcn/ui 的 base-nova�
 - **测法**：`scripts/test-room.mjs` 里「请验收时先复验」一段与前台工具段，用假复验人覆盖：没设不触发、通过/没过/没验到/乱答、不进群聊、没打回再请不重复、打回重验、复验人是负责人跳过、类别（run/look/you）与漏验读写、没写类别和写「无」不存、单条与整批补跑不重复排、自动挑人（不挑负责人、限额客户端不挑、同家与不同家都在时挑不同家、在跑与空闲挑没在跑、最久没动优先、与指定席位互斥）、连验 5 条触发上下文压缩、一批跑完通知并叫醒前台、`bench_check` / `overview` / `peek` 联动；并在 `scripts/test-faults.mjs` 加入 5 条故障注入（`recheck-duplicate-enqueue`、`autocheck-picks-owner`、`autocheck-ignores-diff-client`、`check-verdict-kind-gaps-broken`、`check-missing-kind-defaulted`）验证每条改坏均被当场抓到。
 - 注意：复验跑在复验人自己的会话上，这一轮会留在它的上下文里（写摘要也是这样）。挑一个便宜的模型、专门复验的席位或开「自动挑」最合适。
 
+**没过的改好后再查一遍（2026-11-18，t_a58c8546）**
+
+- 起因：检查没过或没验到，负责人改好后再请验收，原来按「没打回就不重复查」留着旧结论，用户只能自己去看改没改好。
+- **规矩**：`actOnTask` 的 review 分支里，还在等验收（`again`）且现有检查是 `failed` / `unverified` 时，再请验收算新的一问，走 `prepareTaskCheck` 重新排（排队、换人、扫描都照旧）。通过、排着、在查、跳过、没跑成，再请验收照旧不重复查。
+- **留底**：`TaskCheck.round`（第几次重查）和 `TaskCheck.prev`（上一次的 state、检查人、时间、原因前 400 字）。`setTaskCheck` 是合并写，排着 → 在查 → 结论都不丢这两项。
+- **补跑也带着**：重查没跑成、跳过或排太久，前台 `bench_check` 补跑（`runBatchCheck`）时把原检查的 `prev` 和 `round` 带到新检查上，通过后照样不自动收。会把整个 check 换掉的只有三处：`actOnTask` 的 review（已处理）、`runBatchCheck`（已处理）、用户手动补跑（有意重新计数）；换人、结论都走 `setTaskCheck` 合并写。
+- **上限**：`lib/store.ts` 的 `RECHECK_MAX = 2`。重查两次还不过，再请验收就不查了，留给用户定。用户打回或手动补跑复验是全新一轮，`round` / `prev` 都清掉。中途关了复验，旧结论留着不动。
+- **提示词**：`summon.ts` 的 `checkPrompt` 带 `prev` 时多一段：这是第几次重查、上一次谁、结论、原因；让检查人先逐条核对上次的问题，再整体看。
+- **不自动收**：`signLane` 见到 `check.prev` 就归「你看一眼」（look），所以 `autoAcceptChecked` 不收、前台代签也收不了，`reviewIssueOf` 不记问题。
+- **界面**：`tasks-panel.tsx` 的 `CheckLine` 多一行「改过以后再查。上一次没过：……」。
+- 测试：`test-room.mjs`「请验收时先复验」段（没过 → 改好再请 → 重查通过且留底；通过后再请不查；重查两次后不再查；打回清零后又能重查）；`test-deputy.mjs`（重查通过归 look，房间和前台都不收）。
+- 故障注入：`recheck-no-limit`、`recheck-pass-auto-accepted`、`passed-check-rechecked`、`rerun-drops-recheck`（补跑丢了上一次的结论），要害清单第 7 条。
+
 ## Codex 的权限接到房间（2026-11-14，t_f6fea31b）
 
 - 起因：叫醒 Codex 时 `codex-app.mjs` 把审批写死成 `never`，沙箱用会话自己的。GPT2 的会话是只读的，于是改不了文件，也申请不了提权，Codex 发来的审批请求一律被回成 decline。房间里的权限按钮对它不起作用。
@@ -336,6 +358,31 @@ MCP 只管 agent → 房间：入座、发言、收件箱、任务、在线。�
 - **叫醒后又撞上**：会再出一张新卡片。到点叫醒（`fireResume`，自动定的和用户点的都算）后 15 分钟内同一席位又撞上，就不再自动定时，卡片等用户点，不会自己循环（记在内存 `__benchLimitAutoFired`，重启就忘）。
 - 只发给撞到额度的那一次唤起；写摘要和单独回话的失败也认，其余失败原因不变。
 - 测试别耗真额度：测试副本里把 `agents.json` 的 claude 命令换成一个假脚本，第一次输出 `You've hit your 5-hour limit · resets …`（`date` 要加 `LC_ALL=C`，中文环境会打出「下午」）并退出 1，之后输出正常回答。
+
+- **到点只叫一次、只出一行**（2026-11-18，t_16ecccd4）：
+  - 起因：11-17 22:40 一分钟里出了 23 行「到点自动叫醒没成功」，11-18 07:18 又出 8 行。
+    - 全是检查类的唤起：检查没有原话可重发，到点必然失败。
+    - 它们是用户在卡片上点「定时」定上的。`limitChoice` 的定时分支以前不看 `rewakeable`，自动定时（`autoResumeAt`）倒是一直不给检查定。
+    - 07:18 那批的重置时间早就过了，所以一点就触发、一触发就失败。
+  - **定时按「席位 + 恢复时间」只定一个**（`armResume` 的键是 `resumeKey(agentId, at)`）。到点 `fireResume(agentId, at)` 从库里（`pendingResumes`）取这个席位、这个恢复时间下所有还没叫回的唤起，用 `takeBack` 逐个把活放回队列，最后只 `run` 一次，所以只叫醒一次。
+  - **对话里只出一行**：叫成了写「X 的额度恢复了，已经接着做」；一件也没接上，就写原因和该怎么办（@ 它，或点额度卡上的「现在重试」）。每件没接上的照旧在卡上记 `failed` 和原因。
+  - **叫不回去的不定时**：检查（和摘要句）在 `limitChoice` 的定时分支直接回 400，说明检查房间会自己换人（`repickCheck`）；`takeBack` 也拒绝它们，所以「现在重试」也会给同一句话。没记下原话的唤起同样回 400。
+  - 重置时间已经过了还点定时的，定在一分钟后，取整到分钟，同一分钟内点的合成一个定时。
+  - 重启：`rearmResumes` 照库里的记录补定时，同一个键只定一次；已经叫回的唤起标了 `resumedAt`，不会再叫。
+  - 取消或忽略一张卡，不再清定时器：这个席位的定时还要留给它别的唤起；到点只取还带 `resumeAt` 的。
+  - 测试：`scripts/test-limit-resume.mjs`，进程内，分两个进程跑以覆盖重启：一个席位两轮撞额度，重启后到点只叫一次、两件活都带上、只出一行；检查的卡不能定时也不能重试。故障注入：`limit-resume-wakes-each-run`、`limit-schedule-unwakeable`。
+
+## 说完话却不结束（2026-11-18，t_16ecccd4 查的）
+
+- 查的是 11-17 两轮一直显示「在做」、却几个小时没动静的：碳猫 `r_a2d8f87f`（10:28 起）和哈基米 `r_c030ef25`（11:05 起）。两个席位都是 Antigravity，都到 17:59 服务重启才结束。房间里这两轮一步都没记下，证据来自 agy 自己的会话库（`~/.gemini/antigravity-cli/conversations/<id>.db` 的 `steps`）和它的日志（`~/.gemini/antigravity-cli/log/cli-20261117_102824.log`、`_110559.log`）。
+- **碳猫：话说完了，房间没认出来。** 12:29 到 12:31 它写完了最后一条回复（「…@Fable 请合验」），后面再没有任何一步。agy 没输出 `result`，进程也不退出，一直在后台查额度。日志里那次对话的「Stream completed」直到 17:59 被杀时才出现。房间只认 `result`，所以一直等着。
+  - 修法：`lib/events.ts` 记下 agy 最后一个事件是不是一条「答完了的回复」（`agent_response`，状态不是 ACTIVE，后面没有工具调用），记在 `repliedAt`，之后来任何事件都清掉。`lib/summon.ts` 的 `launch` 每分钟看一次：这样安静超过 5 分钟（`REPLIED_END_MS`，测试用 `BENCH_REPLIED_END_MS` 缩短），就当这一轮答完了，和 `END_GRACE_MS` 那条一样收掉进程、贴出回答，过程里记一条「答完了，过了 N 进程还没退出，也没说结束，已收掉」。
+  - 只认「答完一条回复、后面什么都没有」。在跑工具、或者在等模型的不算，那些只有用户能停。
+- **哈基米：中途出错卡死。** 11:35:39 agy 自己记了「Agent execution terminated due to error. UNAUTHENTICATED (code 401)」：令牌过期，两秒后它自己刷新了令牌，但这一轮已经终止，进程却没退出。这属于「中途卡死」，房间不停它。
+  - 现在做的：一轮超过 10 分钟没有任何输出（`SILENT_NOTE_MS`，测试用 `BENCH_SILENT_NOTE_MS`），席位上写「已经 N 分钟没动静」，过程里也记一条；又有输出时改成「停了 N 分钟，又有动静了」。没加开关。
+  - 建议，等 AverageJoe 定：agy 的事件流里如果有报错事件（会话库里是 `step_type = 17`，带「Agent execution terminated due to error」），房间可以把它当作这一轮失败结束，和别家报错退出一样处理。现在没做，因为没有抓到 agy 那一刻在标准输出上打了什么，不猜格式。
+- 统计：近几天超过 40 分钟的唤起里，Antigravity 只有这两轮。一种各一轮：说完没认出来 1 轮（碳猫），中途出错卡死 1 轮（哈基米）。其余超过 40 分钟的都是 Claude 席位，没有逐个查。
+- 测试：`scripts/test-agy-end.mjs`，用假 agy 脚本：说完不走的一轮被收掉、回答照常贴回；工具没回来的一轮不收，只在席位上写「没动静」，又有输出后恢复。故障注入：`agy-replied-never-ended`、`quiet-run-killed-mid-tool`。
 
 ## 别的项目做完时弹系统通知（2026-11-12）
 
@@ -614,7 +661,7 @@ Next 开发徽章用 `devIndicators: false` 关掉了，它以前挡住入口栏
 ## 前台项目与跨项目只读工具
 
 - **前台项目（`ProjectInfo.front?: true`）**：全房间最多只有一个，名字固定为 `"前台"`，SQLite `projects` 表 `front` 列持久化（旧库升级时 `ensureSchemaColumns` 自动 `ALTER TABLE` 补列），`orderProjects` 与 `dbLoadProjects` 保证始终排在项目列表最前（索引 0）。`POST /api/v1/projects` 带 `{ as: "human", front: true }` 幂等建/取（新建返 `201`，已存在返 `200`，均返回 `{ project }`）；普通项目禁止取名 `"前台"` 或改 `front: true`；删除项目允许删前台项目但保留至少一个普通项目；`inRequest` 与 `pickProject` 在自动匹配“唯一项目”时排除前台项目，防止普通 CLI 会话误入前台；在前台开新会话时，`lib/spawn.ts` 的 `workspaces()` 额外提供「用户家目录」（`os.homedir()`）选项。
-- **两件跨项目只读工具（`lib/front.ts`、`app/api/v1/overview/route.ts`、`app/api/v1/peek/route.ts`、`scripts/bench-mcp.mjs` 的 `bench_overview` / `bench_peek`）**：由 `lib/store.ts` 的 `requireFrontSeat` 把关，仅允许坐在前台项目（`front === true`）里的席位调用（普通项目席位一律返 `403`，缺或错 `token` 返 `401`）。`bench_overview` 汇总全房间各项目的有事席位（总席位 `> 4` 时无事席位折叠为名字和状态）、等用户的提问/权限申请/等验收计数、未完待办数、最后动静时间与房间摘要开头（总长封顶 `< 4500` 字）；`bench_peek(project, before?)` 支持传项目名或 `p_…` id，返回该项目的房间摘要全文、等用户的提问（含选项）/权限申请/等验收待办明细、未完待办进度与验收/复验状态、各席位状态与 `owes` 明细、未叫成或中途断掉的点名、最近 30 条带 `[m_…]` 的对话（`dbLoadTalkPage` 过滤系统消息与已撤回消息，支持 `before` 翻页）。严格只读：不推进任何席位 `seenSeq`，不触发任何唤起，绝不回传 `human-key`、席位 `token`、`session` uuid 或手机推送配置。
+- **两件跨项目只读工具（`lib/front.ts`、`app/api/v1/overview/route.ts`、`app/api/v1/peek/route.ts`、`scripts/bench-mcp.mjs` 的 `bench_overview` / `bench_peek`）**：由 `lib/store.ts` 的 `requireFrontSeat` 把关，仅允许坐在前台项目（`front === true`）里的席位调用（普通项目席位一律返 `403`，缺或错 `token` 返 `401`）。`bench_overview` 汇总全房间各项目的有事席位（总席位 `> 4` 时无事席位折叠为名字和状态）、等用户的提问/权限申请/等验收计数、未完待办数、最后动静时间与房间摘要开头（总长封顶 `< 4500` 字）；`bench_peek(project, part?, page?, before?, full?)` 支持传项目名或 `p_…` id，**默认返回精简要点（总长 `<= 8000` 字）**：房间摘要截到 `600` 字、等验收待办与未完成待办各占一行且不重复、席位状态与欠活（超 3 条欠活折叠）、断掉的点名、最近 `10` 条对话（每条正文截 `200` 字、不带 `wakeText`；总长超预算时先砍较早对话并写明「还有 N 条，用 `before=<seq>` 翻」）；传 `part`（`summary` / `tasks` / `seats` / `talk`）可单独取某一栏完整内容（超过 `8000` 字时用 `page` 或 `before` 分页）；传 `full: true` 保留旧版不截断的完整全文（最近 30 条完整对话）。此外，房间在重启时写的席位提示「被服务器重启打断了」会在该席位下一轮开跑时清掉、`settle()` 不再写回；`bench_overview` 与 `bench_peek` 中空闲或离线席位的备注（`doing`）满 24 小时后不再显示（左栏照旧）。严格只读：不推进任何席位 `seenSeq`，不触发任何唤起，绝不回传 `human-key`、席位 `token`、`session` uuid 或手机推送配置。（测试见 `scripts/test-peek-doing.mjs`。）
 - **前台席位叫醒职责说明（`lib/summon.ts`）**：当 `currentProjectInfo().front` 为真时，向完整守则 `whole` 拼入 `< 200` 字的前台职责说明（用户只跟前台对接；用 `bench_overview` / `bench_peek` 看各项目；每件事带项目名和 `t_…` / `m_…` id；当前只读阶段不能替用户验收、批权限或以他的名义说话；需要他去哪个房间处理说清楚），向短提醒 `brief` 拼入精简要点，自动参与 `rulesFor` 的 sha1 指纹计算与守则瘦身。
 
 ### 前台的页面（2026-11-14，t_5455b26a）
@@ -743,10 +790,10 @@ AverageJoe 的设计：贵的模型负责决策、察觉用户意图、分析；
   - 前台席位调 `bench_watch(project, seat, on?)` 可给任意普通项目设统筹；普通项目的席位调 `bench_watch(on?)` 只能设自己所在的项目、统筹固定是调用者自己（传别的项目或别的席位一律 403）。`frontOverview` 和 `frontPeek` 会显示 `盯防：统筹 <名字>`。
 - **巡查规则（`lib/patrol.ts` 的 `lookWatched`，不受「主动提醒」开关管）**：
   - 「主动提醒」关着时，`sweep` 只对 `front.watch` 里的项目跑这一条（且盯防条目带 `watch: true`，不会被首次扫描的 `first` 静默吞掉）。
-  - 同时满足四条时报一条 `【要紧】` 走 `postRisk` 叫醒前台（受 `WAKE_GAP` 限制）：① 项目里没有任何席位在干活或排队/重试，持续满 10 分钟（`BENCH_WATCH_IDLE_MS` 可缩短测试门槛）；② 还有未交完的待办（非 `done` 且非 `awaitingReview`）；③ 统筹那家客户端没撞限额（`limitedAgentNames` / `isKindQuotaBlocked`）；④ 不是用户自己点停（`isSeatStoppedByUser`）或暂停了队列。
+  - 同时满足四条时报一条 `【要紧】` 走 `postRisk` 叫醒前台（受 `WAKE_GAP` 限制）：① 项目里没有任何席位在干活或排队/重试，持续满 10 分钟（`BENCH_WATCH_IDLE_MS` 可缩短测试门槛）；② 还有未交完的待办（非 `done`、非 `blocked` 且非 `awaitingReview`——卡住的旧待办由巡查自己的卡住规则管，这里不算未交完，只剩卡住和等验收时按「活都交了」处理并从盯防表去掉，`t_a3ab3c44`）；③ 统筹那家客户端没撞限额（`limitedAgentNames` / `isKindQuotaBlocked`）；④ 不是用户自己点停（`isSeatStoppedByUser`）或暂停了队列。
   - **同一次停下只报一次**（2026-11-17，t_67bd9812）：键是 `watch:<projectId>:<这次停下的起点>`。起点取最晚的一次动作：席位跑过或走过一步（`activityAt`）、有人说话（前台自己的催促也算，巡查的记录不算）、待办有变动、`lastNudgeAt`。停多久都是同一个键；有了新动作、又停满 10 分钟，才是新的一次。以前按半小时一档（`BENCH_WATCH_SLOT_MS`，已删），停一晚上前台被叫十几次。席位的 `lastSeenAt` 不算动作：那是客户端的心跳，挂住时也一直在刷。
   - **一轮开着却没动静的也算停了**（同上，起因：一个席位一轮开了 6 小时，前台一直当它在干活）：`runId` 还在、但最近 30 分钟（`BENCH_WATCH_HANG_MS`）没动静的席位不算「在干活」。动静取最晚的：这一轮最后一步（`stepAt`）、它说的话、它名下待办的更新、跑到一半收到的消息（`Message.reached`）；几家客户端的步骤记录不全（Antigravity），所以不只看步骤。这时报给前台的话点名是谁：「哈基米 这一轮开了 6 小时，最近 372 分钟没动静」，并交代只有用户能停下一轮：先 `bench_peek` 看是不是真卡住，真卡住了用 `bench_nudge` 告诉统筹、用自己的话请用户点它的「停止」。前台自己停不了，也不能替用户批权限、答问题。判断「活都交了、不用盯了」时仍按原样，挂住的席位算在干活。
-  - 巡查规则改了要加 `PATROL_VERSION`（这次 2 → 3），热更新才会换掉旧的定时器。
+  - 巡查规则改了要加 `PATROL_VERSION`（这次 3 → 4），热更新才会换掉旧的定时器。
 - **前台直接催统筹（`lib/front-relay.ts`、`lib/store.ts` 的 `postFrontNudge`）**：
   - **只有 `bench_nudge` 且目标正是盯着的项目里记下的那个统筹席位**时，不出草稿卡片，直接发进该项目并叫醒统筹；`bench_relay`（转达用户原话）、非统筹席位或没盯的项目一律照旧出 `draft` 草稿卡片等用户点。
   - **署名红线**：发进目标项目的消息 `authorId: "front"`、`authorName: "前台"`（**绝不能是 `"human"`**，正文 `@统筹 前台来看了一眼：…`，**绝不带 `（经前台）`**），被叫醒的统筹收到的是其他 AI 发言而非用户授权指令。
@@ -863,6 +910,57 @@ why 写的是具体哪条原因，不是兜底那条。测试也会核对原因�
 - 没改的一处，知道就行：没正式请过验收、只是步骤都做完的待办（`review` 是空的），`signLane` 记「没有请验收的记录」，落在「只能你签」。原因是没有请验收的时间，就没法判断复验是不是这一轮的。2026-11-16 四个项目 47 件等验收里有 7 件是这种。
 - 测试：`test-deputy.mjs` 多了「前台读到的」一段（设置行、三种车道的写法、开关关掉后的写法、数据里的 lane）；`test-room.mjs` 在前台守则那条后面加了一条，卡三个工具名和「只有一个例外」。
 - 合验用的走查脚本不在仓库里（`~/.cache/fable-eval/sign-walk/walk.mjs`）：在隔离副本里用假客户端把首批流程从头走一遍，11 项。假客户端的命令是 `node -e '<脚本>' {text} {uuid}` 时，叫醒的全文在 `process.argv[1]`，不是 `[2]`；整批卡片结算要带前台项目的 `project`。
+
+**整批卡片点完明说剩余，「只能你签」直接过，带着问题收下有清单可重开（2026-11-18，t_81f05cdd）**
+
+- **「只能你签」直接通过**：`components/room/batch-card.tsx` 给 `you` 栏未点行在「去看」左面加上「通过」按钮（无确认框，原因即 `signLane` 的 `why` 留在明处琥珀字展示），底层依然走 `settleRelay({ as: "human", action: "pass" })` 按用户本人通过处理；`lib/deputy.ts`（`acceptDeputy` / `autoAcceptChecked`）和 `signLane` 一丝未放松，前台与房间仍绝对不能替用户签这一栏。
+- **未点项置顶 + 剩余提示**：`lib/review.ts` 新增纯函数 `sortBatchItems`、`batchCounts`、`batchRemainingText` 与 `batchOnlyYouLeft`。卡片每栏内部未点行排在已点行前面，卡片内有未点项的栏也排在全点完的栏前面。点完后抬头 `[data-batch-remaining]` 和 toast 写清 `还剩 N 件要你自己看（要你看 a 件、只能你签 b 件）`，全部点完才写「这批都处理完了」。批卡通过成功后派发 `bench-deputy-changed`（`notifyDeputyChanged`），让同页值班栏实时刷新。
+- **卡片了结规则（不挡新卡）**：`lib/front-relay.ts` `passBatch` 改用 `batchOnlyYouLeft(items)` 判断结算：当 `batch` 与 `look` 栏均无未点项、只剩 `you`（或全部点完）时，卡片即标 `state: "passed"`（不再算作开着、`carryOpenBatches` 不再把它并掉折叠成胶囊也不挡新卡），而 `settleRelay` 放行处于 `"passed"` 但仍含未点行的整批卡片继续逐件点通过，全部处理完再点才返回 409。
+- **带着问题收下记账**：`lib/review.ts` 的 `reviewIssueOf(task)` 在 `lib/store.ts` `actOnTask`（`action === "pass"`）覆盖 `task.review` 前检查：当检查没过（`failed`）、没查成（`unverified`/`error`）或没检查（空 / `skipped` / `queued` / `running` / `check.at < review.at` 等）时，在 `task.review.issue`（`TaskReviewIssue`）记录状态、检查人与结论摘要，`task.history` 的 `note` 写入「带着问题收下：…」；检查正常通过的（哪怕类别是要人看/只能本人签或有 `gaps`）照旧不记，消息原文也保持 `"验收通过…"` 开头不变。
+- **14 天清单、重开与一览**：
+  - `lib/store.ts` `queryRecentIssueTasks(since)` 直接从完整内存任务列表 `room().state.tasks` 按 `isRecentIssuePass` 过滤，绕开 `snapshotTasks` 48 小时已完成任务裁切（避免第 3–14 天的记录查不到）；`lib/deputy.ts` `deputyIssues(since)` 与 `lib/front.ts` `frontOverview` 均走该只读查询。
+  - `GET /api/v1/deputy` 一并返回最近 14 天带着问题收下的 `issues`，不混入 `deputyPasses` 与每日 30 件上限；`deputyReopen` 同步放行带 `review.issue` 的待办重开（检查正常通过的用户自签依然回 400），重开后设为 `waiting` + `reopened: true` 并清掉旧检查，立即从清单和一览计数消失。
+  - 完整层在 `components/room/front.tsx`（`DeputyTodayBar` 顶栏），默认简单层（`showDeputyBar={!simple}` 时隐藏值班顶栏）则在 `components/room/waiting-panel.tsx` 「等你定」底部与「今天替你收下 N 件」旁同样渲染「带着问题收下的 N 件」，共用 `useDeputyToday` 和 `DeputyPassList`（N 为 0 不显示，列项目、标题、负责人、收下日期、检查结论摘要及「去看」「重开」）。
+  - `lib/front.ts` `frontOverview` 第一行和有记录的项目行带上最近 14 天带着问题收下的件数（及返回字段 `issuePasses`），让值班 AI 答得出。
+- **测试与故障注入**：`scripts/test-deputy.mjs` 扩充 `you` 栏通过与权限拦截、未点置顶与剩余文案、只剩 `you` 了结不挡新卡与残余可点、带着问题记账（含通过照旧）、3/10/16 天及 48h 裁切窗口验证、`frontOverview` 计数及重开验证；`scripts/test-faults.mjs` 新增 `batch-settled-blocks-you`、`batch-only-you-stays-open`、`issue-pass-no-record`、`issue-pass-uses-snapshot-window` 四条由 `test-deputy.mjs` 守护。
+
+**检查不会永远排着（2026-11-18，t_96eb4124）**
+
+- 起因：用户 2026-11-18 早上看到 Bench-bot 的 3 件待办，检查挂在「排着」好几个小时没动。
+  - 有的是负责人根本没请验收，只是步骤做完了。`awaitingReview` 照样算它在等验收，前台的 `bench_check` 就给它排了检查，`checkTask` 见到 review 不是 waiting，不改状态直接走开。
+  - 有的排在一个队列停着或者一直忙的席位上。
+  - 有的检查人撞了额度，检查直接落成「没跑成」。
+  - 前台每收到一件结论就被叫醒一次。
+- **没请验收的不排**：`lib/review.ts` 的 `reviewAsked(task)` = 没完成，且 `review.state === "waiting"`。`awaitingReview` 的含义没改。
+  - `runBatchCheck` 跳过这种待办，原因写「负责人还没请验收」。手动检查回 400。
+  - `signLane` 把它归「只能你签」，原因同上。
+  - 已经排上、后来不用查了的（打回、重开），由扫描（见下）或 `checkTask` 落成 `skipped`，并写原因。
+  - 负责人那边：`lib/owes.ts` 的 `owedTasks` 不再排除这种待办，它还算负责人欠的活。owes 行（`summon.ts` 的 `owesLine`）和自动续做的叫醒文案（`continue.ts` 的 `describeTaskStep`）都写「只剩验收：写清怎么看到效果，再请验收」。按续做原有的规矩叫负责人，最多两次。
+- **扫描**：`summon.ts` 的 `sweepChecks`，在 `ensureSummon` 里起一个全进程的定时器（`ensureCheckSweep`，带版本号，`BENCH_CHECK_SWEEP_MS` 默认 60 秒）。不给每件检查单设定时器。它只看 `check.state === "queued"` 的：
+  - 没请验收 → `skipped`，从席位队列里拿掉。
+  - 带 `waitUntil` 的 → 到点前不动；到点后清空 `avoid`、`repicks`，记 `waited`，再排一次。
+  - 排了超过 `BENCH_CHECK_STALE_MS`（默认 15 分钟，从 `queuedAt` 算）→ `repickCheck(..., "stale")`。
+- **换人**：`repickCheck(taskId, cause, from?)`。
+  - 保持同一个 `check.at`，把原来的席位记进 `check.avoid`，`repicks` 加一，从原席位的 `lane.checks` 里拿掉，再走 `requestCheck(..., cause)`。
+  - 带了 cause 时，指定的检查人如果在 avoid 里或者被额度拦着，也改成自动挑（`pickAutoChecker(task, avoid)`）。
+  - 换了超过 2 次（`CHECK_MAX_REPICKS`），或者挑不到人，走 `noCheckerLeft`：
+    - 撞额度、还没等过的：`waitUntil` = `store.earliestLimitReset()`（各房间开着的额度卡里最早的重置时间），没有就半小时后，状态仍是 queued、`by` 空，note 写什么时候重置。
+    - 其余：落成 `error`「没有空着的 AI 来检查」。
+- **撞额度**：`checkTask` 收尾时，跑失败或没交结论、而且 `noteLimit` 认出是额度（额度卡照出），就不落 error，直接 `repickCheck(..., "limit", 这个席位)`。
+- **守一道**：`checkTask` 开跑前要求 `check.by` 是自己、状态是 queued。换过人的旧队列项会被跳过，不会两个席位查同一件。
+- **排上的时刻**：`requestCheck` 写 `queuedAt`。手动检查、`bench_check`（`runBatchCheck`）见到排了超过 15 分钟的，按新的一轮重排。
+- **结论攒着告诉前台**：去掉 `maybeNotifyChecksSettled`，换成 `noteCheckSettled(taskId)`。
+  - 每个项目一组待办 id 和一个计时器。最后一件落下后静 `BENCH_CHECK_QUIET_MS`（默认 3 分钟）就发；从第一件算起最长 `BENCH_CHECK_QUIET_MAX_MS`（默认 10 分钟）也发。
+  - 发的时候按这组待办当时的检查状态计数，规则和以前一样：只有跳过的不叫人。
+  - 落成 error 的（没人查、`dropChecks`、拼不出命令）也算进去。
+- 新字段在 `TaskCheck` 上：`queuedAt`、`avoid`、`repicks`、`waitUntil`、`waited`。
+- 测试环境：`test-copy.sh` 放行 `BENCH_CHECK_*`，副本里 `BENCH_CHECK_QUIET_MS` 默认 300 毫秒；`test-faults` 起的服务也一样。`test-room` 等前台被叫醒只等几秒，不这样会超时。
+- 测试：`scripts/test-check-queue.mjs`（进程内，假席位），分四段：
+  - 没请验收的不排、排上后打回落成 skipped；
+  - 排久了换人、换两次后落成 error、之后忙完的席位不再接着查；
+  - 撞额度换人，指定的检查人也换；全都被额度拦着就等重置，再排一次，还没人落成 error；
+  - 两件结论只叫一次前台。
+- 故障注入：`check-stale-no-repick`、`check-limit-no-repick`、`check-verdicts-not-batched`，要害清单第 8 条。
 
 ## 第一次打开只问一句话（2026-11-17，t_594f3118，总单 t_19662204）
 
@@ -998,6 +1096,23 @@ npx eslint --max-warnings 0
 - **去掉了每 10 秒整页重画**：`RoomApp` 里的 `now` 时钟拿掉了，左栏、前台值班栏各自用 `useTick(10_000)`。用 `PerformanceObserver` 量过：200 条消息的房间空闲一分钟，两层的 longtask 都是 0 次（原来约 6 次，每次 60–70 毫秒）。
 - **测试**：`scripts/test-room.mjs` 里有一段查 `GET /api/v1/waiting`（结构、开着的提问和等验收的待办在里面、回答和通过之后不在、带 `project` 通过别的项目的待办）。页面走查是无头浏览器脚本（造一间有权限请求、提问、等验收的房间，走：默认第一层 → 三种卡都在都能点 → 通过后卡片消失 → 看细节 → 回到简单 → 刷新后还记得 → 前台里看得到别的项目的事、能通过、「去看」能跳 → 手机两格；另一份量 longtask 和打回），没进仓库，改这一块时照这个顺序再走一遍。
 
+- **同一件事只出一张卡、要紧的排前、事多了收起、旧提问问两遍**（2026-11-18，t_145388f7，总单 t_b46ea7f4 第 4 件）。11-17 傍晚前台「等你定」是 74 件，最上面 6 张里 5 张一模一样（同一个席位两分钟里连撞 5 次额度）。规则都在 `lib/waiting-shared.ts`（纯函数，页面和服务端共用），`GET /api/v1/waiting` 和页面自己算的单个项目走同一套：
+  - **归并**：`groupLimited(messages)`：同一个席位（`limited.agentId`）的额度卡只出最新一张，`count` 是它代表的没处理的张数（只数最后一张已处理的卡之后的：早上连撞 5 次最后翻了篇，晚上新撞 1 次就写 1 次）（开着的和自动叫醒失败的都算），卡上写「共撞了 N 次」（`LimitedCard` 的 `count`）。最新一张已经处理了（定时了、叫醒了、忽略了、换客户端了），同席位旧的没处理的也不再出。这一张被处理（点「到点继续」「现在重试」「忽略」「换客户端」，或到点自动叫醒成功）时，`lib/store.ts` 的 `markLimited` 把同席位更早的、还开着或自动叫醒失败的卡一并标成「已忽略」（备注「同一个 AI 更新的一张已经处理了」）；所有处理的路径都经过 `markLimited`，所以不用在每个入口各调一次。点「取消定时」是退回「开着」，不算处理。对话里每次撞额度那一行小字照旧。手机底部「等你定（N）」的数同样按合并后的算（`room-app.tsx`）。
+  - **排序**：权限、提问（有 AI 卡在上面）→ 额度、被重启打断 → 验收；验收里 `sortReviews`：检查「查出问题」（`check.state === "failed"`）的排前，其余等得久的排前。
+  - **前台按项目分段**：`sectionsOf`，每个项目一段，段头写项目名和件数（`WaitingSection.count`）；项目按最要紧的一件排（有权限 0、提问 1、额度或打断 2、查出问题的验收 3、其余验收 4，同级等得最久的排前）。在项目里就是一段、不写段头。标题上的总件数是全部。
+  - **收起**：一个项目的验收超过 3 件只显示前 3 件，下面一行「还有 N 件 · 展开」，展开后是「收起」（`waiting-panel.tsx` 的 `SectionCards`，只记在这次页面里，刷新就收回去）。
+  - **旧提问**：`staleAskDays`，超过 3 天（`ASK_STALE_MS`）没答的提问，`AskCard` 上写「这是 N 天前问的」，点选项（或多选「确定」、或自己写的回答再发）第一下只变成「还按这个答？」，再点同一个才发出；换了选项或改了字就重新问。前台里只有「去看」的那种卡也写「这是 N 天前问的」。服务端 `lib/store.ts` 的 `answerAsk` 不拦，但回答的话前面加「（这是 N 天前的提问，先核实现在还作不作数）」，提问的席位收到的就是这句；用户在对话里也看得到这一句。对话、进展页、「等你定」里的提问卡是同一个组件，一起生效；3 天内的一点没变。
+  - **测试**：`scripts/test-waiting.mjs`（进程内，不起服务：归并、已处理后不再冒出、处理最新一张时旧的一起处理、别的席位不受影响、分段顺序、段头件数、旧提问的前缀和 3 天内不加）；`test-room.mjs` 里有一段把它跑起来；`test-faults.mjs` 五条（`waiting-limited-not-merged`、`waiting-older-limited-kept`、`waiting-limited-count-old-ledger`、`waiting-reviews-unsorted`、`stale-ask-not-told`）。页面在副本里用无头浏览器走过：5 张同席位额度卡、两个项目各 5 件验收、一条 4 天前的提问（直接改副本库里的时间），项目宽屏、手机宽度、前台各看了一遍。
+  - **没做的**：权限卡里「几天前」的那种过期没处理（只有提问有）；「去看」的前台卡上没有二次确认，因为那里不能直接回答。
+
+- **你回来时的一张卡「你不在的这段时间」**（2026-11-18，t_6bb6bc94，总单 t_b46ea7f4 第 7 件）：离开半小时以上再回来，「等你定」最上面出一张卡，几行大白话说清这段时间发生了什么，每行能点；点「知道了」收起；没事发生就不出。不调模型，不加开关，不替用户点任何按钮，**不算进「等你定（N）」的件数**。
+  - **怎么算「不在」**（`components/room/away-card.tsx` 的 `useAwaySince`，全在浏览器里，服务器不记用户在不在）：`localStorage` 的 `bench:last-active-at` 记上次在的时间（各标签页共用；页面可见时有点按、键盘、滚动才更新，最多一分钟写一次）。再活动时距上次 ≥ 30 分钟（`AWAY_AFTER_MS`），就把上次的时间存成 `bench:away-since` 并出卡；卡一直在，直到点「知道了」才清掉（刷新不丢；没点又离开，`since` 不变、接着累计）。别的标签页点了，这一页跟着收（`storage` 事件）。前台总览里查出全项目都没事发生就自己清掉；单个项目里没事只是不出卡，不清（别的项目可能有事）。没有 `localStorage`（隐私窗口）时卡就是不出。
+  - **内容由房间算**：`GET /api/v1/away?since=<毫秒>&project=<可选>`（`app/api/v1/away/route.ts`，只读、不用口令、什么也不存）。每一行怎么算在 `lib/away-shared.ts` 的 `awayLines`（纯函数，不碰存储，测试直接喂造出来的历史）：新问你的问题（`createdAt` ≥ since 的没答的提问）、等你批的权限、做完等你验收（请验收时间 ≥ since，前 3 件标题）、谁撞额度几点恢复（每个席位最新一张；恢复时间相同的合成一行，名字多于 3 个写「等 N 个」，恢复时间已经过了写「撞到过额度，13:40 已恢复」）、卡住几件、房间替你收下几件（`review.deputy`）、房间自己叫 AI 接着做几次（`lib/continue.ts` 发的、带 `wakeText` 的系统消息；`calls` 里 `failed`/`cut` 的算「没叫动」）、现在谁在做什么。只列不为 0 的行；**什么都没发生时不出卡，只有「现在还在做」一行也不出**。行的顺序是要你动手的在前（提问、权限、验收），再是额度、卡住、收下、叫醒、在做。
+  - **项目里 / 前台**：项目里一张卡列本项目的行；前台（不带 `project`，或 `project` 是前台）按项目分行，每个项目只写最要紧的两句，项目按最要紧的一句排。点一行：待办 → 进完整视图（`onEnterFull(taskId)`）；等你定里的事 → 滚到下面的卡片；在做、叫醒 → 完整视图；前台里的行 → 去那个项目（`openProjectAt`）。时间写「上午 8:23 到现在（3 小时）」（`awayStretch`）。
+  - **复用的**：没有复用 `frontPeek`，它是给前台 AI 读的一大段文字；复用的是房间已有的事实（`awaitingReview`、`collectOpenAsks`、`whenText`、`TaskDeputy`、房间叫醒的系统消息）。
+  - **测试**：`scripts/test-away.mjs`（进程内，不起服务）：每一行各一个用例、全 0 不出卡、只有「在做」不出卡、since 之前的事不算、时间的写法、单个项目和前台的读法、since 不对返回 400，以及**读这个接口不改任何数据**（读前后房间版本、消息、待办、席位、权限都一模一样）；`test-room.mjs` 里一段查 HTTP：结构、不带口令能读、读前后房间版本不变。这条只读，没有故障注入。页面在副本里用无头浏览器走过：造数据后把上次在的时间改成三小时前，宽屏、手机宽度、前台各看了一遍，点「知道了」后刷新不再出现。
+  - **没做的**：卡上不写具体的撞额度「几次」（那是「等你定」里额度卡的事）；「房间自己叫 AI 接着做」只数 `lib/continue.ts` 那一路，额度到点自动叫醒、重启后自己接上不在里面。
+
 ## 界面用词和长短
 
 新增或修改界面文案时照同一把尺子写（第一批对照表见 [`docs/界面文案对照表.md`](docs/界面文案对照表.md)）：
@@ -1059,3 +1174,20 @@ npx eslint --max-warnings 0
 - **搬进正式目录的顺序**：跨多个互相引用文件的改动，先在副本/临时目录全部准备好并跑通 `tsc` 与测试，再按「底层被依赖文件 → 调用方 → 路由」一次性原子替换（`rename`），落盘后立刻 `curl http://127.0.0.1:4399/api/v1/projects` 确认 200，避免热更新中途看到半截引用导致正式房间全接口 500。
 - **测试**：`scripts/test-continue.mjs`（跨冷启动两阶段覆盖全部 10 种守卫、进展清零与持久化，并在 `scripts/test-room.mjs` 调用）；`scripts/test-faults.mjs` 三条故障注入（`autowake-no-max-cap`、`autowake-ignores-user-stop`、`autowake-before-boot`）。
 
+
+## 启动依赖检查、停止、安装图标与更新（2026-11-18，t_eda97cfc）
+
+- **启动自动装依赖（`scripts/ensure-deps.mjs`）**：`start.sh`、`scripts/start-bench.sh`、`start.bat` 和 `scripts/update-bench.mjs` 在真正拉起服务前先调它。只对 `package.json` 的 `dependencies`、`devDependencies`、`optionalDependencies`、`overrides` 四项与 `package-lock.json` 计算 SHA-256 指纹对照 `node_modules/.bench-deps-stamp`（改 `scripts`、版本号或仅仅改了文件时间戳不再误触发）；首次接管没有 stamp 的旧目录时比对 `node_modules/.package-lock.json` 时间戳；缺少 `node_modules` 或指纹不一致时执行 `npm install`，装完按装完的文件重算指纹再写 stamp。安装失败直接非 0 退出（不写 stamp），绝不带着旧依赖硬开；`start-bench.sh` 无终端时同步发桌面通知。
+- **停止（`scripts/stop-bench.mjs`，`npm run stop`）**：先只读请求 `GET $BENCH_URL/api/v1/projects` 与各项目 `/api/v1/room` 确认有没有非演示 AI 正在干活（`status === "working" || runId`，支持 `--force` / `-f` / `npm_config_force=true`）。有 AI 干活时列出项目与席位名并拦住；端口有人占用且接口问不到状态时照实说并拦住，绝不盲杀。只有在 `tmux list-panes -t =<会话> -F '#{pane_pid}'` 沿 `ppid` 确认目标端口监听进程确实在该 tmux 会话内时才发 `C-c` 和 `kill-session`（端口没人听时仅目标为默认 `4399` 才清理空会话），避免跑在别的端口（如 44xx 副本）时误关正式房间的 `bench-dev`。强停监听器时只停监听进程所在进程组（若与 `stop` 自身同组则只按 PID 停监听进程），另开进程组的后代中只停带 `BENCH_RUN_KEY`（Linux `/proc/<pid>/environ`）的 AI 进程，不误杀 `lib/open-ref.ts` / `lib/audio.ts` 等用户侧 `detached` 窗口与后台进程。Windows 上给出手动按 Ctrl+C / 关窗口的明白提示后非 0 退出。
+- **装图标与开机自启（`scripts/setup-bench.mjs`，`npm run setup`）**：Linux 下先检查 `tmux` 是否已装（缺少时给出各发行版安装命令，不闷着失败），再按当前仓库路径动态生成写入 `$XDG_DATA_HOME/applications/bench.desktop` 并刷新桌面缓存；询问是否启用登录后自启（写入 `$XDG_CONFIG_HOME/autostart/bench.desktop`，`Exec` 带 `--background`，让 `scripts/start-bench.sh` 只起房间不弹浏览器，桌面图标那份不带），支持 `--no-autostart`、`--autostart`、`--remove`（清理图标和自启）。`scripts/bench.desktop` 已去掉作者本机路径改为占位模板。Windows / macOS 给出对应明白提示后非 0 退出。
+- **更新（`scripts/update-bench.mjs`，`npm run update`）**：按脚本自身位置解析仓库根目录（在其他目录执行 `node <路径>/scripts/update-bench.mjs` 也不会拉错仓库），先检查 `git status --porcelain`，工作区不干净就列出变动并停下不拉代码；干净时执行 `git pull --ff-only` 再调 `ensure-deps.mjs` 检查并按需装依赖，最后只打印「重启后生效」和重启办法（不自动重启，避免打断干活的 AI）。
+- **接入备份与防覆盖（`scripts/register-mcp.sh`、`scripts/merge-mcp.mjs`）**：`cursor` 改为和其他 JSON 客户端同走 `merge-mcp.mjs`；所有改写 JSON / TOML / YAML 配置的客户端（含走各自 CLI 的 `claude`、`codex`、`antigravity`、`qoder`、`codebuddy`、`qwen`、`gemini`、`copilot`、`droid`、`devin` 以及 `dsh`）在改前均先做结构校验（读不懂的带注释 JSON、顶层非对象 JSON、语法损坏 TOML、非列表 YAML 一律停下不覆盖），再由 `merge-mcp.mjs` 统一留存保留原文件权限的 `<文件名>.bak-bench-<时间>` 备份；若内容与最新一份备份相同就跳过重复备份，每个文件最多保留最新 5 份。`merge-mcp.mjs` 写入内容未变化时不写文件也不额外备份。
+- **测试（`scripts/test-ops.mjs`）**：全部在 `/tmp` 临时目录、隔离 `HOME` / `XDG_*`、mock CLI / tmux、临时 bare git 仓库和动态分配空闲端口上运行，绝不碰真实桌面、`~/.cursor` 和 `4399`。
+
+## 每天自动备份与一条命令找回（2026-11-18，t_8e27bddd）
+
+- **怎么留（`lib/db.ts` 的 `dbVacuumInto` + `lib/backup.ts`）**：用 SQLite 原生一致性拷贝 `VACUUM INTO '<路径>'`（Node 22.13+ `node:sqlite`），绝不直接 `cp` 正在写 WAL 的 `bench.db`。先写进 `data/backups/.tmp-*` 临时文件并设 `0600`，查过没问题才原子改名为 `data/backups/bench-YYYYMMDD-HHMM.db`（权限 `0600`）。只备份数据库；`data/human-key`、`data/seats/` 不进备份，`data/uploads/` 附件不备份。
+- **什么时候留**：`lib/boot.ts` 注册 `ensureBackup()`（`globalThis.__benchBackup` 单例带 `SWEEP_VERSION = 2`，支持 `BENCH_BACKUP_BOOT_MS` / `BENCH_BACKUP_TICK_MS` / `BENCH_BACKUP_INTERVAL_MS` 测试缩短）。房间启动满 10 分钟后检查一次，之后每小时看一次；每小时判断「到没到 24 小时」走 `listBackupCandidates()` 只看文件名与 `statSync` 的 `mtime`，不打开任何备份文件（避免在主线程上对几十 MB 库重复跑 `quick_check`）；满 24 小时（或一份都没有）才动手留新的一份，清理旧备份前一天一次逐份校验保留的备份。
+- **先查再算数、留最近 7 份**：新备份用 `new DatabaseSync(path, { readOnly: true })` 只读打开，跑 `PRAGMA quick_check` 确认返回 `ok`，并在原库非空时核对 `projects` 与 `messages` 计数非零。没过就立即删掉临时文件、打错误日志、在前台项目发一行大白话系统提示（「数据备份没留成：…」），且绝不清理旧备份；查过了才落盘并清理超出最近 7 份的最旧好备份（只认 `bench-YYYYMMDD-HHMM.db` 格式，别的文件名和子目录一律不动）。
+- **找回命令（`scripts/restore-bench.mjs`，`npm run restore`）**：纯 Node 跨平台（Linux / macOS / Windows 均可用，不靠 bash）。先拦正在使用的数据库：① Linux 上扫描 `/proc/*/fd`，凡有其他进程正打开着目标 `dataDir` 的 `bench.db`（含 `-wal` / `-shm`）立即停手；② 端口检查跟着数据目录走——目标是仓库默认 `data/` 时无条件必查默认 `4399`（防 `BENCH_URL` 指向空闲副本端口而误换正在跑的正式库），目标是带 `../port` 的测试副本 `data/` 时一并查该副本端口，再加上 `BENCH_URL` 的端口；任一命中即停手并提示先 `npm run stop`。随后逐份只读校验并列出时间、大小、项目数、消息数、待办数，终端交互选编号（`--latest`、`--file <路径>` 可免问；非终端未带这两个参数立即停手）；动手前先把现有的 `bench.db`、`bench.db-wal`、`bench.db-shm` 另存为 `data/bench.db.before-restore-<时间>*`，原子换入后再跑一遍只读 `PRAGMA quick_check`（没过自动回滚还原），最后提示重新启动。
+- **测试与故障注入**：`scripts/test-backup.mjs`（全部在 `os.tmpdir()` 临时目录与动态空闲端口上跑，含未到期检查零文件打开验证、`BENCH_URL` 与数据目录不配套拦截、跨进程持库拦截及 `node-pty` 交互选号，绝不碰正式 `data/`，并在 `scripts/test-room.mjs` 末尾调用）；`scripts/test-faults.mjs` 共 5 条故障注入：`backup-prune-deletes-newest`、`backup-bad-replaces-good`、`restore-no-save-before`、`restore-ignores-data-dir-port`、`backup-hourly-opens-db`。

@@ -45,6 +45,18 @@ cd Bench
 
 第一次用的话，文字版指南在 [docs/新手引导.md](docs/新手引导.md)。
 
+### 日常命令：装图标、更新、停止
+
+- **装好桌面图标与开机自启（Linux）**：运行 `npm run setup`（需已安装 `tmux`），会按当前目录装好应用菜单图标并询问是否开启登录自启；不设自启可加 `-- --no-autostart`，移除用 `npm run setup -- --remove`。Windows 请直接双击 `start.bat` 或手动为它创建快捷方式。
+- **停止并坐（Linux / macOS）**：运行 `npm run stop`（无论用 `./start.sh` / `npm run dev` 还是桌面图标起的都能停）。有 AI 正在干活时会列出名单并拦住，确认打断可加 `npm run stop -- --force`。Windows 请切换到启动窗口按 `Ctrl+C` 或直接关闭窗口。
+- **更新到最新版**：运行 `npm run update`（工作区干净时才会拉最新代码并自动检查安装依赖；更新完不自动重启，会提示你先停再开）。启动时只要依赖清单有变化，`./start.sh`、`scripts/start-bench.sh` 与 `start.bat` 也会先自动装好再开。
+
+### 数据备份和找回
+
+- **每天自动留一份**：房间开着时，启动满 10 分钟后检查一次，之后每小时看一次；距上一份超过 24 小时就会在 `data/backups/` 下用 SQLite 一致性拷贝自动留一份 `bench-YYYYMMDD-HHMM.db`（权限 `600`），只读检查完整且非空后才算数，最多保留最近 7 份好备份。
+- **备份范围**：只备份数据库 `data/bench.db`；口令 `data/human-key`、席位说明 `data/seats/` 不进备份；粘贴上传的附件 `data/uploads/` 不包含在备份里。
+- **一条命令找回**：万一数据库损坏或误清，先停掉房间（Linux / macOS 运行 `npm run stop`，Windows 关闭启动窗口），再运行 `npm run restore`：命令会列出每份备份的时间、大小、项目数、消息数与待办数让你选（也可传 `npm run restore -- --latest` 直接恢复最新一份，或 `-- --file <路径>` 指定文件）；动手前自动把当前的 `bench.db`（含 `-wal` / `-shm`）另存为 `data/bench.db.before-restore-<时间>*`，换入并复检通过后再重启即可。
+
 ## 安全说明
 
 - 并坐只监听本机 `127.0.0.1`，请不要改成 `0.0.0.0`。房间会按 `agents.json` 里的命令唤起 AI，能连上房间的人就等于能在你的电脑上执行命令。
@@ -62,6 +74,7 @@ cd Bench
 | 位置 | 里面是什么 |
 |---|---|
 | `data/bench.db` | 所有项目的对话、席位、待办、唤起记录。SQLite。 |
+| `data/backups/` | 每天自动留一份的数据库备份（`bench-YYYYMMDD-HHMM.db`，权限 600，保留最近 7 份）。不含口令和 `uploads/` 附件。 |
 | `data/human-key` | 你说话用的口令（权限 600）。第一次启动生成，之后不再变。 |
 | `data/seats/<席位id>.md` | 每个席位的职责和长期记忆，给人和给 AI 看的副本。**只写出，不读回**——改它不会改房间里的东西。 |
 | `data/uploads/` | 你粘贴或拖进输入框的文件副本。从磁盘用回形针选的只记路径，不复制。 |
@@ -73,7 +86,7 @@ cd Bench
 
 ### 二、接入 AI 时：改那个 AI 自己的配置文件
 
-注册只做一件事：在配置里加一条指向本仓库 `scripts/bench-mcp.mjs` 的 MCP 服务，其它内容原样保留。**改 JSON 配置前会把原文件备份成 `<文件名>.bak-bench-<时间戳>`**。
+注册只做一件事：在配置里加一条指向本仓库 `scripts/bench-mcp.mjs` 的 MCP 服务，其它内容原样保留。**改前会先把原配置文件备份成 `<文件名>.bak-bench-<时间戳>`；遇到读不懂的文件（如带注释的 JSON、损坏的 TOML 或非列表的 YAML）会停下并提示手动加入，绝不覆盖原文件。**
 
 | 客户端 | 写哪个文件 | 怎么写的 |
 |---|---|---|
@@ -94,7 +107,7 @@ cd Bench
 | crush | `~/.config/crush/crush.json` | 合并 JSON |
 | factory | `~/.factory/mcp.json` | 合并 JSON |
 | Gemini CLI | `~/.gemini/settings.json` | 由它自己的 `gemini mcp add --trust` 写入 |
-| Devin | 由 `devin mcp add` 写入它自己的配置 | 它自己的命令 |
+| Devin | 由 `devin mcp add` 写入它自己的配置（若发现常见路径会先备份） | 它自己的命令 |
 
 想撤掉某一家的接入：删掉那条叫 `bench` 的 MCP 服务（`claude mcp remove bench`、`codex mcp remove bench` 之类，或手工删配置里那一段），备份文件 `.bak-bench-*` 可以一起删。
 
@@ -134,11 +147,19 @@ cd Bench
 
 所以：**能连上 4399 的人，就等于能在你电脑上执行命令。** 这也是为什么并坐只监听本机、并且 `as:"human"` 要口令（见上面的安全说明）。
 
-### 七、桌面图标
+### 七、桌面图标与开机自启
 
-仓库**不会自动安装**桌面图标。`scripts/bench.desktop` 只是一份模板，里面的 `Exec` 写的是作者电脑上的路径，直接拿去用指不到你的仓库。
+仓库不会自动修改你的系统菜单。在 Linux 桌面环境需要生成应用图标（以及可选登录后自动启动）时，运行：
 
-想装的话：把它复制到 `~/.local/share/applications/`，再把 `Exec` 和 `Icon` 两行改成本机仓库的完整路径（`Exec` 指向 `scripts/start-bench.sh`），然后 `update-desktop-database ~/.local/share/applications`。不要了，删掉 `~/.local/share/applications/bench.desktop` 就行，房间本身不受影响。
+```bash
+npm run setup                  # 安装桌面图标，并询问是否启用登录后自动启动
+npm run setup -- --no-autostart
+npm run setup -- --remove      # 同时卸载桌面图标与开机自启
+```
+
+它会按当前仓库绝对路径生成 `~/.local/share/applications/bench.desktop`（开自启则同时生成 `~/.config/autostart/bench.desktop`），`Exec` 指向 `scripts/start-bench.sh`（开机自启带 `--background`，只把房间起来、不弹浏览器；需要系统里已装好 `tmux`）。不再需要手动复制和修改 `scripts/bench.desktop` 模板；不想保留时用 `--remove` 即可移除，房间自身数据不受影响。
+
+Windows 上不支持 `.desktop` 快捷方式：直接双击 `start.bat` 启动，需要桌面快捷方式或开机自启时右键 `start.bat` 创建快捷方式并放到桌面或 `shell:startup` 启动文件夹即可。
 
 ## 给 AI 和开发者
 

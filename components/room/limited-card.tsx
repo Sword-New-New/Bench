@@ -17,11 +17,14 @@ import type { Message } from "@/lib/types"
 export function LimitedCard({
   message,
   compact = false,
+  count = 1,
   projectName,
   onInspect,
 }: {
   message: Message
   compact?: boolean
+  // How many times this seat hit the limit, when the card stands for several.
+  count?: number
   projectName?: string
   onInspect?: () => void
 }) {
@@ -41,6 +44,7 @@ export function LimitedCard({
           <span>{limited.agentName} 撞到额度</span>
         </p>
         <p className="mt-1 text-muted-foreground">{message.text}</p>
+        {count > 1 ? <p className="mt-0.5 text-muted-foreground">共撞了 {count} 次</p> : null}
         <div className="mt-2 flex justify-end">
           <Button type="button" size="xs" onClick={onInspect}>
             去看
@@ -132,6 +136,7 @@ export function LimitedCard({
       }
     >
       <p className={compact ? "font-medium text-foreground" : ""}>{message.text}</p>
+      {count > 1 ? <p className={compact ? "mt-0.5 text-muted-foreground" : ""}>共撞了 {count} 次</p> : null}
       <div className={`mt-2 ${compact ? "[&>span]:justify-start" : ""}`}>{body}</div>
     </div>
   )

@@ -7,6 +7,7 @@ import { toast } from "sonner"
 import { api } from "@/components/room/api"
 import { clock } from "@/lib/status"
 import type { Message } from "@/lib/types"
+import { staleAskDays } from "@/lib/waiting-shared"
 
 // Questions still waiting for an answer whose own card is not on screen (the
 // thread draws only the latest stretch of a long room), pinned at the top: the
@@ -65,7 +66,11 @@ export function AskCard({
   const [picked, setPicked] = useState<string[]>([])
   const [text, setText] = useState("")
   const [sending, setSending] = useState(false)
+  // A question left for days: the first press on an answer only asks 「还按这个答？」,
+  // the second sends it (`pending` is the answer that waits for the second press).
+  const [pending, setPending] = useState<string | null>(null)
   if (!ask) return null
+  const staleDays = ask.state === "open" ? staleAskDays(message.createdAt) : 0
 
   if (ask.state === "answered") {
     return (
@@ -82,6 +87,10 @@ export function AskCard({
   const send = async (answer: string) => {
     const clean = answer.trim()
     if (!clean || sending) return
+    if (staleDays > 0 && pending !== clean) {
+      setPending(clean)
+      return
+    }
     setSending(true)
     try {
       await api("/api/v1/say", {
@@ -90,6 +99,7 @@ export function AskCard({
       })
       setText("")
       setPicked([])
+      setPending(null)
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "发送失败")
     } finally {
@@ -97,8 +107,10 @@ export function AskCard({
     }
   }
   const options = ask.options ?? []
-  const toggle = (label: string) =>
+  const toggle = (label: string) => {
+    setPending(null)
     setPicked((list) => (list.includes(label) ? list.filter((item) => item !== label) : [...list, label]))
+  }
 
   if (onInspect) {
     return (
@@ -112,6 +124,7 @@ export function AskCard({
           ) : null}
           {message.authorName} 等你回答
         </p>
+        {staleDays > 0 ? <p className="mt-1 text-[0.6875rem] text-muted-foreground">这是 {staleDays} 天前问的</p> : null}
         {showQuestion && message.text ? (
           <p className="mt-1.5 line-clamp-4 text-[0.8125rem] leading-5 break-words whitespace-pre-wrap text-foreground">
             {message.text}
@@ -136,6 +149,7 @@ export function AskCard({
         <CircleHelp className="size-3.5" />
         {message.authorName} 等你回答{ask.multi ? "（可多选）" : ""}
       </p>
+      {staleDays > 0 ? <p className="mt-1 text-[0.6875rem] text-muted-foreground">这是 {staleDays} 天前问的</p> : null}
       {showQuestion && message.text ? (
         <p className="mt-1.5 line-clamp-4 text-[0.8125rem] leading-5 break-words whitespace-pre-wrap text-foreground">
           {message.text}
@@ -151,7 +165,7 @@ export function AskCard({
                 type="button"
                 disabled={sending}
                 className={`flex items-start gap-2 rounded-xl border px-2.5 py-1.5 text-left transition-colors hover:bg-muted disabled:opacity-60 ${
-                  on ? "border-primary bg-primary/8" : "bg-background/60"
+                  on || pending === option.label ? "border-primary bg-primary/8" : "bg-background/60"
                 }`}
                 onClick={() => (ask.multi ? toggle(option.label) : void send(option.label))}
               >
@@ -163,7 +177,7 @@ export function AskCard({
                   </span>
                 ) : null}
                 <span className="min-w-0">
-                  <span className="block font-medium">{option.label}</span>
+                  <span className="block font-medium">{pending === option.label ? "还按这个答？" : option.label}</span>
                   {option.detail ? <span className="block text-muted-foreground">{option.detail}</span> : null}
                 </span>
               </button>
@@ -176,7 +190,9 @@ export function AskCard({
               className="self-end rounded-full bg-primary px-3 py-1 font-medium text-primary-foreground disabled:opacity-50"
               onClick={() => void send(options.filter((option) => picked.includes(option.label)).map((option) => option.label).join("、"))}
             >
-              确定（{picked.length}）
+              {pending && pending === options.filter((option) => picked.includes(option.label)).map((option) => option.label).join("、")
+                ? "还按这个答？"
+                : `确定（${picked.length}）`}
             </button>
           ) : null}
         </div>
@@ -190,7 +206,10 @@ export function AskCard({
       >
         <input
           value={text}
-          onChange={(event) => setText(event.target.value)}
+          onChange={(event) => {
+            setText(event.target.value)
+            setPending(null)
+          }}
           placeholder={options.length ? "其他回答…" : "输入回答…"}
           aria-label={`回答 ${message.authorName} 的问题`}
           className="h-7 min-w-0 flex-1 rounded-full border bg-background/70 px-3 outline-none focus:border-primary"
@@ -204,6 +223,7 @@ export function AskCard({
           {sending ? <Loader2 className="size-3.5 animate-spin" /> : <Send className="size-3.5" />}
         </button>
       </form>
+      {pending && pending === text.trim() ? <p className="mt-1 text-[0.6875rem] text-muted-foreground">还按这个答？再点一次才发出</p> : null}
     </div>
   )
 }

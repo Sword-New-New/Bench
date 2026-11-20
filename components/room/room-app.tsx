@@ -78,8 +78,8 @@ import { mentionedAgentIds } from "@/lib/text"
 import { KINDS } from "@/lib/kinds"
 import {
   collectOpenAsks,
+  groupLimited,
   isPendingInterrupted,
-  isPendingLimited,
   type WaitingOverview,
 } from "@/lib/waiting-shared"
 import type { Message, Project, ProjectInfo, PublicAgent, RoomSnapshot, Task } from "@/lib/types"
@@ -848,7 +848,7 @@ export function RoomApp() {
         : 0
       : (room.permits?.length ?? 0) +
         collectOpenAsks(room.messages, room.openAsks).length +
-        room.messages.filter(isPendingLimited).length +
+        groupLimited(room.messages).length +
         room.messages.filter(isPendingInterrupted).length +
         (digest?.you.filter((row) => row.need === "review").length ?? 0)
   const simpleWorkingCount = desk

@@ -1,7 +1,7 @@
 "use client"
 
 import { useEffect, useState, useSyncExternalStore } from "react"
-import { ArrowLeft, ArrowRightLeft, BookOpen, Check, ChevronDown, ClipboardCheck, ConciergeBell, Cpu, Ellipsis, ExternalLink, ListTree, LogOut, RotateCcw, ShieldAlert, Shrink, Square } from "lucide-react"
+import { AlertTriangle, ArrowLeft, ArrowRightLeft, BookOpen, Check, ChevronDown, ClipboardCheck, ConciergeBell, Cpu, Ellipsis, ExternalLink, ListTree, LogOut, RotateCcw, ShieldAlert, Shrink, Square } from "lucide-react"
 import { toast } from "sonner"
 
 import { api } from "@/components/room/api"
@@ -289,12 +289,40 @@ export type DeputyPassItem = {
   at: number
   why: string
   checkName?: string
+  ownerName?: string
+  checkState?: string
 }
 
 const DEPUTY_CHANGED_EVENT = "bench-deputy-changed"
+const MONTH_DAY_CLOCK = new Intl.DateTimeFormat("zh-CN", {
+  month: "2-digit",
+  day: "2-digit",
+  hour: "2-digit",
+  minute: "2-digit",
+})
+
+export function notifyDeputyChanged() {
+  if (typeof window !== "undefined") {
+    window.dispatchEvent(new Event(DEPUTY_CHANGED_EVENT))
+  }
+}
+
+function passDateClock(ts: number): string {
+  const date = new Date(ts)
+  const now = new Date()
+  if (
+    date.getFullYear() === now.getFullYear() &&
+    date.getMonth() === now.getMonth() &&
+    date.getDate() === now.getDate()
+  ) {
+    return `今天 ${clock(ts)}`
+  }
+  return MONTH_DAY_CLOCK.format(date).replace(/\//g, "-")
+}
 
 export function useDeputyToday(refreshKey: string) {
   const [passes, setPasses] = useState<DeputyPassItem[]>([])
+  const [issues, setIssues] = useState<DeputyPassItem[]>([])
   const [busyId, setBusyId] = useState<string | null>(null)
   const [bump, setBump] = useState(0)
 
@@ -308,13 +336,17 @@ export function useDeputyToday(refreshKey: string) {
     let live = true
     const start = new Date()
     start.setHours(0, 0, 0, 0)
-    api<{ passes?: DeputyPassItem[] }>(`/api/v1/deputy?since=${start.getTime()}`)
+    api<{ passes?: DeputyPassItem[]; issues?: DeputyPassItem[] }>(`/api/v1/deputy?since=${start.getTime()}`)
       .then((res) => {
         if (!live) return
         setPasses(Array.isArray(res.passes) ? res.passes : [])
+        setIssues(Array.isArray(res.issues) ? res.issues : [])
       })
       .catch(() => {
-        if (live) setPasses([])
+        if (live) {
+          setPasses([])
+          setIssues([])
+        }
       })
     return () => {
       live = false
@@ -335,8 +367,10 @@ export function useDeputyToday(refreshKey: string) {
           taskId: item.taskId,
         }),
       })
-      setPasses((prev) => prev.filter((p) => !(p.project === item.project && p.taskId === item.taskId)))
-      window.dispatchEvent(new Event(DEPUTY_CHANGED_EVENT))
+      const same = (p: DeputyPassItem) => !(p.project === item.project && p.taskId === item.taskId)
+      setPasses((prev) => prev.filter(same))
+      setIssues((prev) => prev.filter(same))
+      notifyDeputyChanged()
       toast.success("已重开，回到等你验收")
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "重开失败")
@@ -345,17 +379,19 @@ export function useDeputyToday(refreshKey: string) {
     }
   }
 
-  return { passes, busyId, reopen }
+  return { passes, issues, busyId, reopen }
 }
 
 export function DeputyPassList({
   passes,
   busyId,
   onReopen,
+  showDate = false,
 }: {
   passes: DeputyPassItem[]
   busyId: string | null
   onReopen: (item: DeputyPassItem) => void
+  showDate?: boolean
 }) {
   return (
     <ul className="divide-y divide-foreground/[0.06]">
@@ -371,7 +407,12 @@ export function DeputyPassList({
                 <span className="font-medium text-foreground" title={item.taskId}>
                   {item.title}
                 </span>
-                <span className="text-[0.6875rem] text-muted-foreground">· {clock(item.at)}</span>
+                {item.ownerName ? (
+                  <span className="text-[0.6875rem] text-muted-foreground">· 负责人：{item.ownerName}</span>
+                ) : null}
+                <span className="text-[0.6875rem] text-muted-foreground">
+                  · {showDate ? passDateClock(item.at) : clock(item.at)}
+                </span>
               </div>
               <p className="mt-0.5 text-[0.6875rem] leading-4 text-muted-foreground">
                 {plainCheckText(item.why)}
@@ -393,7 +434,7 @@ export function DeputyPassList({
                 size="xs"
                 variant="outline"
                 disabled={busyId === key}
-                title="撤销代签，回到等你验收"
+                title={item.checkState ? "撤销通过，回到等你验收" : "撤销代签，回到等你验收"}
                 onClick={() => onReopen(item)}
               >
                 <RotateCcw className="size-3" />
@@ -408,32 +449,64 @@ export function DeputyPassList({
 }
 
 // Shown at the top of the front-desk chat when the desk has signed off any
-// tasks today (`GET /api/v1/deputy?since=startOfToday`). Hidden when 0.
+// tasks today (`passes`) or the user signed off recent tasks with check issues
+// (`issues`, past 14 days). Hidden when both are 0.
 function DeputyTodayBar({ refreshKey }: { refreshKey: string }) {
-  const { passes, busyId, reopen } = useDeputyToday(refreshKey)
-  const [open, setOpen] = useState(false)
+  const { passes, issues, busyId, reopen } = useDeputyToday(refreshKey)
+  const [openTab, setOpenTab] = useState<"passes" | "issues" | null>(null)
 
-  if (passes.length === 0) return null
+  if (passes.length === 0 && issues.length === 0) return null
+
+  const activeTab =
+    openTab === "passes" && passes.length > 0
+      ? "passes"
+      : openTab === "issues" && issues.length > 0
+        ? "issues"
+        : null
 
   return (
     <div data-deputy-today className="mx-auto w-full max-w-3xl px-4 pb-1.5 md:px-6">
-      <div className="rounded-xl border border-emerald-500/25 bg-emerald-500/[0.06] px-3 py-1.5 text-xs">
-        <button
-          type="button"
-          aria-expanded={open}
-          onClick={() => setOpen((v) => !v)}
-          className="flex w-full items-center justify-between gap-2 text-left font-medium text-emerald-800 hover:opacity-85 dark:text-emerald-200"
-        >
-          <span className="inline-flex items-center gap-1.5">
-            <Check className="size-3.5 shrink-0" />
-            今天代你通过 {passes.length} 件
-          </span>
-          <ChevronDown className={`size-3.5 shrink-0 transition-transform ${open ? "rotate-180" : ""}`} />
-        </button>
+      <div className="flex flex-col gap-1.5">
+        <div className="flex flex-wrap items-center gap-1.5">
+          {passes.length > 0 ? (
+            <button
+              type="button"
+              data-deputy-tab="passes"
+              aria-expanded={activeTab === "passes"}
+              onClick={() => setOpenTab((v) => (v === "passes" ? null : "passes"))}
+              className="inline-flex items-center gap-1.5 rounded-xl border border-emerald-500/25 bg-emerald-500/[0.06] px-3 py-1.5 text-xs font-medium text-emerald-800 hover:opacity-85 dark:text-emerald-200"
+            >
+              <Check className="size-3.5 shrink-0" />
+              今天代你通过 {passes.length} 件
+              <ChevronDown className={`size-3.5 shrink-0 transition-transform ${activeTab === "passes" ? "rotate-180" : ""}`} />
+            </button>
+          ) : null}
 
-        {open ? (
-          <div className="mt-2 border-t border-foreground/[0.06] pt-1.5">
+          {issues.length > 0 ? (
+            <button
+              type="button"
+              data-deputy-tab="issues"
+              aria-expanded={activeTab === "issues"}
+              onClick={() => setOpenTab((v) => (v === "issues" ? null : "issues"))}
+              className="inline-flex items-center gap-1.5 rounded-xl border border-amber-500/30 bg-amber-500/[0.08] px-3 py-1.5 text-xs font-medium text-amber-800 hover:opacity-85 dark:text-amber-300"
+            >
+              <AlertTriangle className="size-3.5 shrink-0" />
+              带着问题收下的 {issues.length} 件
+              <ChevronDown className={`size-3.5 shrink-0 transition-transform ${activeTab === "issues" ? "rotate-180" : ""}`} />
+            </button>
+          ) : null}
+        </div>
+
+        {activeTab === "passes" ? (
+          <div className="rounded-xl border border-emerald-500/25 bg-emerald-500/[0.06] px-3 py-2 text-xs">
             <DeputyPassList passes={passes} busyId={busyId} onReopen={(item) => void reopen(item)} />
+          </div>
+        ) : activeTab === "issues" ? (
+          <div data-deputy-issue-list className="rounded-xl border border-amber-500/30 bg-amber-500/[0.08] px-3 py-2 text-xs">
+            <p className="mb-1.5 text-[0.6875rem] text-amber-800/80 dark:text-amber-200/80">
+              最近 14 天检查没过、没查成或没检查时通过的待办，有问题可重开：
+            </p>
+            <DeputyPassList passes={issues} busyId={busyId} showDate onReopen={(item) => void reopen(item)} />
           </div>
         ) : null}
       </div>

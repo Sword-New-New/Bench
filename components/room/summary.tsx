@@ -187,7 +187,7 @@ export function SummaryNudge({
     window.addEventListener(SUMMARY_DONE_DEMO, play)
     return () => window.removeEventListener(SUMMARY_DONE_DEMO, play)
   }, [demoName])
-  const due = room.summaryDue && now > 0 && now >= until
+  const due = room.summaryDue && !room.summaryHeld && now > 0 && now >= until
   const writers = room.agents.filter((agent) => agent.callable && !agent.demo)
   const { count, chars } = room.sinceSummary
   const snooze = () => {

@@ -572,6 +572,12 @@ function CheckLine({ check, onOpenRun }: { check: TaskCheck; onOpenRun?: (runId:
           </button>
         ) : null}
       </div>
+      {check.prev ? (
+        <p className="mt-0.5 line-clamp-2 text-muted-foreground">
+          改过以后再查。上一次{CHECK_TEXT[check.prev.state]}
+          {check.prev.note ? `：${plainCheckText(check.prev.note).replace(/^[\s#*>-]+/, "").replace(/\*\*/g, "")}` : ""}
+        </p>
+      ) : null}
       {folds && open ? (
         <div className="mt-1 max-h-48 space-y-1 overflow-y-auto whitespace-pre-wrap text-foreground/80">
           {check.note ? <p>{plainCheckText(check.note)}</p> : null}

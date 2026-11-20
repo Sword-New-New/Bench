@@ -5,8 +5,10 @@ import { Check, ChevronDown, ClipboardCheck, ExternalLink, X } from "lucide-reac
 import { toast } from "sonner"
 
 import { api } from "@/components/room/api"
+import { notifyDeputyChanged } from "@/components/room/front"
 import { openProjectAt } from "@/components/room/refs"
 import { Button } from "@/components/ui/button"
+import { batchCounts, batchRemainingText, sortBatchItems } from "@/lib/review"
 import { clock, plainCheckText } from "@/lib/status"
 import type { Message, RelayBatchItem, RelayDraft, RoomSnapshot, SignLane, Task } from "@/lib/types"
 
@@ -16,9 +18,9 @@ import type { Message, RelayBatchItem, RelayDraft, RoomSnapshot, SignLane, Task 
 //   - batch（「可以整批通过」）: checkbox per row (all checked by default), one line
 //     from the desk, expandable checker basis, and a single 「这 N 件都通过」 button.
 //   - look（「你看一眼」）: one line, 「通过」 and 「去看」 per row.
-//   - you（「只能你签」）: the reason why only the user may sign, and 「去看」.
-// Settled rows show their outcome in place so the card can be worked through in
-// several clicks; any group with more than 6 rows folds the tail first.
+//   - you（「只能你签」）: the reason why only the user may sign, 「通过」 and 「去看」 per row.
+// Settled rows sink below unsettled rows inside each lane (and settled lanes sink below
+// unsettled ones), showing what remains in plain words until the whole list is done.
 
 const FOLD_LIMIT = 6
 
@@ -113,10 +115,16 @@ export function BatchCard({ message }: { message: Message }) {
   if (!localRelay || localRelay.kind !== "batch") return null
 
   const byLane: Record<SignLane, RelayBatchItem[]> = {
-    batch: items.filter((item) => item.lane === "batch"),
-    look: items.filter((item) => item.lane === "look"),
-    you: items.filter((item) => item.lane === "you"),
+    batch: sortBatchItems(items.filter((item) => item.lane === "batch")),
+    look: sortBatchItems(items.filter((item) => item.lane === "look")),
+    you: sortBatchItems(items.filter((item) => item.lane === "you")),
   }
+
+  const orderedLanes = (["batch", "look", "you"] as const).filter((lane) => byLane[lane].length > 0)
+  const sortedLanes: SignLane[] = [
+    ...orderedLanes.filter((lane) => byLane[lane].some((item) => !item.state)),
+    ...orderedLanes.filter((lane) => byLane[lane].every((item) => Boolean(item.state))),
+  ]
 
   const openBatchItems = byLane.batch.filter((item) => !item.state)
   const checkedBatchIds = openBatchItems
@@ -163,20 +171,42 @@ export function BatchCard({ message }: { message: Message }) {
           taskIds,
         }),
       })
-      if (res?.relay) {
-        setOverrideRelay({ base: relay, next: res.relay })
-      } else if (localRelay) {
-        setOverrideRelay({
-          base: relay,
-          next: {
-            ...localRelay,
-            items: localRelay.items?.map((item) =>
-              taskIds.includes(item.taskId) && !item.state ? { ...item, state: "passed" } : item,
-            ),
-          },
-        })
+      const nextRelay: RelayDraft = res?.relay ?? {
+        ...localRelay,
+        items: localRelay.items?.map((item) =>
+          taskIds.includes(item.taskId) && !item.state ? { ...item, state: "passed" } : item,
+        ),
       }
-      toast.success(taskIds.length === 1 ? "验收通过" : `已通过 ${taskIds.length} 件`)
+      setOverrideRelay({ base: relay, next: nextRelay })
+      notifyDeputyChanged()
+
+      const prevState = new Map(items.map((item) => [`${item.project}:${item.taskId}`, item.state]))
+      const nextItems = nextRelay.items ?? []
+      let passedNow = 0
+      let skippedNow = 0
+      for (const item of nextItems) {
+        if (!prevState.get(`${item.project}:${item.taskId}`) && item.state) {
+          if (item.state === "passed") passedNow += 1
+          else if (item.state === "skipped") skippedNow += 1
+        }
+      }
+      const nextCounts = batchCounts(nextItems)
+      const remText = batchRemainingText(nextItems)
+      const actionPrefix =
+        passedNow > 0
+          ? passedNow === 1 && taskIds.length === 1
+            ? "验收通过"
+            : `已通过 ${passedNow} 件`
+          : skippedNow > 0
+            ? `${skippedNow} 件已处理过`
+            : "已更新"
+      if (nextCounts.remTotal === 0) {
+        toast.success(passedNow > 0 ? `${actionPrefix}，这批都处理完了` : "这批都处理完了")
+      } else if (remText) {
+        toast.success(`${actionPrefix}，${remText}`)
+      } else {
+        toast.success(actionPrefix)
+      }
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "没成功")
     } finally {
@@ -184,8 +214,9 @@ export function BatchCard({ message }: { message: Message }) {
     }
   }
 
-  const totalCount = items.length
-  const passedCount = items.filter((item) => item.state === "passed").length
+  const counts = batchCounts(items)
+  const remText = batchRemainingText(items)
+  const passedCount = counts.passed
 
   // Closed without being finished: a newer list took over what still waited
   // on it (lib/front-relay.ts carryOpenBatches). One line, so the chat holds
@@ -217,15 +248,29 @@ export function BatchCard({ message }: { message: Message }) {
           验收清单
         </span>
         <span>
-          共 {totalCount} 件{passedCount > 0 ? ` · 已通过 ${passedCount} 件` : ""}
+          共 {counts.total} 件{counts.passed > 0 ? ` · 已通过 ${counts.passed} 件` : ""}
         </span>
+        {counts.skipped > 0 ? <span>· 已跳过 {counts.skipped} 件</span> : null}
         {localRelay.settledAt ? <span>· {clock(localRelay.settledAt)}</span> : null}
       </div>
+
+      {remText ? (
+        <p
+          data-batch-remaining
+          className={`mt-1.5 text-xs font-medium ${
+            counts.remTotal === 0
+              ? "text-emerald-700 dark:text-emerald-300"
+              : "text-amber-800 dark:text-amber-300"
+          }`}
+        >
+          {remText}
+        </p>
+      ) : null}
 
       {localRelay.why ? <p className="mt-1.5 text-xs leading-5 text-muted-foreground">{localRelay.why}</p> : null}
 
       <div className="mt-3 space-y-3">
-        {(["batch", "look", "you"] as const).map((lane) => {
+        {sortedLanes.map((lane) => {
           const list = byLane[lane]
           if (list.length === 0) return null
           const meta = GROUP_META[lane]
@@ -287,9 +332,14 @@ export function BatchCard({ message }: { message: Message }) {
                           </div>
 
                           {lane === "you" ? (
-                            <p className="mt-0.5 text-xs leading-5 text-amber-800 dark:text-amber-300">
-                              {whyText || item.line || "需本人确认"}
-                            </p>
+                            <>
+                              <p className="mt-0.5 text-xs leading-5 text-amber-800 dark:text-amber-300">
+                                {whyText || item.line || "需本人确认"}
+                              </p>
+                              {item.line && whyText && item.line !== whyText ? (
+                                <p className="mt-0.5 text-[0.6875rem] leading-4 text-muted-foreground">{item.line}</p>
+                              ) : null}
+                            </>
                           ) : item.line ? (
                             <p className="mt-0.5 text-xs leading-5 text-muted-foreground">{item.line}</p>
                           ) : null}
@@ -325,7 +375,7 @@ export function BatchCard({ message }: { message: Message }) {
                         </div>
 
                         <div className="flex shrink-0 items-center gap-1">
-                          {lane === "batch" && basis ? (
+                          {(lane === "batch" || lane === "you") && basis ? (
                             <button
                               type="button"
                               onClick={() => toggleBasis(rowKey)}
@@ -336,7 +386,7 @@ export function BatchCard({ message }: { message: Message }) {
                             </button>
                           ) : null}
 
-                          {lane === "look" && !settled ? (
+                          {(lane === "look" || lane === "you") && !settled ? (
                             <Button
                               type="button"
                               size="xs"

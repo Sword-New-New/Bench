@@ -812,7 +812,7 @@ export function dbLoadTalkPage(
   projectId: string,
   beforeSeq?: number,
   limit = 30,
-): { messages: Message[]; hasMore: boolean } {
+): { messages: Message[]; hasMore: boolean; olderCount: number } {
   const rows =
     beforeSeq !== undefined && beforeSeq > 0
       ? stmt(
@@ -827,7 +827,16 @@ export function dbLoadTalkPage(
     .map(rowToMessage)
     .filter((m): m is Message => m !== null && !m.recalled)
     .reverse()
-  return { messages, hasMore }
+  const oldestSeq = messages[0]?.seq
+  const olderCount =
+    hasMore && oldestSeq !== undefined
+      ? Number(
+          stmt(
+            "SELECT COUNT(*) AS cnt FROM messages WHERE project_id = ? AND kind != 'system' AND recalled_at IS NULL AND seq < ?",
+          ).get(projectId, oldestSeq)?.cnt ?? 0,
+        )
+      : 0
+  return { messages, hasMore, olderCount }
 }
 
 export function dbFindMessageByRunField(
@@ -1226,6 +1235,26 @@ export function dbSaveLane(
       ins.run(agentId, projectId, item.id, item.line, now)
     }
   })
+}
+
+export function backupsDir() {
+  return path.join(dataDir(), "backups")
+}
+
+export function dbSourceCounts(): { projects: number; messages: number; tasks: number } {
+  const db = getDb()
+  const projects = Number((db.prepare("SELECT COUNT(*) AS c FROM projects").get() as { c?: number } | undefined)?.c ?? 0)
+  const messages = Number((db.prepare("SELECT COUNT(*) AS c FROM messages").get() as { c?: number } | undefined)?.c ?? 0)
+  const tasks = Number((db.prepare("SELECT COUNT(*) AS c FROM tasks").get() as { c?: number } | undefined)?.c ?? 0)
+  return { projects, messages, tasks }
+}
+
+export function dbVacuumInto(destFile: string) {
+  const db = getDb()
+  mkdirSync(path.dirname(destFile), { recursive: true, mode: 0o700 })
+  if (existsSync(destFile)) rmSync(destFile, { force: true })
+  const escaped = destFile.replace(/'/g, "''")
+  db.exec(`VACUUM INTO '${escaped}'`)
 }
 
 export type { SeatBinding }

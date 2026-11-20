@@ -38,7 +38,7 @@ import {
   seatMarkdownPath,
   writeSeatMarkdown,
 } from "@/lib/db"
-import { readLaneSnapshot } from "@/lib/lane-state"
+import { readLaneSnapshot, summaryHeldFor } from "@/lib/lane-state"
 import { mediaKind } from "@/lib/media"
 import { ApiError, asRecord, asString } from "@/lib/http"
 import { hasFull, permitsFor } from "@/lib/permits"
@@ -47,8 +47,9 @@ import { activeRun } from "@/lib/runs"
 import { seatState } from "@/lib/status"
 import { owedTasks, owesOf } from "@/lib/owes"
 import { terminalOpen } from "@/lib/terminal-state"
-import { awaitingReview, isReviewStep } from "@/lib/review"
+import { awaitingReview, checkStaleMs, isRecentIssuePass, isReviewStep, reviewAsked, reviewIssueOf } from "@/lib/review"
 import { firstLine, plainFault, plainRefusal } from "@/lib/plain"
+import { staleAskDays } from "@/lib/waiting-shared"
 import { gistOf, mentionedAgentIds, mentionPattern, withAttachments } from "@/lib/text"
 import type {
   Ask,
@@ -1106,6 +1107,12 @@ export function queryDoneTasks(opts: { before?: string | number; limit?: number 
   }
 }
 
+// Read-only lookup across all tasks in the current room (bypassing snapshotTasks'
+// 48h done-task cutoff) for tasks signed off despite check issues since `since`.
+export function queryRecentIssueTasks(since: number): Task[] {
+  return room().state.tasks.filter((t) => isRecentIssuePass(t, since))
+}
+
 export function getTaskById(taskId: string): Task {
   const clean = taskId.trim()
   const found = room().state.tasks.find((t) => t.id === clean)
@@ -1142,6 +1149,7 @@ export function snapshot(): RoomSnapshot {
     summary: state.summary ?? null,
     sinceSummary: { count: talk.length, chars },
     summaryDue: chars >= CATCH_UP_CHARS,
+    summaryHeld: chars >= CATCH_UP_CHARS && summaryHeldFor(current.id, summaryBase()),
     summaryWriter: current.summaryJob?.agentId ?? null,
     relayClosed: state.relayClosed === true,
     permits: permitsFor(current.id),
@@ -1150,6 +1158,11 @@ export function snapshot(): RoomSnapshot {
     limitResume: limitResume(),
     autoAccept: autoAcceptSince() > 0,
   }
+}
+
+// Where the talk a summary would cover starts: the last summary or skip.
+export function summaryBaseSeq() {
+  return summaryBase()
 }
 
 function summaryBase() {
@@ -2489,6 +2502,13 @@ function answerAsk(questionId: string, reply: Message) {
   const hot = current.state.messages.find((item) => item.id === questionId)
   const question = hot ?? dbGetMessage(current.id, questionId) ?? undefined
   if (!question?.ask || question.ask.state !== "open") return
+  // 「几天前的提问」: told to the asker in front of the answer (so it reads the
+  // answer for what it is), not blocked here.
+  const days = staleAskDays(question.createdAt, reply.createdAt)
+  if (days > 0) {
+    reply.text = `（这是 ${days} 天前的提问，先核实现在还作不作数）${reply.text}`
+    dbPutMessage(current.id, reply)
+  }
   question.ask = {
     ...question.ask,
     state: "answered",
@@ -2728,6 +2748,20 @@ export function postLimited(text: string, limited: LimitedRun) {
   return message
 }
 
+function settleOlderLimited(messages: Message[], head: Message) {
+  const current = room()
+  if (!head.limited) return
+  for (const message of messages) {
+    if (!message.limited || message === head) continue
+    if (message.limited.agentId !== head.limited.agentId || message.createdAt >= head.createdAt) continue
+    if (message.limited.state !== "open" && message.limited.state !== "failed") continue
+    message.limited.state = "dismissed"
+    message.limited.at = undefined
+    message.limited.note = "同一个 AI 更新的一张已经处理了"
+    dbPutMessage(current.id, message)
+  }
+}
+
 // Where the card has got to; false if it is no longer in this room.
 export function markLimited(runId: string, patch: Partial<LimitedRun>) {
   const current = room()
@@ -2735,6 +2769,10 @@ export function markLimited(runId: string, patch: Partial<LimitedRun>) {
     if (message.limited?.runId !== runId) continue
     Object.assign(message.limited, patch)
     dbPutMessage(current.id, message)
+    // Dealing with a card (woken, switched to another client, dismissed,
+    // scheduled) deals with the older open ones of the same seat: the page
+    // draws only the newest of them (lib/waiting-shared.ts groupLimited).
+    if (patch.state !== undefined && patch.state !== "open" && patch.state !== "failed") settleOlderLimited(current.state.messages, message)
     bumpRev()
     commit()
     return true
@@ -3018,7 +3056,11 @@ export function deputyReopen(taskId: string) {
   const current = room()
   const task = current.state.tasks.find((item) => item.id === taskId)
   if (!task) throw new ApiError(404, "没有这条任务")
-  if (task.review?.state !== "passed" || !task.review.deputy) throw new ApiError(400, "只有前台代签通过的待办能重开")
+  const hasDeputy = Boolean(task.review?.deputy)
+  const hasIssue = Boolean(task.review?.issue)
+  if (task.review?.state !== "passed" || (!hasDeputy && !hasIssue)) {
+    throw new ApiError(400, "只有前台代签通过或带着问题收下的待办能重开")
+  }
   const now = Date.now()
   const was = task.review
   // Back to waiting, as a fresh ask: the old check predates it, so the desk
@@ -3028,23 +3070,48 @@ export function deputyReopen(taskId: string) {
   // `reopened` keeps it with the user until then (signLane): a check queued
   // for it meanwhile (the desk's bench_check takes anything waiting without a
   // verdict) would otherwise pass it again with nothing changed.
-  task.review = { state: "waiting", at: now, by: userName(), note: `重开（前台 ${was.deputy?.seatName ?? ""} 代签过）`, reopened: true }
+  task.review = {
+    state: "waiting",
+    at: now,
+    by: userName(),
+    note: hasDeputy
+      ? `重开（前台 ${was.deputy?.seatName ?? ""} 代签过）`
+      : `重开（曾带着问题收下：${was.issue?.summary ?? ""}）`,
+    reopened: true,
+  }
   delete task.check
   for (const step of task.steps ?? []) {
     if (isReviewStep(step)) moveStep(step, "doing", userName(), now, "重开")
   }
   task.status = "doing"
-  task.history.push({ at: now, actor: userName(), action: "重开", note: `撤回前台代签：${was.deputy?.why ?? ""}` })
+  task.history.push({
+    at: now,
+    actor: userName(),
+    action: "重开",
+    note: hasDeputy
+      ? `撤回前台代签：${was.deputy?.why ?? ""}`
+      : `撤回带着问题收下：${was.issue?.summary ?? ""}`,
+  })
   const message = appendMessage({
     kind: "system",
     authorId: "room",
     authorName: "并坐",
     authorColor: "#8a8175",
     authorDemo: false,
-    text: clip(`${userName()} 重开了前台代签的「${task.title}」，回到等你验收`, 500),
+    text: clip(
+      hasDeputy
+        ? `${userName()} 重开了前台代签的「${task.title}」，回到等你验收`
+        : `${userName()} 重开了带着问题收下的「${task.title}」，回到等你验收`,
+      500,
+    ),
     mentions: [],
     taskId: task.id,
-    verdict: { taskId: task.id, state: "reopened", ownerId: task.ownerId ?? undefined, deputy: true },
+    verdict: {
+      taskId: task.id,
+      state: "reopened",
+      ownerId: task.ownerId ?? undefined,
+      ...(hasDeputy ? { deputy: true as const } : {}),
+    },
   })
   task.updatedAt = now
   task.seq = message.seq
@@ -3260,16 +3327,33 @@ export function actOnTask(input: unknown) {
     task.history.push({ at: now, actor: actor.name, action: "请验收", note: note || `做完了，等 ${userName()} 验收` })
     // 「请验收时先复验」: once per request. Asking again while it still waits
     // keeps the check there is; after a send-back it is checked anew.
-    if (!(again && task.check)) {
+    // Except after a check that found problems or could not tell
+    // (t_a58c8546): the owner fixed them and asks again, so it is checked
+    // again, at most RECHECK_MAX times, with what the last one said.
+    const before = task.check
+    const recheck = again && before && (before.state === "failed" || before.state === "unverified") && (before.round ?? 0) < RECHECK_MAX
+    if (!(again && before) || recheck) {
       const prepared = prepareTaskCheck(task, now)
-      task.check = prepared.check
+      if (recheck && before && (before.state === "failed" || before.state === "unverified")) {
+        if (prepared.check) {
+          prepared.check.round = (before.round ?? 0) + 1
+          prepared.check.prev = { state: before.state, name: before.name, at: before.at, note: before.note?.slice(0, 400) }
+        }
+        // Checking was turned off meanwhile: the verdict there is stays.
+        if (prepared.configured) task.check = prepared.check
+      } else {
+        task.check = prepared.check
+      }
       wanted = prepared.wanted
     }
   } else if (action === "check") {
     if (actor.type !== "human") throw new ApiError(403, `补跑复验只有 ${userName()} 能点`)
     if (!awaitingReview(task)) throw new ApiError(400, "这条待办现在不在等验收")
-    // Already queued or running: never enqueue a duplicate check.
-    if (task.check && (task.check.state === "queued" || task.check.state === "running")) {
+    if (!reviewAsked(task)) throw new ApiError(400, "负责人还没请验收，等它写了怎么看效果再检查")
+    // Already queued or running: never enqueue a duplicate check, unless it
+    // has sat in the queue too long (then it goes again, to a new round).
+    const staleQueued = task.check?.state === "queued" && now - (task.check.queuedAt ?? task.check.at) >= checkStaleMs()
+    if (task.check && (task.check.state === "queued" || task.check.state === "running") && !staleQueued) {
       return { task, queued: false }
     }
     const checkAt = Math.max(now, (task.check?.at ?? 0) + 1, task.review?.at ?? 0)
@@ -3288,12 +3372,21 @@ export function actOnTask(input: unknown) {
     if (actor.type !== "human") throw new ApiError(403, `验收只有 ${userName()} 能点：做完了用 review 请他验收`)
     const pass = action === "pass"
     if (!pass && !note) throw new ApiError(400, "打回要写一句原因，负责人照着改")
-    task.review = { state: pass ? "passed" : "rejected", at: now, by: actor.name, note: note || undefined }
+    const issue = pass ? reviewIssueOf(task) : undefined
+    task.review = {
+      state: pass ? "passed" : "rejected",
+      at: now,
+      by: actor.name,
+      note: note || undefined,
+      ...(issue ? { issue } : {}),
+    }
     for (const step of task.steps ?? []) {
       if (isReviewStep(step)) moveStep(step, pass ? "done" : "todo", actor.name, now, note || (pass ? "验收通过" : undefined))
     }
     task.status = pass ? "done" : "doing"
-    task.history.push({ at: now, actor: actor.name, action: pass ? "验收通过" : "打回", note })
+    const issueNote = issue ? `带着问题收下：${issue.checkName ? `${issue.checkName} · ` : ""}${issue.summary}` : ""
+    const historyNote = issueNote ? (note ? `${issueNote}（${note}）` : issueNote) : note
+    task.history.push({ at: now, actor: actor.name, action: pass ? "验收通过" : "打回", note: historyNote })
     // Said in the room as the user. Sending it back calls the owner, who wakes
     // and works from the reason; passing it calls nobody.
     room().state.relayClosed = undefined
@@ -3374,6 +3467,10 @@ export function actOnTask(input: unknown) {
   return { task }
 }
 
+// How many times a check that found problems is run again when the owner
+// asks again without a send-back; past it the verdict stays for the user.
+const RECHECK_MAX = 2
+
 function prepareTaskCheck(
   task: Task,
   at: number,
@@ -3407,6 +3504,20 @@ function prepareTaskCheck(
     }
   }
   return { configured: false }
+}
+
+// The soonest a usage limit now in force resets (limit cards in any room),
+// for checks that found every seat out of quota: they wait for it once.
+export function earliestLimitReset(now = Date.now()): number | undefined {
+  let soonest: number | undefined
+  for (const r of runtime().rooms.values()) {
+    for (const msg of r.state.messages) {
+      const lim = msg.limited
+      if (!lim || (lim.state !== "open" && lim.state !== "scheduled") || !lim.resetsAt || lim.resetsAt <= now) continue
+      if (soonest === undefined || lim.resetsAt < soonest) soonest = lim.resetsAt
+    }
+  }
+  return soonest
 }
 
 // Client kinds across all rooms that currently have an unresolved, unexpired
@@ -3448,9 +3559,18 @@ export function runBatchCheck(projectRef?: string): { queued: number; skipped: {
       const current = room()
       for (const task of current.state.tasks) {
         if (!awaitingReview(task)) continue
+        // Only the sign-off step left, never asked for: nothing to check yet
+        // (the room asks the owner to, lib/continue.ts).
+        if (!reviewAsked(task)) {
+          skipped.push({ taskId: task.id, why: "负责人还没请验收" })
+          continue
+        }
         const curState = task.check?.state
-        // Already queued, running, or has a verdict (passed / failed / unverified): leave alone.
-        if (curState && curState !== "skipped" && curState !== "error") continue
+        // Running, or has a verdict (passed / failed / unverified): leave alone.
+        // Queued: only once it has waited too long, then it goes again (the
+        // seat it waits on may never get to it).
+        const stale = curState === "queued" && Date.now() - (task.check?.queuedAt ?? task.check?.at ?? 0) >= checkStaleMs()
+        if (curState && curState !== "skipped" && curState !== "error" && !stale) continue
 
         const now = Date.now()
         const checkAt = Math.max(now, (task.check?.at ?? 0) + 1, task.review?.at ?? 0)
@@ -3459,7 +3579,11 @@ export function runBatchCheck(projectRef?: string): { queued: number; skipped: {
           skipped.push({ taskId: task.id, why: `「${proj.name}」没开复验` })
           continue
         }
-        task.check = prepared.check
+        // A recheck after a failed check (t_a58c8546) that did not run, was
+        // skipped or waited too long keeps what the check before said, so it
+        // still lands with the user and is not passed for them.
+        const carried = task.check?.prev ? { prev: task.check.prev, round: task.check.round } : null
+        task.check = carried && prepared.check ? { ...prepared.check, ...carried } : prepared.check
         task.updatedAt = now
         task.seq = nextSeq()
         dbPutTask(current.id, task)

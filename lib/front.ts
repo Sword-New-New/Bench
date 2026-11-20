@@ -2,14 +2,16 @@ import { dbCountOpenAsks, dbLoadTalkPage, dbSetMeta } from "@/lib/db"
 import { ApiError, asRecord, asString } from "@/lib/http"
 import { stepOf } from "@/lib/owes"
 import { enqueuePushEvent } from "@/lib/push"
-import { awaitingReview, signLane } from "@/lib/review"
+import { awaitingReview, ISSUE_WINDOW_MS, signLane } from "@/lib/review"
 import {
+  agentState,
   autoAcceptSince,
   FRONT_NOTICE_KEY,
   readFrontNotice,
   brokenCallsInRoom,
   inProject,
   listProjects,
+  queryRecentIssueTasks,
   requireFrontSeat,
   resolveProjectInfo,
   snapshot,
@@ -108,12 +110,40 @@ function formatCheckBrief(check: TaskCheck | undefined, withNote = false): strin
 const OVERVIEW_SEAT_COMPACT_THRESHOLD = 4
 const OVERVIEW_SUMMARY_CHARS = 240
 const OVERVIEW_TEXT_BUDGET = 4500
+const PEEK_TEXT_BUDGET = 8000
+const PEEK_SUMMARY_COMPACT_CHARS = 600
+const PEEK_TALK_COMPACT_LIMIT = 10
+const PEEK_TALK_COMPACT_LINE_CHARS = 200
 const PEEK_TALK_LIMIT = 30
+const STALE_DOING_MS = 24 * 60 * 60_000
+
+type PeekPart = "summary" | "tasks" | "seats" | "talk"
+const PEEK_PARTS = new Set<PeekPart>(["summary", "tasks", "seats", "talk"])
 
 function flatClip(value: string | undefined, max: number): string {
   const clean = (value ?? "").replace(/\s+/g, " ").trim()
   if (!clean) return ""
   return clean.length > max ? `${clean.slice(0, max)}…` : clean
+}
+
+function blockClip(value: string | undefined, max: number): { text: string; clipped: boolean } {
+  const clean = (value ?? "").trim()
+  if (!clean) return { text: "", clipped: false }
+  if (clean.length <= max) return { text: clean, clipped: false }
+  return { text: `${clean.slice(0, max)}…`, clipped: true }
+}
+
+// Idle or offline seats whose status note is older than one day don't show that
+// stale note in overview or peek (left rail keeps showing it as before).
+function freshDoing(seat: PublicAgent, now: number): string {
+  const text = (seat.doing ?? "").trim()
+  if (!text) return ""
+  if (seat.status === "idle" || seat.status === "offline") {
+    const raw = agentState(seat.id)
+    const at = raw?.statusAt ?? seat.ranUntil ?? seat.createdAt
+    if (at > 0 && now - at >= STALE_DOING_MS) return ""
+  }
+  return text
 }
 
 function formatStamp(at: number | undefined): string {
@@ -152,7 +182,7 @@ function isNotableSeat(
   return false
 }
 
-function formatOverviewSeat(seat: PublicAgent): string {
+function formatOverviewSeat(seat: PublicAgent, now: number): string {
   const parts: string[] = [
     `${seat.name}（${STATUS_LABEL[seat.status] ?? seat.status}${seat.unsure !== undefined ? "·不确定" : ""}）`,
   ]
@@ -166,12 +196,12 @@ function formatOverviewSeat(seat: PublicAgent): string {
   if (seat.retry) {
     parts.push(`重试 ${seat.retry.n}/${seat.retry.of}`)
   }
-  const doing = flatClip(seat.doing, 70)
+  const doing = flatClip(freshDoing(seat, now), 70)
   if (doing) parts.push(doing)
   return `  - ${parts.join(" · ")}`
 }
 
-export function frontOverview(input: unknown) {
+export function frontOverview(input: unknown, now = Date.now()) {
   requireFrontSeat(input)
   const projects = listProjects()
   // Tighter per-project summary cap if there are many rooms, keeping total output well within a few thousand chars.
@@ -181,6 +211,7 @@ export function frontOverview(input: unknown) {
       : OVERVIEW_SUMMARY_CHARS
 
   let user = "用户"
+  const issueSince = now - ISSUE_WINDOW_MS
   const items = projects.map((proj) =>
     inProject(proj.id, () => {
       const snap = snapshot()
@@ -190,6 +221,7 @@ export function frontOverview(input: unknown) {
       const waitingReviewTasks = snap.tasks.filter(awaitingReview)
       const waitingReviews = waitingReviewTasks.length
       const unfinishedTasks = snap.tasks.filter((t) => t.status !== "done").length
+      const issuePasses = proj.front ? 0 : queryRecentIssueTasks(issueSince).length
 
       const askingIds = new Set<string>()
       for (const m of [...(snap.openAsks ?? []), ...snap.messages]) {
@@ -238,35 +270,39 @@ export function frontOverview(input: unknown) {
         signSettings: proj.front
           ? ""
           : signSettings(proj.check, snap.agents.find((seat) => seat.checker)?.name, getWatchedProject(proj.id)?.seatName),
+        issuePasses,
         unfinishedTasks,
         seatTotal: snap.agents.length,
         seats: shownSeats.map((s) => ({
           name: s.name,
           status: s.status,
-          doing: flatClip(s.doing, 90),
+          doing: flatClip(freshDoing(s, now), 90),
           owesCount: owesCountOf(s),
           unsure: s.unsure !== undefined,
         })),
         quietSeatNames: quietSeats.map((s) => s.name),
         summaryHead: summarySnippet,
-        rawShownSeats: shownSeats,
+        seatLines: shownSeats.map((s) => formatOverviewSeat(s, now)),
       }
     }),
   )
+
+  const totalIssuePasses = items.reduce((sum, item) => sum + item.issuePasses, 0)
 
   // Over the budget, the summaries go first: what waits on the user in every
   // project matters more to the desk than how each summary starts. Only then
   // is the text cut from the end.
   const render = (withSummary: boolean) => {
     const blocks: string[] = [
-      `并坐全部项目一览（共 ${items.length} 个项目，用户：${user}）${withSummary ? "" : "\n（内容太长，各项目的摘要开头没列，要看用 bench_peek）"}`,
+      `并坐全部项目一览（共 ${items.length} 个项目，用户：${user}｜近 14 天带着问题收下：${totalIssuePasses} 件）${withSummary ? "" : "\n（内容太长，各项目的摘要开头没列，要看用 bench_peek）"}`,
     ]
     for (const item of items) {
       const tag = item.front ? " [前台]" : ""
       const dirPart = item.dir ? ` · 目录 ${item.dir}` : ""
+      const issuePart = item.issuePasses > 0 ? ` ｜ 带着问题收下 ${item.issuePasses} 件` : ""
       const lines: string[] = [
         `\n■ ${item.name}（${item.id}）${tag}${dirPart}`,
-        `  最后动静：${item.lastAtText} ｜ 未完待办：${item.unfinishedTasks} ｜ 等 ${user}：提问 ${item.waiting.asks} · 权限 ${item.waiting.permits} · 验收 ${item.waiting.reviews}${item.signSettings ? ` ｜ ${item.signSettings}` : ""}`,
+        `  最后动静：${item.lastAtText} ｜ 未完待办：${item.unfinishedTasks} ｜ 等 ${user}：提问 ${item.waiting.asks} · 权限 ${item.waiting.permits} · 验收 ${item.waiting.reviews}${item.signSettings ? ` ｜ ${item.signSettings}` : ""}${issuePart}`,
       ]
       if (item.waitingReviews.length > 0) {
         for (const r of item.waitingReviews.slice(0, 6)) {
@@ -282,8 +318,8 @@ export function frontOverview(input: unknown) {
       if (item.seatTotal === 0) {
         lines.push("  席位：暂无席位")
       } else {
-        for (const s of item.rawShownSeats) {
-          lines.push(formatOverviewSeat(s))
+        for (const line of item.seatLines) {
+          lines.push(line)
         }
         if (item.quietSeatNames.length > 0) {
           const names =
@@ -309,8 +345,9 @@ export function frontOverview(input: unknown) {
 
   return {
     userName: user,
-    projects: items.map(({ rawShownSeats: _raw, signSettings: _settings, ...pub }) => {
-      void _raw
+    issuePasses: totalIssuePasses,
+    projects: items.map(({ seatLines: _lines, signSettings: _settings, ...pub }) => {
+      void _lines
       void _settings
       return { ...pub, waitingReviews: pub.waitingReviews.map(({ laneText: _text, ...review }) => (void _text, review)) }
     }),
@@ -329,7 +366,7 @@ function collectOpenAsks(openAsks: Message[] | undefined, hotMessages: Message[]
   return list.sort((a, b) => a.seq - b.seq)
 }
 
-function formatTaskDetail(task: Task): string {
+function formatTaskDetail(task: Task, oneLine = false): string {
   const steps = task.steps ?? []
   const doneCount = steps.filter((s) => s.state === "done").length
   const progress = steps.length > 0 ? `步骤 ${doneCount}/${steps.length}` : "无步骤"
@@ -343,10 +380,134 @@ function formatTaskDetail(task: Task): string {
         ? ` · 已打回${task.review.note ? `（原因：${flatClip(task.review.note, 80)}）` : ""}`
         : ""
   const chk = task.check ? ` · 复验[${formatCheckBrief(task.check, true)}]` : ""
-  return `- [${task.id}] ${task.title} ｜ ${TASK_STATUS_LABEL[task.status] ?? task.status} ｜ ${owner} ｜ ${progress}${curText}${rev}${chk}`
+  const title = oneLine ? flatClip(task.title, 50) : task.title.replace(/\s+/g, " ").trim()
+  return `- [${task.id}] ${title} ｜ ${TASK_STATUS_LABEL[task.status] ?? task.status} ｜ ${owner} ｜ ${progress}${curText}${rev}${chk}`
 }
 
-export function frontPeek(input: unknown) {
+function compactTalkLine(message: Message): string {
+  const body = flatClip(message.text, PEEK_TALK_COMPACT_LINE_CHARS)
+  const att = message.attachments?.length ? `${body ? " " : ""}[附件 ${message.attachments.length} 个]` : ""
+  return talkLine({ ...message, text: `${body}${att}`, wakeText: undefined, attachments: undefined }, true)
+}
+
+function paginateEntries(
+  header: string,
+  sectionTitle: string,
+  entries: string[],
+  part: PeekPart,
+  page: number,
+  emptyLabel = "（没有）",
+): { text: string; page: number; totalPages: number; hasMore: boolean } {
+  if (entries.length === 0) {
+    return {
+      text: `${header}\n\n${sectionTitle}\n${emptyLabel}`,
+      page: 1,
+      totalPages: 1,
+      hasMore: false,
+    }
+  }
+  const chunkBudget = Math.max(800, PEEK_TEXT_BUDGET - header.length - sectionTitle.length - 120)
+  const pieces: string[] = []
+  for (const entry of entries) {
+    if (entry.length <= chunkBudget) {
+      pieces.push(entry)
+    } else {
+      for (let i = 0; i < entry.length; i += chunkBudget) {
+        pieces.push(entry.slice(i, i + chunkBudget))
+      }
+    }
+  }
+  const pages: string[][] = []
+  let cur: string[] = []
+  let curLen = 0
+  for (const p of pieces) {
+    const addLen = (cur.length > 0 ? 1 : 0) + p.length
+    if (cur.length > 0 && curLen + addLen > chunkBudget) {
+      pages.push(cur)
+      cur = [p]
+      curLen = p.length
+    } else {
+      cur.push(p)
+      curLen += addLen
+    }
+  }
+  if (cur.length > 0) pages.push(cur)
+
+  const totalPages = pages.length
+  if (page > totalPages) {
+    return {
+      text: `${header}\n\n${sectionTitle}\n（已超出末页：共 ${totalPages} 页）`,
+      page,
+      totalPages,
+      hasMore: false,
+    }
+  }
+  const bodyText = pages[page - 1].join("\n")
+  const hasMore = page < totalPages
+  const footer =
+    totalPages > 1
+      ? `\n（第 ${page}/${totalPages} 页${hasMore ? `；看下一页传 part="${part}", page=${page + 1}` : "，已到末页"}）`
+      : ""
+  return {
+    text: `${header}\n\n${sectionTitle}\n${bodyText}${footer}`,
+    page,
+    totalPages,
+    hasMore,
+  }
+}
+
+function fitPrefixLines(
+  header: string,
+  summarySec: string,
+  waitTitle: string,
+  waitLines: string[],
+  taskTitle: string,
+  taskLines: string[],
+  seatTitle: string,
+  seatLines: string[],
+  brokenTitle: string,
+  callLines: string[],
+  maxBudget: number,
+): string {
+  const build = (w: string[], t: string[], s: string[], c: string[], notes: { w?: string; t?: string; s?: string; c?: string } = {}) => {
+    const parts = [
+      header,
+      summarySec,
+      `\n${waitTitle}\n${w.length > 0 ? w.join("\n") : "（没有）"}${notes.w ?? ""}`,
+      `\n${taskTitle}\n${t.length > 0 ? t.join("\n") : "（没有）"}${notes.t ?? ""}`,
+      `\n${seatTitle}\n${s.length > 0 ? s.join("\n") : "（暂无席位）"}${notes.s ?? ""}`,
+      `\n${brokenTitle}\n${c.length > 0 ? c.join("\n") : "（没有）"}${notes.c ?? ""}`,
+    ]
+    return parts.join("\n")
+  }
+
+  const fullPrefix = build(waitLines, taskLines, seatLines, callLines)
+  if (fullPrefix.length <= maxBudget) return fullPrefix
+
+  // Trim broken calls, then seats, then other unfinished tasks, then waiting items if needed.
+  const cKept = [...callLines]
+  const sKept = [...seatLines]
+  const tKept = [...taskLines]
+  const wKept = [...waitLines]
+  const makeNotes = () => ({
+    c: cKept.length < callLines.length ? `\n…（另有 ${callLines.length - cKept.length} 条未列，传 part="seats" 查看）` : "",
+    s: sKept.length < seatLines.length ? `\n…（另有 ${seatLines.length - sKept.length} 个席位未列，传 part="seats" 查看）` : "",
+    t: tKept.length < taskLines.length ? `\n…（另有 ${taskLines.length - tKept.length} 件待办未列，传 part="tasks" 查看）` : "",
+    w: wKept.length < waitLines.length ? `\n…（另有 ${waitLines.length - wKept.length} 件未列，传 part="tasks" 查看）` : "",
+  })
+
+  for (const arr of [cKept, sKept, tKept, wKept]) {
+    while (arr.length > 0 && build(wKept, tKept, sKept, cKept, makeNotes()).length > maxBudget) {
+      arr.pop()
+    }
+    if (build(wKept, tKept, sKept, cKept, makeNotes()).length <= maxBudget) break
+  }
+
+  const trimmed = build(wKept, tKept, sKept, cKept, makeNotes())
+  return trimmed.length <= maxBudget ? trimmed : `${trimmed.slice(0, Math.max(0, maxBudget - 20))}…`
+}
+
+export function frontPeek(input: unknown, now = Date.now()) {
   requireFrontSeat(input)
   const body = asRecord(input)
   const projectRef = asString(body.project)
@@ -359,6 +520,23 @@ export function frontPeek(input: unknown) {
     }
     beforeSeq = Math.floor(num)
   }
+  const rawPart = asString(body.part)
+  let part: PeekPart | undefined
+  if (rawPart) {
+    if (!PEEK_PARTS.has(rawPart as PeekPart)) {
+      throw new ApiError(400, "part 只能是 summary、tasks、seats 或 talk")
+    }
+    part = rawPart as PeekPart
+  }
+  let page = 1
+  if (body.page !== undefined && body.page !== null && body.page !== "") {
+    const num = Number(body.page)
+    if (!Number.isFinite(num) || num < 1 || !Number.isInteger(num)) {
+      throw new ApiError(400, "page 要是大于等于 1 的整数页码")
+    }
+    page = num
+  }
+  const full = body.full === true
 
   const target = resolveProjectInfo(projectRef)
   return inProject(target.id, () => {
@@ -367,105 +545,76 @@ export function frontPeek(input: unknown) {
     const unfinished = snap.tasks.filter((t) => t.status !== "done")
     const openAsks = collectOpenAsks(snap.openAsks, snap.messages)
     const waitingReviews = snap.tasks.filter(awaitingReview)
+    const reviewIds = new Set(waitingReviews.map((t) => t.id))
+    const otherUnfinished = unfinished.filter((t) => !reviewIds.has(t.id))
     const brokenCalls = brokenCallsInRoom()
-    const talkPage = dbLoadTalkPage(target.id, beforeSeq, PEEK_TALK_LIMIT)
-    const talkLines = talkPage.messages.map((m) => ({
-      id: m.id,
-      seq: m.seq,
-      line: talkLine(m, true),
-    }))
-    const oldestSeq = talkPage.messages[0]?.seq ?? null
 
-    const sections: string[] = []
-    sections.push(
-      `【项目「${target.name}」（${target.id}）】${target.front ? " [前台]" : ""}${target.dir ? ` · 目录：${target.dir}` : ""}${
-        target.front
-          ? ""
-          : ` · ${signSettings(target.check, snap.agents.find((seat) => seat.checker)?.name, getWatchedProject(target.id)?.seatName)}`
-      }`,
-    )
+    const header = `【项目「${target.name}」（${target.id}）】${target.front ? " [前台]" : ""}${target.dir ? ` · 目录：${target.dir}` : ""}${
+      target.front
+        ? ""
+        : ` · ${signSettings(target.check, snap.agents.find((seat) => seat.checker)?.name, getWatchedProject(target.id)?.seatName)}`
+    }`
 
-    // 1. 房间摘要全文
-    if (snap.summary) {
-      sections.push(
-        `\n【房间摘要】（${snap.summary.by} 写于 ${formatStamp(snap.summary.at)}，覆盖至 seq ${snap.summary.upToSeq}）\n${snap.summary.text}`,
-      )
-    } else {
-      sections.push("\n【房间摘要】\n（暂无房间摘要）")
-    }
-
-    // 2. 等用户的每一件
-    const waitLines: string[] = []
-    for (const m of openAsks) {
-      const opts = m.ask?.options?.length
-        ? `\n    选项${m.ask.multi ? "（可多选）" : ""}：${m.ask.options.map((o) => (o.detail ? `${o.label}（${o.detail}）` : o.label)).join(" ｜ ")}`
-        : ""
-      waitLines.push(`- 提问 [${m.id}] ${m.authorName}（${formatStamp(m.createdAt)}）：${m.text.trim()}${opts}`)
-    }
-    for (const p of snap.permits) {
-      const what =
-        p.kind === "full"
-          ? `申请本轮完整权限：${flatClip(p.reason, 200) || "（未填理由）"}`
-          : `工具 ${p.tool ?? ""}：${flatClip(p.input, 200)}`
-      waitLines.push(`- 权限 [${p.id}] ${p.agentName}（${formatStamp(p.at)}）：${what}`)
-    }
-    for (const t of waitingReviews) {
-      const note = t.review?.note ? `说明：${flatClip(t.review.note, 200)}` : "（无验收说明）"
-      const chk = ` ｜ 复验：${formatCheckBrief(t.check, true)}`
-      waitLines.push(
-        `- 等验收 [${t.id}] 「${t.title}」 · 负责人 ${t.ownerName ?? "未认领"} · ${note}${chk} ｜ ${laneText(t, user)}`,
-      )
-    }
-    sections.push(
-      `\n【等 ${user} 处理的事（${waitLines.length}）】\n${waitLines.length > 0 ? waitLines.join("\n") : "（没有）"}`,
-    )
-
-    // 3. 没完成的待办
-    sections.push(
-      `\n【未完成的待办（${unfinished.length}）】\n${unfinished.length > 0 ? unfinished.map(formatTaskDetail).join("\n") : "（没有）"}`,
-    )
-
-    // 4. 每个席位的状态和欠的事
-    const seatLines = snap.agents.map((s) => {
-      const head = `- ${s.name}${s.agentName ? `（${s.agentName} · ${s.model}）` : `（${s.model}）`} · ${STATUS_LABEL[s.status] ?? s.status}${s.unsure !== undefined ? `（不确定，自 ${formatStamp(s.unsure)} 无动静）` : ""}：${flatClip(s.doing, 120) || "（未写进度）"}`
+    const formatSeat = (s: PublicAgent, compact = false) => {
+      const doing = flatClip(freshDoing(s, now), 120)
+      const head = `- ${s.name}${s.agentName ? `（${s.agentName} · ${s.model}）` : `（${s.model}）`} · ${STATUS_LABEL[s.status] ?? s.status}${s.unsure !== undefined ? `（不确定，自 ${formatStamp(s.unsure)} 无动静）` : ""}${doing ? `：${doing}` : ""}`
       const extras: string[] = []
       if (s.queuedCount) extras.push(`  队列积压 ${s.queuedCount} 条${s.queuePaused ? "（已暂停）" : ""}`)
       if (s.retry) extras.push(`  网络重试 ${s.retry.n}/${s.retry.of}（下次 ${formatStamp(s.retry.at)}）`)
       if (s.owes) {
-        for (const ot of s.owes.tasks) {
+        const taskCap = compact ? 3 : s.owes.tasks.length
+        for (const ot of s.owes.tasks.slice(0, taskCap)) {
           extras.push(`  欠待办 [${ot.id}] ${ot.title}${ot.step ? `（到「${ot.step}」）` : ""}`)
         }
-        for (const oc of s.owes.calls) {
+        if (s.owes.tasks.length > taskCap) {
+          extras.push(`  …另有 ${s.owes.tasks.length - taskCap} 件欠待办（传 part="seats" 查看）`)
+        }
+        const callCap = compact ? 3 : s.owes.calls.length
+        for (const oc of s.owes.calls.slice(0, callCap)) {
           extras.push(
             `  欠点名 [${oc.messageId}] 来自 ${oc.from}（${CALL_STATE_LABEL[oc.state] ?? oc.state}，${formatStamp(oc.at)}）`,
           )
         }
+        if (s.owes.calls.length > callCap) {
+          extras.push(`  …另有 ${s.owes.calls.length - callCap} 条欠点名（传 part="seats" 查看）`)
+        }
       }
       return extras.length > 0 ? `${head}\n${extras.join("\n")}` : head
-    })
-    sections.push(
-      `\n【席位状态与欠活（${snap.agents.length}）】\n${seatLines.length > 0 ? seatLines.join("\n") : "（暂无席位）"}`,
-    )
+    }
 
-    // 5. 没叫成或中途断了的点名
-    const callLines = brokenCalls.map(
-      (c) =>
-        `- [${c.messageId}] ${c.from} → @${c.seatName} · ${CALL_STATE_LABEL[c.state] ?? c.state}（${formatStamp(c.at)}）${c.note ? `：${c.note}` : ""}${c.gist ? ` ｜ 原话：「${c.gist}」` : ""}`,
-    )
-    sections.push(
-      `\n【没叫成或中途断了的点名（${brokenCalls.length}）】\n${callLines.length > 0 ? callLines.join("\n") : "（没有）"}`,
-    )
+    const buildWaitFullLines = () => {
+      const lines: string[] = []
+      for (const m of openAsks) {
+        const opts = m.ask?.options?.length
+          ? `\n    选项${m.ask.multi ? "（可多选）" : ""}：${m.ask.options.map((o) => (o.detail ? `${o.label}（${o.detail}）` : o.label)).join(" ｜ ")}`
+          : ""
+        lines.push(`- 提问 [${m.id}] ${m.authorName}（${formatStamp(m.createdAt)}）：${m.text.trim()}${opts}`)
+      }
+      for (const p of snap.permits) {
+        const what =
+          p.kind === "full"
+            ? `申请本轮完整权限：${flatClip(p.reason, 200) || "（未填理由）"}`
+            : `工具 ${p.tool ?? ""}：${flatClip(p.input, 200)}`
+        lines.push(`- 权限 [${p.id}] ${p.agentName}（${formatStamp(p.at)}）：${what}`)
+      }
+      for (const t of waitingReviews) {
+        const note = t.review?.note ? `说明：${flatClip(t.review.note, 200)}` : "（无验收说明）"
+        const chk = ` ｜ 复验：${formatCheckBrief(t.check, true)}`
+        lines.push(
+          `- 等验收 [${t.id}] 「${t.title}」 · 负责人 ${t.ownerName ?? "未认领"} · ${note}${chk} ｜ ${laneText(t, user)}`,
+        )
+      }
+      return lines
+    }
 
-    // 6. 最近 30 条对话
-    const pageHint =
-      talkPage.hasMore && oldestSeq !== null
-        ? `\n（还有更早的对话；要继续往前翻，调用 bench_peek 传 project="${target.id}", before=${oldestSeq}）`
-        : ""
-    sections.push(
-      `\n【最近对话（${talkLines.length} 条${beforeSeq ? `，seq < ${beforeSeq}` : ""}）】\n${talkLines.length > 0 ? talkLines.map((t) => t.line).join("\n") : "（暂无对话）"}${pageHint}`,
-    )
+    const buildCallLines = (compact = false) =>
+      brokenCalls.map((c) => {
+        const note = compact ? flatClip(c.note, 80) : c.note
+        const gist = compact ? flatClip(c.gist, 60) : c.gist
+        return `- [${c.messageId}] ${c.from} → @${c.seatName} · ${CALL_STATE_LABEL[c.state] ?? c.state}（${formatStamp(c.at)}）${note ? `：${note}` : ""}${gist ? ` ｜ 原话：「${gist}」` : ""}`
+      })
 
-    return {
+    const basePayload = () => ({
       project: target,
       summary: snap.summary,
       waiting: {
@@ -513,7 +662,7 @@ export function frontPeek(input: unknown) {
         model: s.model,
         role: s.role,
         status: s.status,
-        doing: s.doing,
+        doing: freshDoing(s, now),
         unsure: s.unsure,
         queuedCount: s.queuedCount,
         queuePaused: s.queuePaused,
@@ -521,12 +670,293 @@ export function frontPeek(input: unknown) {
         owes: s.owes ?? null,
       })),
       brokenCalls,
+    })
+
+    // ---- Mode A: single section (`part`: summary | tasks | seats | talk), paginated when long ----
+    if (part === "summary") {
+      const title = snap.summary
+        ? `【房间摘要】（${snap.summary.by} 写于 ${formatStamp(snap.summary.at)}，覆盖至 seq ${snap.summary.upToSeq}）`
+        : "【房间摘要】"
+      const lines = snap.summary ? snap.summary.text.split("\n") : []
+      const paged = paginateEntries(header, title, lines, "summary", page, "（暂无房间摘要）")
+      return {
+        ...basePayload(),
+        part,
+        page: paged.page,
+        totalPages: paged.totalPages,
+        hasMore: paged.hasMore,
+        talk: { messages: [], hasMore: false, oldestSeq: null },
+        text: paged.text,
+      }
+    }
+
+    if (part === "tasks") {
+      const waitFull = buildWaitFullLines()
+      const taskFull = otherUnfinished.map((t) => {
+        const base = formatTaskDetail(t, false)
+        const stepLines = (t.steps ?? []).map(
+          (st, idx) => `    ${idx + 1}. [${st.state === "done" ? "✓" : st.state === "doing" ? "◐" : "○"}] ${st.text}${st.note ? `（${flatClip(st.note, 80)}）` : ""}`,
+        )
+        return stepLines.length > 0 ? `${base}\n${stepLines.join("\n")}` : base
+      })
+      const entries: string[] = [
+        `■ 等 ${user} 处理的事（${waitFull.length}）`,
+        ...(waitFull.length > 0 ? waitFull : ["（没有）"]),
+        `■ 其余未完成的待办（${otherUnfinished.length}）`,
+        ...(taskFull.length > 0 ? taskFull : ["（没有）"]),
+      ]
+      const paged = paginateEntries(
+        header,
+        `【待办与等验收详情（等 ${user} ${waitFull.length} 件 · 其余未完成 ${otherUnfinished.length} 件）】`,
+        entries,
+        "tasks",
+        page,
+      )
+      return {
+        ...basePayload(),
+        part,
+        page: paged.page,
+        totalPages: paged.totalPages,
+        hasMore: paged.hasMore,
+        talk: { messages: [], hasMore: false, oldestSeq: null },
+        text: paged.text,
+      }
+    }
+
+    if (part === "seats") {
+      const seatFull = snap.agents.map((s) => formatSeat(s, false))
+      const callFull = buildCallLines(false)
+      const entries: string[] = [
+        `■ 席位状态与欠活（${snap.agents.length}）`,
+        ...(seatFull.length > 0 ? seatFull : ["（暂无席位）"]),
+        `■ 没叫成或中途断了的点名（${brokenCalls.length}）`,
+        ...(callFull.length > 0 ? callFull : ["（没有）"]),
+      ]
+      const paged = paginateEntries(header, "【席位状态、欠活与断掉的点名】", entries, "seats", page, "（暂无席位）")
+      return {
+        ...basePayload(),
+        part,
+        page: paged.page,
+        totalPages: paged.totalPages,
+        hasMore: paged.hasMore,
+        talk: { messages: [], hasMore: false, oldestSeq: null },
+        text: paged.text,
+      }
+    }
+
+    if (part === "talk") {
+      let curBefore = beforeSeq
+      if (curBefore === undefined && page > 1) {
+        for (let p = 1; p < page; p++) {
+          const skipPage = dbLoadTalkPage(target.id, curBefore, PEEK_TALK_LIMIT)
+          if (skipPage.messages.length === 0 || !skipPage.hasMore) {
+            curBefore = 1
+            break
+          }
+          curBefore = skipPage.messages[0].seq
+        }
+      }
+      const talkPage = dbLoadTalkPage(target.id, curBefore, PEEK_TALK_LIMIT)
+      const maxSingle = Math.max(800, PEEK_TEXT_BUDGET - header.length - 160)
+      const allTalk = talkPage.messages.map((m) => {
+        const fullLine = talkLine(m, true)
+        return {
+          id: m.id,
+          seq: m.seq,
+          line: fullLine.length > maxSingle ? `${fullLine.slice(0, maxSingle - 14)}…（单条过长已截断）` : fullLine,
+        }
+      })
+      const renderPartTalk = (kept: typeof allTalk) => {
+        const cutCount = allTalk.length - kept.length
+        const remaining = talkPage.olderCount + cutCount
+        const cursorSeq =
+          kept.length > 0 ? kept[0].seq : curBefore ?? (allTalk.length > 0 ? allTalk[allTalk.length - 1].seq + 1 : null)
+        const hint = remaining > 0 && cursorSeq !== null ? `\n（还有 ${remaining} 条，用 before=${cursorSeq} 翻）` : ""
+        const title = `\n【完整对话（${kept.length} 条${curBefore ? `，seq < ${curBefore}` : ""}）】`
+        const bodyLines = kept.length > 0 ? kept.map((t) => t.line).join("\n") : "（暂无对话）"
+        return {
+          text: `${header}\n${title}\n${bodyLines}${hint}`,
+          remaining,
+          cursorSeq,
+        }
+      }
+      let kept: typeof allTalk = []
+      for (let i = allTalk.length - 1; i >= 0; i--) {
+        const nextKept = [allTalk[i], ...kept]
+        if (kept.length > 0 && renderPartTalk(nextKept).text.length > PEEK_TEXT_BUDGET) break
+        kept = nextKept
+      }
+      const rendered = renderPartTalk(kept)
+      return {
+        ...basePayload(),
+        part,
+        page,
+        hasMore: rendered.remaining > 0,
+        talk: {
+          messages: kept,
+          hasMore: rendered.remaining > 0,
+          oldestSeq: rendered.cursorSeq,
+          remaining: rendered.remaining,
+        },
+        text: rendered.text,
+      }
+    }
+
+    // ---- Mode B: `full: true` preserves legacy full output ----
+    if (full) {
+      const talkPage = dbLoadTalkPage(target.id, beforeSeq, PEEK_TALK_LIMIT)
+      const talkLines = talkPage.messages.map((m) => ({
+        id: m.id,
+        seq: m.seq,
+        line: talkLine(m, true),
+      }))
+      const oldestSeq = talkPage.messages[0]?.seq ?? null
+
+      const sections: string[] = [header]
+      if (snap.summary) {
+        sections.push(
+          `\n【房间摘要】（${snap.summary.by} 写于 ${formatStamp(snap.summary.at)}，覆盖至 seq ${snap.summary.upToSeq}）\n${snap.summary.text}`,
+        )
+      } else {
+        sections.push("\n【房间摘要】\n（暂无房间摘要）")
+      }
+      const waitLines = buildWaitFullLines()
+      sections.push(
+        `\n【等 ${user} 处理的事（${waitLines.length}）】\n${waitLines.length > 0 ? waitLines.join("\n") : "（没有）"}`,
+      )
+      sections.push(
+        `\n【未完成的待办（${unfinished.length}）】\n${unfinished.length > 0 ? unfinished.map((t) => formatTaskDetail(t, false)).join("\n") : "（没有）"}`,
+      )
+      const seatLines = snap.agents.map((s) => formatSeat(s, false))
+      sections.push(
+        `\n【席位状态与欠活（${snap.agents.length}）】\n${seatLines.length > 0 ? seatLines.join("\n") : "（暂无席位）"}`,
+      )
+      const callLines = buildCallLines(false)
+      sections.push(
+        `\n【没叫成或中途断了的点名（${brokenCalls.length}）】\n${callLines.length > 0 ? callLines.join("\n") : "（没有）"}`,
+      )
+      const pageHint =
+        talkPage.hasMore && oldestSeq !== null
+          ? `\n（还有更早的对话；要继续往前翻，调用 bench_peek 传 project="${target.id}", before=${oldestSeq}）`
+          : ""
+      sections.push(
+        `\n【最近对话（${talkLines.length} 条${beforeSeq ? `，seq < ${beforeSeq}` : ""}）】\n${talkLines.length > 0 ? talkLines.map((t) => t.line).join("\n") : "（暂无对话）"}${pageHint}`,
+      )
+
+      return {
+        ...basePayload(),
+        talk: {
+          messages: talkLines,
+          hasMore: talkPage.hasMore,
+          oldestSeq,
+          remaining: talkPage.olderCount,
+        },
+        text: sections.join("\n"),
+      }
+    }
+
+    // ---- Mode C (default): compact summary <= 8000 chars ----
+    // 1. Summary clipped to 600 chars
+    let summarySec = "\n【房间摘要】\n（暂无房间摘要）"
+    if (snap.summary) {
+      const clipped = blockClip(snap.summary.text, PEEK_SUMMARY_COMPACT_CHARS)
+      const more = clipped.clipped ? `\n…（摘要已截到 ${PEEK_SUMMARY_COMPACT_CHARS} 字，完整内容传 part="summary"）` : ""
+      summarySec = `\n【房间摘要】（${snap.summary.by} 写于 ${formatStamp(snap.summary.at)}，覆盖至 seq ${snap.summary.upToSeq}）\n${clipped.text}${more}`
+    }
+
+    // 2. Waiting items (one line each)
+    const waitCompact: string[] = []
+    for (const m of openAsks) {
+      const opts = m.ask?.options?.length
+        ? `（选项${m.ask.multi ? "·可多选" : ""}：${m.ask.options.map((o) => (o.detail ? `${o.label}:${flatClip(o.detail, 24)}` : o.label)).join("｜")}）`
+        : ""
+      waitCompact.push(`- 提问 [${m.id}] ${m.authorName}（${formatStamp(m.createdAt)}）：${flatClip(m.text, 140)}${opts}`)
+    }
+    for (const p of snap.permits) {
+      const what =
+        p.kind === "full"
+          ? `申请本轮完整权限：${flatClip(p.reason, 120) || "（未填理由）"}`
+          : `工具 ${p.tool ?? ""}：${flatClip(p.input, 120)}`
+      waitCompact.push(`- 权限 [${p.id}] ${p.agentName}（${formatStamp(p.at)}）：${what}`)
+    }
+    for (const t of waitingReviews) {
+      const steps = t.steps ?? []
+      const doneCount = steps.filter((s) => s.state === "done").length
+      const prog = steps.length > 0 ? ` · 步骤 ${doneCount}/${steps.length}` : ""
+      const note = t.review?.note ? `说明：${flatClip(t.review.note, 100)}` : "（无验收说明）"
+      const chk = ` ｜ 复验：${formatCheckBrief(t.check, true)}`
+      waitCompact.push(
+        `- 等验收 [${t.id}] 「${flatClip(t.title, 40)}」 · 负责人 ${t.ownerName ?? "未认领"}${prog} · ${note}${chk} ｜ ${laneText(t, user)}`,
+      )
+    }
+
+    // 3. Other unfinished tasks (deduped: waitingReviews already listed above, one line each)
+    const taskCompact = otherUnfinished.map((t) => formatTaskDetail(t, true))
+
+    // 4. Seats & obligations
+    const seatCompact = snap.agents.map((s) => formatSeat(s, true))
+
+    // 5. Broken calls
+    const callCompact = buildCallLines(true)
+
+    // 6. Latest <= 10 talk lines (clipped to 200 chars each, without wakeText);
+    //    if total exceeds 8000 chars, trim older talk lines first and state remaining count.
+    const talkPage = dbLoadTalkPage(target.id, beforeSeq, PEEK_TALK_COMPACT_LIMIT)
+    const allTalk = talkPage.messages.map((m) => ({
+      id: m.id,
+      seq: m.seq,
+      line: compactTalkLine(m),
+    }))
+
+    // Keep room for at least the latest couple of talk lines even when a project has hundreds of tasks.
+    const talkReserve = allTalk.length > 0 ? 750 : 120
+    const prefix = fitPrefixLines(
+      header,
+      summarySec,
+      `【等 ${user} 处理的事（${waitCompact.length}）】`,
+      waitCompact,
+      `【未完成的待办（${taskCompact.length}）】`,
+      taskCompact,
+      `【席位状态与欠活（${snap.agents.length}）】`,
+      seatCompact,
+      `【没叫成或中途断了的点名（${callCompact.length}）】`,
+      callCompact,
+      PEEK_TEXT_BUDGET - talkReserve,
+    )
+
+    const renderCompactTalk = (kept: typeof allTalk) => {
+      const cutCount = allTalk.length - kept.length
+      const remaining = talkPage.olderCount + cutCount
+      const cursorSeq =
+        kept.length > 0 ? kept[0].seq : beforeSeq ?? (allTalk.length > 0 ? allTalk[allTalk.length - 1].seq + 1 : null)
+      const pageHint = remaining > 0 && cursorSeq !== null ? `\n（还有 ${remaining} 条，用 before=${cursorSeq} 翻）` : ""
+      const bodyLines =
+        kept.length > 0
+          ? kept.map((t) => t.line).join("\n")
+          : remaining > 0
+            ? "（本页空间已满，未展开对话）"
+            : "（暂无对话）"
+      const fullText = `${prefix}\n\n【最近对话（${kept.length} 条${beforeSeq ? `，seq < ${beforeSeq}` : ""}）】\n${bodyLines}${pageHint}`
+      return { fullText, remaining, cursorSeq }
+    }
+
+    let keptTalk: typeof allTalk = []
+    for (let i = allTalk.length - 1; i >= 0; i--) {
+      const candidate = [allTalk[i], ...keptTalk]
+      if (renderCompactTalk(candidate).fullText.length > PEEK_TEXT_BUDGET) break
+      keptTalk = candidate
+    }
+    const finalTalk = renderCompactTalk(keptTalk)
+
+    return {
+      ...basePayload(),
       talk: {
-        messages: talkLines,
-        hasMore: talkPage.hasMore,
-        oldestSeq,
+        messages: keptTalk,
+        hasMore: finalTalk.remaining > 0,
+        oldestSeq: finalTalk.cursorSeq,
+        remaining: finalTalk.remaining,
       },
-      text: sections.join("\n"),
+      text: finalTalk.fullText,
     }
   })
 }

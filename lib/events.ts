@@ -104,6 +104,11 @@ export function createParser() {
   // The stream said its turn is over; the answer is complete even if the
   // process lingers (waiting on something it left running in the background).
   let ended = false
+  // Antigravity: when its last event was a reply that finished (no tool call
+  // after it). Its turn is over then, but agy has been seen to stay up for
+  // hours without the closing "result" (t_16ecccd4): lib/summon.ts ends it
+  // after a quiet while. Any later event clears it.
+  let repliedAt: number | undefined
   let n = 0
   const id = () => `s${++n}`
 
@@ -249,6 +254,7 @@ export function createParser() {
     // Antigravity: {"event": "step_update" | "result"}.
     else if (event.event === "step_update") {
       const step = obj(event.step_update)
+      repliedAt = step.step_type === "agent_response" && step.state !== "ACTIVE" ? Date.now() : undefined
       const index = Number(step.step_index)
       if (step.step_type === "tool") {
         const info = obj(step.tool_info)
@@ -286,7 +292,7 @@ export function createParser() {
     return (afterTools.join("\n\n") || final || lastText).trim()
   }
 
-  return { feed, answer, ended: () => ended }
+  return { feed, answer, ended: () => ended, repliedAt: () => (ended ? undefined : repliedAt) }
 }
 
 // What the seat line says while a step runs.

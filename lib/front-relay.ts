@@ -1,5 +1,5 @@
 import { ApiError, asRecord, asString } from "@/lib/http"
-import { awaitingReview, signLane, stricterLane } from "@/lib/review"
+import { awaitingReview, batchOnlyYouLeft, signLane, stricterLane } from "@/lib/review"
 import {
   actOnTask,
   inProject,
@@ -303,7 +303,10 @@ function passBatch(messageId: string, relay: RelayDraft, raw: unknown, now: numb
   })
   const unknown = [...wanted].filter((id) => !items.some((item) => item.taskId === id))
   if (unknown.length) throw new ApiError(404, `卡片上没有 ${unknown.join("、")}`)
-  const settled = items.every((item) => item.state)
+  // Once batch/look lanes have no unsettled items left (at most "you" rows
+  // remain), the card is settled so it won't block or fold into newer cards,
+  // while remaining "you" rows can still be passed one by one below.
+  const settled = batchOnlyYouLeft(items)
   const next: RelayDraft = { ...relay, items, ...(settled ? { state: "passed" as const, settledAt: now } : {}) }
   setRelay(messageId, next)
   return { relay: next }
@@ -323,7 +326,12 @@ export function settleRelay(input: unknown) {
   if (body.as !== "human") throw new ApiError(403, `只有 ${userName()} 能点`)
   const action = asString(body.action)
   const { message, relay } = cardOf(asString(body.messageId))
-  if (relay.state !== "draft") {
+  const canPassRemaining =
+    relay.kind === "batch" &&
+    action === "pass" &&
+    relay.state === "passed" &&
+    Boolean(relay.items?.some((item) => !item.state))
+  if (relay.state !== "draft" && !canPassRemaining) {
     throw new ApiError(
       409,
       relay.state === "sent" ? "已经发出去了" : relay.state === "passed" ? "已经通过了" : relay.replacedBy ? "这张清单换成新的了，看最新的那张" : "已经不发了",

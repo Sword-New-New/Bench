@@ -1,11 +1,12 @@
 import { ApiError, asRecord, asString } from "@/lib/http"
-import { awaitingReview, signLane } from "@/lib/review"
+import { awaitingReview, ISSUE_WINDOW_MS, signLane } from "@/lib/review"
 import {
   autoAcceptSince,
   deputyPass,
   deputyReopen,
   inProject,
   listProjects,
+  queryRecentIssueTasks,
   requireFrontSeat,
   resolveProjectInfo,
   runBatchCheck,
@@ -41,6 +42,18 @@ function startOfDay(now = Date.now()) {
 
 type Pass = { project: string; projectName: string; taskId: string; title: string; at: number; why: string; checkName?: string }
 
+export type IssuePass = {
+  project: string
+  projectName: string
+  taskId: string
+  title: string
+  at: number
+  ownerName?: string
+  why: string
+  checkState: string
+  checkName?: string
+}
+
 // Deputy passes still standing (reopened ones drop out), newest first.
 export function deputyPasses(since = 0): Pass[] {
   const out: Pass[] = []
@@ -58,6 +71,33 @@ export function deputyPasses(since = 0): Pass[] {
           at: review.at,
           why: review.deputy.why,
           checkName: review.deputy.checkName,
+        })
+      }
+    })
+  }
+  return out.sort((a, b) => b.at - a.at)
+}
+
+// Recent (14-day default) human passes where the check had failed, didn't finish,
+// or hadn't run (reopened ones drop out), newest first.
+export function deputyIssues(since = Date.now() - ISSUE_WINDOW_MS): IssuePass[] {
+  const out: IssuePass[] = []
+  for (const project of listProjects()) {
+    if (project.front) continue
+    inProject(project.id, () => {
+      for (const task of queryRecentIssueTasks(since)) {
+        const review = task.review!
+        const issue = review.issue!
+        out.push({
+          project: project.id,
+          projectName: project.name,
+          taskId: task.id,
+          title: task.title,
+          at: review.at,
+          ownerName: task.ownerName ?? undefined,
+          why: issue.summary,
+          checkState: issue.state,
+          checkName: issue.checkName,
         })
       }
     })

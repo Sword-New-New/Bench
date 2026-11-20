@@ -14,6 +14,7 @@ type LaneReaderGlobal = typeof globalThis & {
   __benchLaneSnapshot?: (agentId: string) => LaneSnapshot | undefined
   __benchLaneIdle?: (agentId: string) => boolean
   __benchSeatUserStopped?: (agentId: string) => boolean
+  __benchSummaryHold?: (projectId: string, base: number) => boolean
 }
 
 export function registerLaneReader(fn: (agentId: string) => LaneSnapshot | undefined) {
@@ -39,4 +40,14 @@ export function registerSeatUserStopped(fn: (agentId: string) => boolean) {
 
 export function isSeatStoppedByUser(agentId: string): boolean {
   return (globalThis as LaneReaderGlobal).__benchSeatUserStopped?.(agentId) ?? false
+}
+
+// The room is still finding someone to write this project's summary
+// (lib/summary-auto.ts), so the page holds the 「找谁写」 card back.
+export function registerSummaryHold(fn: (projectId: string, base: number) => boolean) {
+  ;(globalThis as LaneReaderGlobal).__benchSummaryHold = fn
+}
+
+export function summaryHeldFor(projectId: string, base: number): boolean {
+  return (globalThis as LaneReaderGlobal).__benchSummaryHold?.(projectId, base) ?? false
 }

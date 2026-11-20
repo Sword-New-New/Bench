@@ -2,8 +2,9 @@ import { digestOf } from "@/lib/digest"
 import { inProject, listProjects, snapshot } from "@/lib/store"
 import {
   collectOpenAsks,
+  groupLimited,
   isPendingInterrupted,
-  isPendingLimited,
+  sortReviews,
   type WaitingAsk,
   type WaitingInterrupted,
   type WaitingLimited,
@@ -37,8 +38,8 @@ export function waitingOverview(now = Date.now()): WaitingOverview {
       for (const ask of collectOpenAsks(snap.messages, snap.openAsks)) {
         asks.push({ ...meta, message: ask })
       }
+      for (const group of groupLimited(snap.messages)) limited.push({ ...meta, ...group })
       for (const message of snap.messages) {
-        if (isPendingLimited(message)) limited.push({ ...meta, message })
         if (isPendingInterrupted(message)) interrupted.push({ ...meta, message })
       }
       const digest = digestOf({
@@ -49,9 +50,7 @@ export function waitingOverview(now = Date.now()): WaitingOverview {
         userName: snap.userName,
         now,
       })
-      for (const row of digest.you) {
-        if (row.need === "review") reviews.push({ ...meta, row })
-      }
+      for (const row of sortReviews(digest.you.filter((item) => item.need === "review"))) reviews.push({ ...meta, row })
     })
   }
 

@@ -71,7 +71,7 @@ export function watchExpireMs() {
 }
 
 // Bumped when patrol's sweep rules change so hot-reload replaces the old timer closure.
-const PATROL_VERSION = 3
+const PATROL_VERSION = 4
 
 type State = {
   version?: number
@@ -182,8 +182,9 @@ function lookWatched(
   const anyBusyOrQueued = realSeats.some(busy)
   const anyMoving = realSeats.some((s) => !hung.includes(s) && busy(s))
 
-  // Unfinished work that is NOT waiting for the user's review.
-  const unfinishedWork = snap.tasks.filter((t) => t.status !== "done" && !awaitingReview(t))
+  // Unfinished work that is NOT waiting for the user's review and NOT blocked
+  // (blocked tasks are watched by patrol's own stuck-task rule, not here).
+  const unfinishedWork = snap.tasks.filter((t) => t.status !== "done" && t.status !== "blocked" && !awaitingReview(t))
   const hadAnyTasks = snap.tasks.length > 0 || (snap.doneTotal ?? 0) > 0
 
   // Auto-stop when all unfinished work is cleared (all done or all waiting on the user).

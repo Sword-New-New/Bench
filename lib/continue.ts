@@ -4,6 +4,7 @@ import { isLaneIdle, registerSeatUserStopped } from "@/lib/lane-state"
 import { registerContinueWoken } from "@/lib/owes"
 import { noteSeatStalled } from "@/lib/patrol"
 import { isKindQuotaBlocked } from "@/lib/quota"
+import { awaitingReview, reviewAsked } from "@/lib/review"
 import {
   agentState,
   inProject,
@@ -206,6 +207,8 @@ registerContinueWoken((seatId, tasks, nonRoomCallIds) => {
 })
 
 function describeTaskStep(task: Task): string {
+  // Only the sign-off left, never asked for: nothing checks it until it is.
+  if (awaitingReview(task) && !reviewAsked(task)) return "（只剩验收：写清怎么看到效果，再请验收）"
   const steps = task.steps ?? []
   if (steps.length === 0) return ""
   let idx = steps.findIndex((s) => s.state === "doing")

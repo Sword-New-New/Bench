@@ -65,6 +65,7 @@ import {
   netRetry,
   tasksOwedBy,
   limitedAgentNames,
+  earliestLimitReset,
   autoCheckHere,
 } from "@/lib/store"
 import { failureReason } from "@/lib/plain"
@@ -77,7 +78,7 @@ import { flowSummaryPrompt, flowsToSummarize } from "@/lib/flow-summary"
 import { autoAcceptChecked } from "@/lib/deputy"
 import { noteChecksSettled } from "@/lib/patrol"
 import { isKindQuotaBlocked } from "@/lib/quota"
-import { awaitingReview } from "@/lib/review"
+import { awaitingReview, checkStaleMs, reviewAsked } from "@/lib/review"
 
 const NOTE_GAP_MS = 30_000
 // After the stream says its turn is over, how long the process may take to exit.
@@ -95,6 +96,13 @@ const LIVE_GAP_MS = 800
 // seconds), so the run isn't stopped: the seat and the 「过程」 panel just say
 // how long it has been waiting, so it doesn't look frozen.
 const WAIT_NOTE_MS = 30_000
+// t_16ecccd4. Antigravity has stayed up for hours after its last reply,
+// without the closing "result" (碳猫, 2026-11-17 12:31 → 17:59): a reply
+// that finished with no tool call after it, then this long with nothing, is
+// the end of its turn. A wake that has gone this long with no output at all
+// is only shown on the seat (「已经 N 分钟没动静」); only the user stops it.
+const REPLIED_END_MS = 5 * 60_000
+const SILENT_NOTE_MS = 10 * 60_000
 
 // What one wake's prompt may weigh in bytes when it goes out as a command-line
 // argument (Linux: 128 KB per argument, quoting and the rest included).
@@ -172,7 +180,8 @@ type SummonGlobal = typeof globalThis & {
   __benchGistGather?: Map<string, { ids: string[]; timer?: NodeJS.Timeout }>
   __benchGistBatches?: Map<string, number>
   __benchCheckCounts?: Map<string, number>
-  __benchCheckNotified?: Map<string, string>
+  __benchCheckSettled?: Map<string, { ids: Set<string>; first: number; timer?: ReturnType<typeof setTimeout> }>
+  __benchCheckSweep?: { version: number; timer: ReturnType<typeof setInterval> }
   // Seats whose last check could not run, and when (see pickAutoChecker).
   __benchCheckFailed?: Map<string, number>
   // Seat id -> when a usage-limit resume last woke it (autoResumeAt).
@@ -367,6 +376,7 @@ function owesLine(agentId: string, body: string) {
     .slice(0, OWES_MAX)
   if (list.length === 0) return ""
   const lines = list.map((task) => {
+    if (awaitingReview(task) && !reviewAsked(task)) return `${task.id} ${cut(task.title, 20)}（只剩验收：写清怎么看到效果，再请验收）`
     const step = stepOf(task)
     return `${task.id} ${cut(task.title, 20)}${step ? `（到「${cut(step, 14)}」）` : ""}`
   })
@@ -442,14 +452,14 @@ function envelope(
   const digest = skipped > 0 && summary ? `【房间摘要】\n${summary.text}\n\n【最近的原文】\n` : ""
   const isFront = Boolean(currentProjectInfo().front)
   const frontDuty = isFront
-    ? `你是前台，${userName()} 只跟你对接：bench_overview 看全部项目、bench_peek 看单个项目；提到的事都带项目名和 t_…/m_… id；传话用 bench_relay、催人用 bench_nudge、等验收用 bench_review_card，都只是卡片，他点了才算；你不能替他验收、批权限或以他的名义说话，要他去哪个房间处理就说清楚。等验收的有好几件时，用 bench_review_batch 出一张整批卡片，还没复验的先用 bench_check 补跑。只有一个例外：一览里标着「可代签」的待办（项目开着「让前台代签」，房间按复验结果算的），用 bench_accept 替他通过，why 写复验验到了什么；被拒就留给他，不要换办法。他让你盯着某个项目时用 bench_watch 记下项目和统筹（说不用盯了就传 on:false）；盯着的项目全停卡住时，对那个统筹调 bench_nudge 会以前台名义直接发出，不用等他点。有要紧的事要他知道（他可能不在页面前）时，说完再用 bench_notify 推一句 40 字内的摘要到他手机和桌面，别的时候不推。`
+    ? `你是前台，${userName()} 只跟你对接：bench_overview 看全部项目、bench_peek 看单项目要点（细看某栏传 part）；事都带项目名和 t_…/m_… id；传话 bench_relay、催人 bench_nudge、等验收 bench_review_card 都是卡片，他点了才算；你不能替他验收、批权限或冒名说话，要他去哪处理就说清楚。等验收有好几件时用 bench_review_batch 出整批卡片，没复验的先 bench_check 补跑。只有一个例外：一览里标着「可代签」的待办（房间按复验结果算的），用 bench_accept 替他通过，why 写复验验到了什么；被拒就留给他，不要换办法。他让你盯某个项目时用 bench_watch 记下项目和统筹（不用盯传 on:false）；盯着的项目全停卡住时，对那个统筹调 bench_nudge 会以前台名义直接发出，不用等他点。有要紧事要他知道（他可能不在页面前）时，说完再用 bench_notify 推一句 40 字内摘要到手机和桌面，别的时候不推。`
     : ""
   const whole = `${frontDuty}${how}${gist}${thread}${todo}${ask}${attach}${permit}${stop}`
   // The same rules in a line, for a session that has them whole further up.
   const brief = [
     "守则同前，要点：",
     isFront
-      ? `你是前台，用 bench_overview / bench_peek 看各项目，每件事带项目名和 t_…/m_… id；传话、催人、等验收用 bench_relay / bench_nudge / bench_review_card（几件用 bench_review_batch）起草卡片，${userName()} 点了才算；只有标着「可代签」的用 bench_accept 替他通过，没复验的先 bench_check；他让盯着项目用 bench_watch（盯着的项目对统筹 bench_nudge 直接以前台名义发出）；要紧的事说完用 bench_notify 推一句摘要；`
+      ? `你是前台，用 bench_overview / bench_peek（细看某栏传 part）看各项目，事带项目名和 t_…/m_… id；传话、催人、等验收用 bench_relay / bench_nudge / bench_review_card（几件用 bench_review_batch）起草卡片，${userName()} 点了才算；只有标着「可代签」的用 bench_accept 替他通过，没复验先 bench_check；他让盯项目用 bench_watch（对统筹 bench_nudge 直接以前台名义发出）；要紧事说完用 bench_notify 推摘要；`
       : "",
     replyByStdout ? "最后的回答直接输出，会挂成回复；" : "回复用 bench_say；",
     "第一行写一句 60 字以内的结论，群里默认只显示这一行；",
@@ -750,6 +760,7 @@ function launch(
   })
   let stopped = false
   let quiet: NodeJS.Timeout | undefined
+  let watch: NodeJS.Timeout | undefined = undefined
   const finish = bindProject((code: number | null, failure?: string) => {
     if (finished) return
     finished = true
@@ -759,6 +770,7 @@ function launch(
     clearStandby(agent.id)
     clearTimeout(endedTimer)
     clearInterval(quiet)
+    clearInterval(watch)
     if (pending) take(pending)
     const out = parser.answer()
     // Some CLIs print their error to stderr and still exit 0 (WorkBuddy's when
@@ -832,7 +844,34 @@ function launch(
       live(waited)
     }), WAIT_NOTE_MS)
   }
+  // Watches for the two quiet cases above, once a minute (the env vars only
+  // shorten the waits for tests).
+  let heardAt = Date.now()
+  const repliedEnd = envDelay("BENCH_REPLIED_END_MS", REPLIED_END_MS)
+  const silentNote = envDelay("BENCH_SILENT_NOTE_MS", SILENT_NOTE_MS)
+  watch = setInterval(bindProject(() => {
+    if (finished) return clearInterval(watch)
+    const now = Date.now()
+    const replied = parser.repliedAt()
+    if (replied && now - replied >= repliedEnd) {
+      clearInterval(watch)
+      putStep(run, { id: "linger", at: now, kind: "note", title: `答完了，过了 ${seconds(now - replied)}进程还没退出，也没说结束，已收掉`, state: "done" })
+      kill()
+      finish(0)
+      return
+    }
+    if (now - heardAt >= silentNote) {
+      const title = `已经 ${Math.floor((now - heardAt) / 60_000)} 分钟没动静`
+      putStep(run, { id: "silent", at: heardAt, kind: "note", title, state: "running" })
+      live(title)
+    }
+  }), Math.max(50, Math.min(60_000, Math.floor(Math.min(repliedEnd, silentNote) / 4))))
+  watch.unref?.()
   child.stdout.on("data", bindProject((chunk: Buffer) => {
+    if (run.steps.some((step) => step.id === "silent" && step.state === "running")) {
+      putStep(run, { id: "silent", at: heardAt, kind: "note", title: `停了 ${Math.floor((Date.now() - heardAt) / 60_000)} 分钟，又有动静了`, state: "done" })
+    }
+    heardAt = Date.now()
     if (first) {
       const tell = first
       first = undefined
@@ -860,10 +899,15 @@ function launch(
   child.on("close", (code) => finish(code))
 }
 
+const INTERRUPTED_DOING = "被服务器重启打断了"
+
 // Shows the seat as busy while a command runs, and puts back what it was
-// doing before, unless it changed that itself meanwhile.
+// doing before, unless it changed that itself meanwhile. Room-written restart
+// notices (INTERRUPTED_DOING) are cleared as soon as the next wake begins so
+// settle() never restores them.
 function busy(agentId: string, doing: string) {
-  const before = agentState(agentId)?.doing ?? ""
+  const prev = agentState(agentId)?.doing ?? ""
+  const before = prev === INTERRUPTED_DOING ? "" : prev
   let shown = doing
   try {
     pulseAgent(agentId, "working", doing)
@@ -885,7 +929,7 @@ function busy(agentId: string, doing: string) {
       } catch {}
       const still = agentState(agentId)
       // A question still unanswered stays up after the run; an answered one gives way.
-      if (still && (still.doing === shown || (askSettled(still.doing) && !still.doing.startsWith("问了")))) {
+      if (still && (still.doing === shown || (askSettled(still.doing) && !still.doing.startsWith("问了")) || still.doing === INTERRUPTED_DOING)) {
         try {
           pulseAgent(still.id, "idle", before)
         } catch {}
@@ -1236,7 +1280,7 @@ const CHECK_COMPACT_EVERY = Number(process.env.BENCH_CHECK_COMPACT_EVERY) || 5
 // tries it again.
 const FAILED_CHECKER_MS = 30 * 60_000
 
-function pickAutoChecker(task: Task): { seat?: PublicAgent; why?: string } {
+function pickAutoChecker(task: Task, avoid: string[] = []): { seat?: PublicAgent; why?: string } {
   const snap = snapshot()
   const owner = task.ownerId ? agentState(task.ownerId) : undefined
   const ownerKind = owner?.agentName ?? ""
@@ -1261,6 +1305,10 @@ function pickAutoChecker(task: Task): { seat?: PublicAgent; why?: string } {
 
   const reasons: string[] = []
   const candidates = others.filter((item) => {
+    if (avoid.includes(item.id)) {
+      reasons.push(`${item.name} 刚才没接上`)
+      return false
+    }
     const agent = agentState(item.id)
     if (!agent?.agentName || !agent.session || !adapterFor(agent.agentName)) {
       reasons.push(`${item.name} 叫不醒`)
@@ -1322,22 +1370,30 @@ function pickAutoChecker(task: Task): { seat?: PublicAgent; why?: string } {
   return { seat: pool[0] }
 }
 
-function requestCheck(taskId: string, at: number) {
+// `cause`: why it is being queued again (lib/summon.ts repickCheck): it sat
+// in a queue too long, or its checker hit a usage limit. Then the project's
+// chosen checker gives way to the pick too, and no seat at all is an error
+// (or, for a limit, a wait for the soonest reset), not a skip.
+function requestCheck(taskId: string, at: number, cause?: "stale" | "limit") {
   const snap = snapshot()
   const task = snap.tasks.find((item) => item.id === taskId)
   if (!task || task.check?.at !== at) return
   const skip = (note: string) => setTaskCheck(taskId, at, { state: "skipped", note })
+  const avoid = task.check?.avoid ?? []
 
-  let seat = snap.agents.find((item) => item.checker)
+  const fixed = snap.agents.find((item) => item.checker)
+  const fixedKind = fixed ? agentState(fixed.id)?.agentName : undefined
+  const fixedLimited = Boolean(fixedKind && (limitedAgentNames().has(fixedKind) || isKindQuotaBlocked(fixedKind)))
+  let seat = fixed && !avoid.includes(fixed.id) && !fixedLimited ? fixed : undefined
   if (!seat) {
-    if (autoCheckHere()) {
-      const picked = pickAutoChecker(task)
+    if (fixed || cause || autoCheckHere()) {
+      const picked = pickAutoChecker(task, avoid)
       if (!picked.seat) {
-        skip(picked.why ?? "自动挑不到复验人，这次跳过")
+        if (!cause && !fixed) skip(picked.why ?? "自动挑不到复验人，这次跳过")
+        else noCheckerLeft(task, cause ?? "limit")
         return
       }
       seat = picked.seat
-      setTaskCheck(taskId, at, { state: "queued", by: seat.id, name: seat.name })
     } else {
       skip("复验人已经取消了，这次没复验")
       return
@@ -1352,6 +1408,7 @@ function requestCheck(taskId: string, at: number) {
     return skip(`复验人 ${seat.name} 叫不醒（没有会话或唤起命令），这次跳过`)
   }
   if (isStandby(agent.id)) return skip(`复验人 ${seat.name} 正挂在 bench_wait 里自己守着房间，叫不醒，这次跳过`)
+  setTaskCheck(taskId, at, { state: "queued", by: seat.id, name: seat.name, queuedAt: Date.now() })
   const queue = lane(agent.id)
   queue.checks = [...(queue.checks ?? []).filter((item) => item.taskId !== taskId), { taskId, at }]
   syncLane(agent.id)
@@ -1360,14 +1417,164 @@ function requestCheck(taskId: string, at: number) {
 
 // Checks a seat had queued, when it can't take them after all.
 function dropChecks(queue: Lane, why: string) {
-  const had = Boolean(queue.checks?.length)
   for (const item of queue.checks ?? []) {
     try {
-      setTaskCheck(item.taskId, item.at, { state: "error", note: `复验没跑成：${why}` })
+      if (setTaskCheck(item.taskId, item.at, { state: "error", note: `复验没跑成：${why}` })) noteCheckSettled(item.taskId)
     } catch {}
   }
   queue.checks = undefined
-  if (had) maybeNotifyChecksSettled()
+}
+
+// ---- A check never waits for ever (t_96eb4124) ----
+// A check queued on a seat that never gets to it (its queue paused, a
+// terminal open, a long wake) goes to another seat after BENCH_CHECK_STALE_MS
+// (15 minutes), at most twice, then it is an error. One whose checker hits
+// a usage limit goes to another seat at once, also at most twice; with
+// every seat out of quota it waits for the soonest reset, once. One whose
+// owner never asked for review is not checked. A sweep looks every minute;
+// no timer per check.
+const CHECK_MAX_REPICKS = 2
+const CHECK_SWEEP_MS = 60_000
+const CHECK_SWEEP_VERSION = 1
+
+function dropQueuedCheck(seatId: string, taskId: string) {
+  const queue = lanesMap().get(seatId)
+  if (!queue?.checks?.some((item) => item.taskId === taskId)) return
+  queue.checks = queue.checks.filter((item) => item.taskId !== taskId)
+  if (queue.checks.length === 0) queue.checks = undefined
+  syncLane(seatId, false)
+}
+
+function noCheckerLeft(task: Task, cause: "stale" | "limit") {
+  const check = task.check
+  if (!check) return
+  if (cause === "limit" && !check.waited) {
+    const waitUntil = earliestLimitReset() ?? Date.now() + 30 * 60_000
+    setTaskCheck(task.id, check.at, {
+      state: "queued",
+      by: undefined,
+      name: undefined,
+      waitUntil,
+      note: `能查的 AI 都撞了额度，${whenText(waitUntil)}重置后再排一次`,
+    })
+    return
+  }
+  setTaskCheck(task.id, check.at, { state: "error", note: "没有空着的 AI 来检查" })
+  noteCheckSettled(task.id)
+}
+
+// Take a check off the seat it waits on and give it to another.
+function repickCheck(taskId: string, cause: "stale" | "limit", from?: string) {
+  const task = snapshot().tasks.find((item) => item.id === taskId)
+  const check = task?.check
+  if (!task || !check) return
+  const away = from ?? check.by
+  if (away) dropQueuedCheck(away, taskId)
+  const avoid = [...new Set([...(check.avoid ?? []), ...(away ? [away] : [])])]
+  const repicks = (check.repicks ?? 0) + 1
+  if (repicks > CHECK_MAX_REPICKS) {
+    setTaskCheck(taskId, check.at, { avoid, repicks })
+    noCheckerLeft({ ...task, check: { ...check, avoid, repicks } }, cause)
+    return
+  }
+  setTaskCheck(taskId, check.at, { state: "queued", by: undefined, name: undefined, runId: undefined, note: undefined, avoid, repicks })
+  requestCheck(taskId, check.at, cause)
+}
+
+export function sweepChecks(now = Date.now()) {
+  for (const project of listProjects()) {
+    if (project.front) continue
+    try {
+      inProject(project.id, () => {
+        for (const task of snapshot().tasks) {
+          const check = task.check
+          if (check?.state !== "queued") continue
+          if (!reviewAsked(task)) {
+            if (check.by) dropQueuedCheck(check.by, task.id)
+            setTaskCheck(task.id, check.at, { state: "skipped", note: "负责人还没请验收，等它请了再检查" })
+            continue
+          }
+          if (check.waitUntil) {
+            if (now < check.waitUntil) continue
+            // The reset has come: every seat again, once.
+            setTaskCheck(task.id, check.at, { waitUntil: undefined, waited: true, avoid: [], repicks: 0, note: undefined })
+            requestCheck(task.id, check.at, "limit")
+            continue
+          }
+          if (now - (check.queuedAt ?? check.at) >= checkStaleMs()) repickCheck(task.id, "stale")
+        }
+      })
+    } catch (error) {
+      console.error(error)
+    }
+  }
+}
+
+function ensureCheckSweep() {
+  const current = g().__benchCheckSweep
+  if (current?.version === CHECK_SWEEP_VERSION) return
+  if (current) clearInterval(current.timer)
+  const timer = setInterval(() => sweepChecks(), envDelay("BENCH_CHECK_SWEEP_MS", CHECK_SWEEP_MS) || CHECK_SWEEP_MS)
+  timer.unref?.()
+  g().__benchCheckSweep = { version: CHECK_SWEEP_VERSION, timer }
+}
+
+// ---- The desk hears of verdicts in one go ----
+// Each verdict (or failed run) waits: when none has landed for
+// BENCH_CHECK_QUIET_MS (3 minutes), or BENCH_CHECK_QUIET_MAX_MS (10) after
+// the first, the desk's AI is woken once with all of them. Before, each one
+// woke it (a morning of 7 or 8 wakes, 2026-11-18).
+const CHECK_QUIET_MS = 3 * 60_000
+const CHECK_QUIET_MAX_MS = 10 * 60_000
+
+function noteCheckSettled(taskId: string) {
+  const project = currentProject()
+  const all = (g().__benchCheckSettled ??= new Map())
+  const now = Date.now()
+  const entry = all.get(project) ?? { ids: new Set<string>(), first: now }
+  entry.ids.add(taskId)
+  all.set(project, entry)
+  if (entry.timer) clearTimeout(entry.timer)
+  const quiet = envDelay("BENCH_CHECK_QUIET_MS", CHECK_QUIET_MS)
+  const most = envDelay("BENCH_CHECK_QUIET_MAX_MS", CHECK_QUIET_MAX_MS)
+  entry.timer = setTimeout(() => tellChecksSettled(project), Math.max(0, Math.min(quiet, entry.first + most - now)))
+  entry.timer.unref?.()
+}
+
+function tellChecksSettled(project: string) {
+  const all = g().__benchCheckSettled
+  const entry = all?.get(project)
+  all?.delete(project)
+  if (!entry) return
+  try {
+    inProject(project, () => {
+      const info = currentProjectInfo()
+      if (info.front) return
+      let passed = 0
+      let failed = 0
+      let unverified = 0
+      let other = 0
+      // Could not run (the wake failed, no verdict): the desk hears of these
+      // too, or a batch that all fell on a seat out of quota would sit there
+      // with nobody told. Skipped ones alone wake nobody.
+      let errored = 0
+      for (const task of snapshot().tasks) {
+        if (!entry.ids.has(task.id)) continue
+        const state = task.check?.state
+        if (state === "passed") passed++
+        else if (state === "failed") failed++
+        else if (state === "unverified") unverified++
+        else if (state === "error") {
+          other++
+          errored++
+        } else if (state === "skipped") other++
+      }
+      if (passed + failed + unverified + errored === 0) return
+      noteChecksSettled({ projectId: info.id, project: info.name, passed, failed, unverified, other })
+    })
+  } catch (error) {
+    console.error(error)
+  }
 }
 
 // After a restart: checks that were queued or running never finish.
@@ -1397,6 +1604,14 @@ function checkPrompt(task: Task) {
     task.detail ? `说明：\n${task.detail}` : "",
     steps.length ? `步骤：\n${steps.join("\n")}` : "",
     task.review?.note ? `负责人请验收时写的「怎么看效果」：\n${task.review.note}` : "",
+    task.check?.prev
+      ? [
+          "",
+          `这是改过以后再查（第 ${task.check.round ?? 1} 次）。上一次${task.check.prev.name ? ` ${task.check.prev.name} ` : ""}的结论是「${task.check.prev.state === "failed" ? "没过" : "没验到"}」，原因：`,
+          task.check.prev.note || "（没写原因）",
+          "负责人这次说改了什么，看上面的「怎么看效果」。先逐条核对上一次的问题是不是真的改好了，再整体看一遍。",
+        ].join("\n")
+      : "",
     "",
     "要求：",
     "- 只读：不改工作区的代码和数据，不提交，不重启服务，不在群里说话（不用 bench_say），也不改这条待办。",
@@ -1454,62 +1669,22 @@ function verdictOf(out: string): Pick<TaskCheck, "state" | "note" | "kind" | "ga
   }
 }
 
-// When every queued/running check in the current project has settled, tell the
-// front desk's AI how many passed, failed, or went unverified.
-function maybeNotifyChecksSettled() {
-  try {
-    const info = currentProjectInfo()
-    if (info.front) return
-    const snap = snapshot()
-    const waiting = snap.tasks.filter(awaitingReview)
-    if (waiting.some((t) => t.check?.state === "queued" || t.check?.state === "running")) return
-    for (const seat of snap.agents) {
-      if ((lane(seat.id).checks?.length ?? 0) > 0) return
-    }
-    let passed = 0
-    let failed = 0
-    let unverified = 0
-    let other = 0
-    // Could not run (the wake failed, no verdict): the desk hears of these
-    // too, or a batch that all fell on a seat out of quota would sit there
-    // with nobody told. Skipped ones alone wake nobody.
-    let errored = 0
-    let latestAt = 0
-    for (const t of waiting) {
-      const chk = t.check
-      if (!chk || (t.review && chk.at < t.review.at)) continue
-      if (chk.at > latestAt) latestAt = chk.at
-      if (chk.state === "passed") passed++
-      else if (chk.state === "failed") failed++
-      else if (chk.state === "unverified") unverified++
-      else if (chk.state === "error") {
-        other++
-        errored++
-      } else if (chk.state === "skipped") other++
-    }
-    if (passed + failed + unverified + errored === 0) return
-    const sig = `${latestAt}:${passed}:${failed}:${unverified}:${other}`
-    const notified = (g().__benchCheckNotified ??= new Map())
-    if (notified.get(info.id) === sig) return
-    notified.set(info.id, sig)
-    noteChecksSettled({ projectId: info.id, project: info.name, passed, failed, unverified, other })
-  } catch (error) {
-    console.error(error)
-  }
-}
-
 function checkTask(agent: NonNullable<ReturnType<typeof agentState>>, item: { taskId: string; at: number }) {
   const task = snapshot().tasks.find((one) => one.id === item.taskId)
   // Sent back, signed off or asked again meanwhile: this check is moot.
-  if (!task || task.check?.at !== item.at || task.review?.state !== "waiting") {
-    maybeNotifyChecksSettled()
+  // Still this one but nobody asks for it now: say so, it is not left queued.
+  // Or it has gone to another seat meanwhile (repickCheck), or was settled.
+  if (!task || task.check?.at !== item.at || task.check.by !== agent.id || task.check.state !== "queued" || !reviewAsked(task)) {
+    if (task?.check?.at === item.at && task.check.state === "queued") {
+      setTaskCheck(item.taskId, item.at, { state: "skipped", note: "负责人还没请验收，等它请了再检查" })
+    }
     run(agent.id)
     return
   }
   const command = commandFor(agent.agentName ?? "", agent.session ?? "", checkPrompt(task), agent.modelPick, agent.effortPick)
   if (!command) {
     setTaskCheck(item.taskId, item.at, { state: "error", note: "复验没跑成：拼不出唤起命令" })
-    maybeNotifyChecksSettled()
+    noteCheckSettled(item.taskId)
     run(agent.id)
     return
   }
@@ -1528,10 +1703,12 @@ function checkTask(agent: NonNullable<ReturnType<typeof agentState>>, item: { ta
     )
     if (!stopped && !failure) log.answer = out.slice(0, 4000)
     seat.settle()
-    if (stopped) setTaskCheck(item.taskId, item.at, { state: "error", note: "复验没跑成：被停下了" })
+    // Its checker ran out of allowance: the check goes to another seat now.
+    const limited = !stopped && (failure || verdict?.state === "error") && noteLimit(agent, log, out)
+    if (limited) repickCheck(item.taskId, "limit", agent.id)
+    else if (stopped) setTaskCheck(item.taskId, item.at, { state: "error", note: "复验没跑成：被停下了" })
     else if (failure) {
       setTaskCheck(item.taskId, item.at, { state: "error", note: `复验没跑成：${failure}` })
-      noteLimit(agent, log, out)
     } else if (verdict) {
       setTaskCheck(item.taskId, item.at, verdict)
       autoAcceptChecked(item.taskId)
@@ -1551,7 +1728,7 @@ function checkTask(agent: NonNullable<ReturnType<typeof agentState>>, item: { ta
         queue.compact = true
       }
     }
-    maybeNotifyChecksSettled()
+    if (!limited) noteCheckSettled(item.taskId)
     run(agent.id)
   })
 }
@@ -2238,7 +2415,7 @@ function announceInterrupted() {
       inProject(project, () => {
         for (const item of list) {
           try {
-            pulseAgent(item.agentId, "idle", "被服务器重启打断了")
+            pulseAgent(item.agentId, "idle", INTERRUPTED_DOING)
           } catch {}
         }
         const shown = list.length === 1 ? list[0].agentName : `${list[0].agentName} 等 ${list.length} 个席位`
@@ -2388,6 +2565,19 @@ export function rewake(runId: string, byAutoTimer = false) {
     const agent = wakeable(item.agentId)
     if (!byAutoTimer) clearSeatUserStopped(agent.id)
     const queue = lane(agent.id)
+    takeBack(item, agent, queue)
+    syncLane(agent.id)
+    run(agent.id)
+    return { agent: agent.name, started: queue.running }
+  })
+}
+
+// Put a cut-off run's work back on its seat's queue (not started here: the
+// caller runs the lane once, after every run it takes back).
+function takeBack(item: Run, agent: { id: string; name: string }, queue: Lane) {
+  // A check goes to another seat when its checker hits the limit (requestCheck).
+  if (item.purpose === "check" || item.purpose === "gist") throw new ApiError(400, "这是一次检查，叫不回去；检查房间会自己换人查")
+  {
     if (item.purpose === "private") {
       if (!item.ask) throw new ApiError(400, "没记下当时单独说了什么")
       if (queue.whisper !== undefined) throw new ApiError(409, `上一句还没交给 ${agent.name}，稍等`)
@@ -2415,10 +2605,7 @@ export function rewake(runId: string, byAutoTimer = false) {
       queue.paused = undefined
       queue.restartPaused = undefined
     }
-    syncLane(agent.id)
-    run(agent.id)
-    return { agent: agent.name, started: queue.running }
-  })
+  }
 }
 
 // Carry over a usage-limited run onto the seat's newly rebound AI backend and
@@ -2427,8 +2614,6 @@ export function resumeLimitedAfterRebind(runId: string, reboundToLabel: string) 
   const item = getRun(runId)
   if (!item?.limited || item.resumedAt || !item.project) return { started: false }
   return inProject(item.project, () => {
-    clearTimeout(resumeTimers().get(runId))
-    resumeTimers().delete(runId)
     const agent = agentState(item.agentId)
     if (!agent) return { started: false }
     const queue = lane(agent.id)
@@ -2474,28 +2659,81 @@ function resumeTimers() {
   return (g().__benchResumeTimers ??= new Map<string, NodeJS.Timeout>())
 }
 
-function armResume(runId: string, at: number) {
-  clearTimeout(resumeTimers().get(runId))
-  const wait = Math.max(0, at - Date.now())
-  // setTimeout can't count past ~24 days; a reset is hours away.
-  resumeTimers().set(runId, setTimeout(() => fireResume(runId), Math.min(wait, 2 ** 31 - 1)))
+// One timer per seat and time (t_16ecccd4): a seat cut off on several wakes
+// before the reset (a queue of checks, a reply, the desk's batch) used to get
+// a timer each, and as many lines in the chat when they fired; 2026-11-17
+// evening, 23 lines「到点自动叫醒没成功」at one minute. Now the timer wakes
+// the seat once with all of them, and says so in one line.
+function resumeKey(agentId: string, at: number) {
+  return `${agentId}@${at}`
 }
 
-function fireResume(runId: string) {
-  resumeTimers().delete(runId)
+function armResume(runId: string, at: number) {
   const item = getRun(runId)
-  if (!item?.limited?.resumeAt || item.resumedAt || !item.project) return
-  autoFired().set(item.agentId, Date.now())
-  inProject(item.project, () => {
+  if (!item) return
+  const key = resumeKey(item.agentId, at)
+  if (resumeTimers().has(key)) return
+  const wait = Math.max(0, at - Date.now())
+  // setTimeout can't count past ~24 days; a reset is hours away.
+  const timer = setTimeout(() => fireResume(item.agentId, at), Math.min(wait, 2 ** 31 - 1))
+  timer.unref?.()
+  resumeTimers().set(key, timer)
+}
+
+function fireResume(agentId: string, at: number) {
+  resumeTimers().delete(resumeKey(agentId, at))
+  // Read off the records, not memory: what a restart re-armed is the same.
+  const due = pendingResumes().filter((item) => item.agentId === agentId && item.limited?.resumeAt === at && !item.resumedAt && item.project)
+  if (due.length === 0) return
+  autoFired().set(agentId, Date.now())
+  const project = due[0].project!
+  const name = due[0].agentName
+  const failed = (item: Run, why: string) => {
+    setLimited(item, { ...item.limited, resumeAt: undefined })
     try {
-      rewake(runId, true)
-    } catch (error) {
-      const why = error instanceof Error ? error.message : String(error)
-      setLimited(item, { ...item.limited, resumeAt: undefined })
-      markLimited(runId, { state: "failed", at: Date.now(), note: why })
-      postSystem(shortSys(`${item.agentName} 到点自动叫醒没成功`))
-    }
-  })
+      inProject(item.project!, () => markLimited(item.id, { state: "failed", at: Date.now(), note: why }))
+    } catch {}
+  }
+  let taken = 0
+  let why = ""
+  try {
+    inProject(project, () => {
+      let agent: ReturnType<typeof wakeable>
+      try {
+        agent = wakeable(agentId)
+      } catch (error) {
+        why = error instanceof Error ? error.message : String(error)
+        for (const item of due) failed(item, why)
+        return
+      }
+      const queue = lane(agent.id)
+      for (const item of due) {
+        try {
+          if (item.project !== project) throw new ApiError(400, "不在同一个项目")
+          if (!rewakeable(item)) throw new ApiError(400, item.purpose === "check" ? "检查叫不回去，房间已经换人查" : "没记下当时在做什么")
+          takeBack(item, agent, queue)
+          taken++
+        } catch (error) {
+          why ||= error instanceof Error ? error.message : String(error)
+          failed(item, error instanceof Error ? error.message : String(error))
+        }
+      }
+      if (taken === 0) return
+      syncLane(agent.id)
+      run(agent.id)
+    })
+  } catch (error) {
+    why ||= error instanceof Error ? error.message : String(error)
+  }
+  try {
+    inProject(project, () =>
+      postSystem(
+        taken > 0
+          ? `${name} 的额度恢复了，已经接着做`
+          : `${name} 的额度恢复了，但没接上：${why}。要它接着做就 @${name}，或在额度卡上点「现在重试」`,
+      ),
+    )
+  } catch {}
 }
 
 // What the user chose on the card: "schedule" (wake it after the reset), "now"
@@ -2510,15 +2748,20 @@ export function limitChoice(runId: string, action: string) {
     if (action === "schedule") {
       const resets = item.limited?.resetsAt
       if (!resets) throw new ApiError(400, "没读出几点重置，不能定时；可以点「现在重试」")
-      const at = resets + RESUME_MARGIN_MS
+      // A check, or a wake with nothing kept to send again: the timer could
+      // only fail (2026-11-17: 23 of them at 22:40, 8 more at 07:18).
+      if (!rewakeable(item)) {
+        throw new ApiError(400, item.purpose === "check" ? "这是一次检查，到点也叫不回去；检查房间会自己换人查" : "没记下当时在做什么，到点也叫不回去；要它接着做就直接 @ 它")
+      }
+      // A reset already past: a little from now (still one timer per seat).
+      const at = Math.max(resets + RESUME_MARGIN_MS, Math.ceil((Date.now() + RESUME_MARGIN_MS) / 60_000) * 60_000)
       setLimited(item, { resetsAt: resets, resumeAt: at })
       markLimited(runId, { state: "scheduled", at, note: undefined })
       armResume(runId, at)
       return { scheduled: at }
     }
     if (action === "cancel" || action === "dismiss") {
-      clearTimeout(resumeTimers().get(runId))
-      resumeTimers().delete(runId)
+      // The seat's timer stays for its other runs; this one is off the list.
       setLimited(item, { resetsAt: item.limited?.resetsAt })
       markLimited(runId, { state: action === "cancel" ? "open" : "dismissed", at: undefined })
       return { ok: true }
@@ -2558,6 +2801,7 @@ export function forgetMessage(messageId: string) {
 
 export function ensureSummon() {
   g().__benchSummonHandler = wake
+  ensureCheckSweep()
   g().__benchCheckHandler = ({ project, taskId, at }) => {
     try {
       inProject(project, () => requestCheck(taskId, at))

@@ -1,5 +1,5 @@
 import { boot } from "@/lib/boot"
-import { acceptDeputy, deputyPasses, reopenDeputy, setAutoAccept } from "@/lib/deputy"
+import { acceptDeputy, deputyIssues, deputyPasses, reopenDeputy, setAutoAccept } from "@/lib/deputy"
 import { ApiError, asRecord, asString, handle, json, readBody } from "@/lib/http"
 import { autoAcceptSince } from "@/lib/store"
 
@@ -24,13 +24,17 @@ export async function POST(request: Request) {
   }
 }
 
-// The passes it made (reopened ones left out): ?since=<ms>; and whether the
-// switch is on.
+// The passes it made (reopened ones left out): ?since=<ms>; plus recent 14-day
+// human passes signed off despite check issues, and whether the switch is on.
 export async function GET(request: Request) {
   try {
     await boot()
     const since = Number(new URL(request.url).searchParams.get("since") ?? 0)
-    return json({ passes: deputyPasses(Number.isFinite(since) && since > 0 ? since : 0), auto: autoAcceptSince() > 0 })
+    return json({
+      passes: deputyPasses(Number.isFinite(since) && since > 0 ? since : 0),
+      issues: deputyIssues(),
+      auto: autoAcceptSince() > 0,
+    })
   } catch (error) {
     return handle(error)
   }

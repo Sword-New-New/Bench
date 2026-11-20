@@ -368,6 +368,21 @@ export type TaskCheck = {
   at: number
   // The wake it ran in, to open its steps.
   runId?: string
+  // When it was put in a seat's queue (lib/summon.ts): one waiting there
+  // longer than BENCH_CHECK_STALE_MS goes to another seat.
+  queuedAt?: number
+  // Seats tried and given up on (waited too long, hit a usage limit), how
+  // many times it went to another seat, and until when it waits for a reset
+  // when every seat was out of quota (waited: it has waited once already).
+  avoid?: string[]
+  repicks?: number
+  waitUntil?: number
+  waited?: boolean
+  // Checked again after the owner fixed what the last check found (asked for
+  // review again while still waiting, t_a58c8546): which time this is
+  // (1, 2; RECHECK_MAX in lib/store.ts) and what the check before said.
+  round?: number
+  prev?: { state: "failed" | "unverified"; name?: string; at: number; note?: string }
 }
 
 export type TaskDeputy = {
@@ -378,6 +393,14 @@ export type TaskDeputy = {
   checkName?: string
 }
 
+export type TaskReviewIssue = {
+  // Check state when the user signed off despite a failed/incomplete/missing check.
+  state: TaskCheck["state"] | "none" | "stale"
+  checkBy?: string
+  checkName?: string
+  summary: string
+}
+
 export type TaskReview = {
   state: "waiting" | "passed" | "rejected"
   at: number
@@ -386,6 +409,8 @@ export type TaskReview = {
   note?: string
   // Passed by the front desk on the user's behalf (lib/deputy.ts).
   deputy?: TaskDeputy
+  // Recorded when the user passes a task whose check failed, didn't finish, or didn't run.
+  issue?: TaskReviewIssue
   // The user took a deputy pass back. It stays theirs to sign until the owner
   // asks for review again (a new ask writes a new record without this).
   reopened?: true
@@ -519,6 +544,9 @@ export type RoomSnapshot = {
   // Talk since the last summary (or since the user skipped one).
   sinceSummary: { count: number; chars: number }
   summaryDue: boolean
+  // The room is still finding a seat to write it (lib/summary-auto.ts): the
+  // card asking the user who should is held back meanwhile.
+  summaryHeld?: boolean
   // The seat writing a summary right now.
   summaryWriter: string | null
   // An agent ended the round; agents wake nobody until the user speaks.

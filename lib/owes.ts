@@ -1,4 +1,3 @@
-import { awaitingReview } from "@/lib/review"
 import type { Message, PublicAgent, SeatOwes, Task } from "@/lib/types"
 
 type ContinueWokenReader = (seatId: string, tasks: Task[], nonRoomCallIds: string[]) => SeatOwes["woken"]
@@ -76,8 +75,10 @@ export function owedTasks(seatId: string, tasks: Task[]) {
     (task) =>
       task.ownerId === seatId &&
       (task.status === "open" || task.status === "doing") &&
-      task.review?.state !== "waiting" &&
-      !awaitingReview(task),
+      // Asked for review: the user's now. Only the sign-off left but never
+      // asked for (awaitingReview counts it as waiting) is still the
+      // owner's: to say how to see it work and ask; nothing checks it before.
+      task.review?.state !== "waiting",
   )
 }
 

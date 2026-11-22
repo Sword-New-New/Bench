@@ -20,7 +20,10 @@ process.env.BENCH_DATA_DIR = path.join(tmp, "data")
 process.env.XDG_STATE_HOME = path.join(tmp, "state")
 process.env.BENCH_FIRST_PARENT = desktop
 process.env.BENCH_FIRST_KINDS = process.env.FIRST_PART ? "claude" : "none"
-process.on("exit", () => rmSync(tmp, { recursive: true, force: true }))
+process.on("exit", () => {
+  try { globalThis.__benchSqlite?.db?.close() } catch {}
+  try { rmSync(tmp, { recursive: true, force: true }) } catch {}
+})
 
 const lib = (name) => import(pathToFileURL(path.join(root, "lib", `${name}.ts`)).href)
 const store = await lib("store")

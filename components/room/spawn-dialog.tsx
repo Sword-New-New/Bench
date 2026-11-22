@@ -6,6 +6,7 @@ import { toast } from "sonner"
 
 import { AdvancedSection } from "@/components/room/advanced"
 import { api } from "@/components/room/api"
+import { usePathPicker } from "@/components/room/folder-picker"
 import { ModelField, NO_LIMITS, type Limits } from "@/components/room/model-field"
 import { Button } from "@/components/ui/button"
 import {
@@ -75,7 +76,7 @@ export function SpawnDialog({
   const [mode, setMode] = useState<Mode>("same")
   const [base, setBase] = useState<Workspace | null>(null)
   const [typed, setTyped] = useState("")
-  const [browsing, setBrowsing] = useState(false)
+  const picker = usePathPicker(kind !== null)
   const [sending, setSending] = useState(false)
   const [advOpen, setAdvOpen] = useState(false)
   // 「默认给全权」: the last choice, kept in this browser; off at first.
@@ -174,21 +175,10 @@ export function SpawnDialog({
               ? `将在 ${short(base.path)} 里工作${from ? `（与 ${from.name} 同目录）` : ""}。`
               : "将在新建的临时文件夹里工作，用后需手动清理。"
 
-  // The desktop's own folder picker, opened by the room (a page never gets a
-  // folder's full path itself).
+  // The desktop's own folder picker, opened by the room (with in-page fallback).
   const browse = async () => {
-    setBrowsing(true)
-    try {
-      const result = await api<{ dir: string | null }>("/api/v1/folder", {
-        method: "POST",
-        body: JSON.stringify({ as: "human", start: typed.trim() || base?.path || "" }),
-      })
-      if (result.dir) setTyped(result.dir)
-    } catch (error) {
-      toast.error(error instanceof Error ? error.message : "打开目录选择失败")
-    } finally {
-      setBrowsing(false)
-    }
+    const picked = await picker.browse({ start: typed.trim() || base?.path || "" })
+    if (picked?.[0]) setTyped(picked[0])
   }
 
   const create = async () => {
@@ -333,9 +323,9 @@ export function SpawnDialog({
                     aria-label="工作目录"
                     className="min-w-0 flex-1 font-mono text-xs"
                   />
-                  <Button type="button" variant="outline" className="shrink-0" disabled={browsing} onClick={browse}>
-                    {browsing ? <Loader2 className="animate-spin" /> : <FolderSearch />}
-                    {browsing ? "选择中…" : "浏览"}
+                  <Button type="button" variant="outline" className="shrink-0" disabled={picker.browsing} onClick={browse}>
+                    {picker.browsing ? <Loader2 className="animate-spin" /> : <FolderSearch />}
+                    {picker.browsing ? "选择中…" : "浏览"}
                   </Button>
                 </div>
               ) : mode === "temp" ? null : spaces === null ? (
@@ -409,6 +399,7 @@ export function SpawnDialog({
           </DialogFooter>
         </form>
       </DialogContent>
+      {picker.dialog}
     </Dialog>
   )
 }

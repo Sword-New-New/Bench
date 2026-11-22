@@ -2,7 +2,7 @@ import { existsSync, readdirSync } from "node:fs"
 import os from "node:os"
 import path from "node:path"
 
-import { adapterFor, installed } from "@/lib/adapters"
+import { adapterFor, bundledCodex, installed } from "@/lib/adapters"
 import { sessionRecord } from "@/lib/context"
 import { lastRunOf } from "@/lib/runs"
 import { agentState, isStandby } from "@/lib/store"
@@ -35,7 +35,7 @@ const UNDER: Record<string, { bin: string; also: () => string | null }> = {
       return null
     },
   },
-  codex: { bin: "codex", also: () => (existsSync("/usr/lib/chatgpt/resources/codex") ? "/usr/lib/chatgpt/resources/codex" : null) },
+  codex: { bin: "codex", also: () => bundledCodex() },
 }
 
 function seconds(ms: number) {

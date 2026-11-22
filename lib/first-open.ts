@@ -3,7 +3,7 @@ import { existsSync, mkdirSync, readdirSync, readFileSync, statSync } from "node
 import os from "node:os"
 import path from "node:path"
 
-import { installed } from "@/lib/adapters"
+import { bundledCodex, installed } from "@/lib/adapters"
 import { folderNameOf } from "@/lib/first-name"
 import { ApiError, asRecord, asString } from "@/lib/http"
 import { kindById } from "@/lib/kinds"
@@ -67,6 +67,7 @@ function clientInstalled(kind: string) {
       if (readdirSync(bundled).length > 0) return true
     } catch {}
   }
+  if (kind === "codex" && bundledCodex()) return true
   return (CLIENT_BINS[kind] ?? []).some((bin) => (bin.startsWith("/") ? existsSync(bin) : installed(bin)))
 }
 

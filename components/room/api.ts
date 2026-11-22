@@ -55,6 +55,17 @@ export function human(): Record<string, string> {
   return key ? { "x-bench-human": key } : {}
 }
 
+export class ApiResponseError extends Error {
+  status: number
+  fallback?: boolean
+
+  constructor(message: string, status: number, fallback?: boolean) {
+    super(message)
+    this.status = status
+    this.fallback = fallback
+  }
+}
+
 export async function api<T>(path: string, init?: RequestInit): Promise<T> {
   const read = !init?.method || init.method === "GET"
   const res = await fetch(read ? inOpenProject(path) : path, {
@@ -69,14 +80,10 @@ export async function api<T>(path: string, init?: RequestInit): Promise<T> {
   })
   const data: unknown = await res.json().catch(() => ({}))
   if (!res.ok) {
-    const message =
-      typeof data === "object" &&
-      data !== null &&
-      "error" in data &&
-      typeof data.error === "string"
-        ? data.error
-        : "房间没有接住这次请求"
-    throw new Error(message)
+    const record = typeof data === "object" && data !== null ? (data as { error?: unknown; fallback?: unknown }) : null
+    const message = typeof record?.error === "string" ? record.error : "房间没有接住这次请求"
+    const fallback = record?.fallback === true
+    throw new ApiResponseError(message, res.status, fallback)
   }
   return data as T
 }

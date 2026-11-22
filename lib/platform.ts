@@ -56,7 +56,7 @@ export function cliCommand(file: string, args: string[], platform: Platform = pr
   if (platform !== "win32") return [file, args]
   const program = shellProgram(platform)
   if (!program) throw new Error(NO_BASH)
-  return [program, ["-c", 'exec "$@"', "bench", file, ...args]]
+  return [program, ["-c", 'export MSYS_NO_PATHCONV=1; exec "$@"', "bench", file, ...args]]
 }
 
 // The program and arguments that run one of the room's own bash scripts
@@ -75,6 +75,16 @@ export function commandLine(command: string, platform: Platform = process.platfo
   return [program, ["-c", command]]
 }
 
+// Like commandLine, but on Windows Git Bash (MSYS2) truncates `-c` arguments
+// around 8 KB, so wake commands pass the script on stdin (`-s`) with stdin inside
+// the block redirected back to /dev/null.
+export function wakeCommand(command: string, platform: Platform = process.platform): { program: string; args: string[]; input?: string } {
+  const program = shellProgram(platform)
+  if (!program) throw new Error(NO_BASH)
+  if (platform === "win32") return { program, args: ["-s"], input: `export MSYS_NO_PATHCONV=1\n{\n${command}\n} </dev/null\n` }
+  return { program, args: ["-c", command] }
+}
+
 // The directories added to a woken command's PATH when the room lacks them:
 // where the CLIs usually are (a room started from a desktop icon has a
 // shorter PATH than a terminal).
@@ -83,6 +93,7 @@ export function extraBins(platform: Platform = process.platform, env: NodeJS.Pro
     const join = path.win32.join
     return [
       join(home, ".local", "bin"),
+      ...(env.LOCALAPPDATA ? [join(env.LOCALAPPDATA, "agy", "bin")] : []),
       ...(env.APPDATA ? [join(env.APPDATA, "npm")] : []),
       ...(env.LOCALAPPDATA ? [join(env.LOCALAPPDATA, "Microsoft", "WinGet", "Links")] : []),
     ]

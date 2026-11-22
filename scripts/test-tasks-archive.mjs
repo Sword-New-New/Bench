@@ -65,7 +65,10 @@ if (seedDir) {
 // Phase 2 (main): spawn phase 1 to populate the temp DB, then load the store cold from that DB.
 const tmp = mkdtempSync(path.join(os.tmpdir(), "bench-archive-"))
 const dataDir = path.join(tmp, "data")
-process.on("exit", () => rmSync(tmp, { recursive: true, force: true }))
+process.on("exit", () => {
+  try { globalThis.__benchSqlite?.db?.close() } catch {}
+  try { rmSync(tmp, { recursive: true, force: true }) } catch {}
+})
 
 const seedRun = spawnSync(process.execPath, [fileURLToPath(import.meta.url)], {
   cwd: root,

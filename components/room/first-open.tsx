@@ -4,6 +4,7 @@ import { useCallback, useEffect, useState } from "react"
 import { ArrowRight, Loader2, Settings2 } from "lucide-react"
 
 import { api } from "@/components/room/api"
+import { usePathPicker } from "@/components/room/folder-picker"
 import { Button } from "@/components/ui/button"
 import { Textarea } from "@/components/ui/textarea"
 import { folderNameOf } from "@/lib/first-name"
@@ -27,7 +28,7 @@ export function FirstOpen({ onMore, onStarted }: { onMore: () => void; onStarted
   const [kind, setKind] = useState<string | null>(null)
   const [dir, setDir] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
-  const [browsing, setBrowsing] = useState(false)
+  const picker = usePathPicker(true)
   const [problem, setProblem] = useState("")
 
   const look = useCallback(() => {
@@ -50,18 +51,8 @@ export function FirstOpen({ onMore, onStarted }: { onMore: () => void; onStarted
   }
 
   const browse = async () => {
-    setBrowsing(true)
-    try {
-      const result = await api<{ dir: string | null }>("/api/v1/folder", {
-        method: "POST",
-        body: JSON.stringify({ as: "human", start: dir ?? info.parent }),
-      })
-      if (result.dir) setDir(result.dir)
-    } catch (error) {
-      setProblem(error instanceof Error ? error.message : "打不开选择文件夹的窗口")
-    } finally {
-      setBrowsing(false)
-    }
+    const picked = await picker.browse({ start: dir ?? info.parent })
+    if (picked?.[0]) setDir(picked[0])
   }
 
   const start = async () => {
@@ -131,8 +122,8 @@ export function FirstOpen({ onMore, onStarted }: { onMore: () => void; onStarted
               <dt>放在哪</dt>
               <dd className="min-w-0">{where}</dd>
               <dd>
-                <button type="button" className="text-primary hover:underline disabled:opacity-50" disabled={browsing} onClick={() => void browse()}>
-                  {browsing ? "选择中…" : "换一个"}
+                <button type="button" className="text-primary hover:underline disabled:opacity-50" disabled={picker.browsing} onClick={() => void browse()}>
+                  {picker.browsing ? "选择中…" : "换一个"}
                 </button>
               </dd>
             </dl>
@@ -163,6 +154,7 @@ export function FirstOpen({ onMore, onStarted }: { onMore: () => void; onStarted
           </div>
         )}
       </div>
+      {picker.dialog}
     </div>
   )
 }

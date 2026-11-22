@@ -5,7 +5,7 @@ import os from "node:os"
 import path from "node:path"
 import { promisify } from "node:util"
 
-import { adapterFor, installed, modelOf, summonPath } from "@/lib/adapters"
+import { adapterFor, bundledCodex, installed, modelOf, summonPath } from "@/lib/adapters"
 import { checkPct, checkWindow, CONTEXT_KINDS } from "@/lib/context"
 import { cliCommand, dataHome } from "@/lib/platform"
 import { checkEffort, checkPick, dshFlags } from "@/lib/models"
@@ -250,6 +250,26 @@ async function newDshSession(dir: string, seat: { name: string; role: string; pr
   throw new ApiError(500, `dsh-agent 跑完了，但没报出会话 id${lastWords(stdout)}`)
 }
 
+const ANTIGRAVITY_INHERITED_ENV = [
+  "ANTIGRAVITY_AGENT",
+  "ANTIGRAVITY_AGENTAPI_EXE",
+  "ANTIGRAVITY_CONVERSATION_ID",
+  "ANTIGRAVITY_PROJECT_ID",
+  "ANTIGRAVITY_SOURCE_METADATA",
+  "ANTIGRAVITY_TRAJECTORY_ID",
+  "ANTIGRAVITY_LS_ADDRESS",
+  "ANTIGRAVITY_CSRF_TOKEN",
+  "ANTIGRAVITY_LS_VERSION",
+]
+
+function cleanAgyEnv(): NodeJS.ProcessEnv {
+  const env = { ...process.env }
+  if (env.BENCH_KEEP_ANTIGRAVITY_ENV !== "1") {
+    for (const key of ANTIGRAVITY_INHERITED_ENV) delete env[key]
+  }
+  return env
+}
+
 // agy also picks the conversation id itself: one short first turn in the
 // folder (print mode, JSON out) and its conversation_id is the seat's. Run on
 // the same quick model the wake command uses unless the user picked another,
@@ -259,21 +279,24 @@ async function newAgySession(dir: string, seat: { name: string; role: string; pr
   const intro =
     `这是并坐房间为你开的会话：你在「${seat.project}」项目里的席位叫 ${seat.name}，分工是 ${seat.role}。` +
     "房间已经替你入座，不用调用 bench_join。之后有人 @你，房间会把消息转给你，你的回答会贴回房间。现在只回一个字：好"
+  const adapter = adapterFor("antigravity")
+  const model = pick ?? (adapter && modelOf(adapter)) ?? "gemini-3.8-flash-low"
   const settings = JSON.stringify({ permissions: { allow: ["mcp(bench/*)"] } })
   let stdout = ""
   let stderr = ""
   try {
     ;({ stdout, stderr } = await run(
       "agy",
-      ["--model", pick ?? "gemini-3.8-flash-low", "--settings", settings, "--output-format", "json", "-p", intro],
-      { cwd: dir, timeout: 180_000, maxBuffer: 16 * 1024 * 1024 },
+      ["--model", model, "--settings", settings, "--output-format", "json", "-p", intro],
+      { cwd: dir, timeout: 180_000, maxBuffer: 16 * 1024 * 1024, env: cleanAgyEnv() },
     ))
   } catch (error) {
     const err = error as { stderr?: string; stdout?: string; message?: string }
     stdout = err.stdout ?? ""
     stderr = err.stderr ?? ""
     if (!stdout.includes("conversation_id")) {
-      const why = (err.stderr || err.message || "").trim().split("\n").slice(-1)[0]
+      const lines = (err.stderr || err.message || "").trim().split(/\r?\n/).filter(Boolean)
+      const why = lines.slice(0, 3).join(" | ") || lines.slice(-1)[0] || ""
       throw new ApiError(500, `agy 没开出会话：${why.slice(0, 300)}`)
     }
   }
@@ -303,8 +326,7 @@ async function newCursorSession(dir: string) {
 // --json` in the folder, and its thread.started event names the thread. The
 // bench tools are pre-approved as in codex-wake.sh.
 async function newCodexSession(dir: string, seat: { name: string; role: string; project: string }, pick: string | null) {
-  const bundled = "/usr/lib/chatgpt/resources/codex"
-  const bin = installed("codex") ? "codex" : isFile(bundled) ? bundled : null
+  const bin = installed("codex") ? "codex" : bundledCodex()
   if (!bin) throw new ApiError(501, "没找到 codex，先装 Codex 的命令行或桌面端")
   const intro =
     `这是并坐房间为你开的会话：你在「${seat.project}」项目里的席位叫 ${seat.name}，分工是 ${seat.role}。` +
@@ -455,7 +477,7 @@ export async function spawnSession(input: Record<string, unknown>) {
   const temp = where.mode === "temp"
   const from = temp ? "" : asText(where.path, 1000)
   if (!temp && (!from || !path.isAbsolute(from))) throw new ApiError(400, "工作目录要填完整路径，比如 /home/you/project 或 C:\\work\\project")
-  const base = temp ? "" : path.resolve(from.replace(/^~(?=\/|$)/, os.homedir()))
+  const base = temp ? "" : path.resolve(from.replace(/^~(?=[\\/]|$)/, os.homedir()))
   if (!temp && !isDir(base)) throw new ApiError(400, `${base} 不存在或不是目录`)
   if (snapshot().agents.some((agent) => agent.name === name)) throw new ApiError(409, `已经有人叫 ${name}，换个名字`)
   checkFrontSeat()
@@ -517,7 +539,7 @@ export async function rebindSession(agentId: string, input: Record<string, unkno
 
   const project = currentProjectInfo()
   const rawDir = asText(input.workdir, 1000)
-  let dir = rawDir ? path.resolve(rawDir.replace(/^~(?=\/|$)/, os.homedir())) : (seatDir(agentId) ?? project.dir ?? process.cwd())
+  let dir = rawDir ? path.resolve(rawDir.replace(/^~(?=[\\/]|$)/, os.homedir())) : (seatDir(agentId) ?? project.dir ?? process.cwd())
   if (!isDir(dir)) {
     if (rawDir) throw new ApiError(400, `${dir} 不存在或不是目录`)
     dir = process.cwd()

@@ -6,6 +6,7 @@ import { toast } from "sonner"
 
 import { AdvancedSection } from "@/components/room/advanced"
 import { api } from "@/components/room/api"
+import { usePathPicker } from "@/components/room/folder-picker"
 import { Button } from "@/components/ui/button"
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog"
 import {
@@ -153,7 +154,7 @@ export function ProjectDialog({
   const [dir, setDir] = useState("")
   const [sending, setSending] = useState(false)
   const [confirming, setConfirming] = useState(false)
-  const [browsing, setBrowsing] = useState(false)
+  const picker = usePathPicker(open)
   const [advOpen, setAdvOpen] = useState(false)
   // 「请验收时先复验」: the seats to choose from, who checks now, and the pick.
   const [seats, setSeats] = useState<PublicAgent[] | null>(null)
@@ -247,20 +248,10 @@ export function ProjectDialog({
     }
   }
 
-  // The desktop's own folder picker, opened by the room.
+  // The desktop's own folder picker, opened by the room (with in-page fallback).
   const browse = async () => {
-    setBrowsing(true)
-    try {
-      const result = await api<{ dir: string | null }>("/api/v1/folder", {
-        method: "POST",
-        body: JSON.stringify({ as: "human", start: dir.trim() }),
-      })
-      if (result.dir) setDir(result.dir)
-    } catch (error) {
-      toast.error(error instanceof Error ? error.message : "打开目录选择失败")
-    } finally {
-      setBrowsing(false)
-    }
+    const picked = await picker.browse({ start: dir.trim() })
+    if (picked?.[0]) setDir(picked[0])
   }
 
   const remove = async () => {
@@ -322,9 +313,9 @@ export function ProjectDialog({
                   className="pl-8 font-mono text-xs"
                 />
               </div>
-              <Button type="button" variant="outline" className="shrink-0" disabled={browsing} onClick={browse}>
-                {browsing ? <Loader2 className="animate-spin" /> : <FolderSearch />}
-                {browsing ? "选择中…" : "浏览"}
+              <Button type="button" variant="outline" className="shrink-0" disabled={picker.browsing} onClick={browse}>
+                {picker.browsing ? <Loader2 className="animate-spin" /> : <FolderSearch />}
+                {picker.browsing ? "选择中…" : "浏览"}
               </Button>
             </div>
             <p className="text-[0.6875rem] leading-4 text-muted-foreground">
@@ -415,6 +406,7 @@ export function ProjectDialog({
           </DialogFooter>
         </form>
       </DialogContent>
+      {picker.dialog}
     </Dialog>
   )
 }

@@ -15,7 +15,10 @@ const root = process.env.BENCH_ROOT || path.resolve(path.dirname(fileURLToPath(i
 register(pathToFileURL(path.join(root, "scripts/ts-alias.mjs")).href, import.meta.url)
 const data = mkdtempSync(path.join(os.tmpdir(), "bench-away-"))
 process.env.BENCH_DATA_DIR = data
-process.on("exit", () => rmSync(data, { recursive: true, force: true }))
+process.on("exit", () => {
+  try { globalThis.__benchSqlite?.db?.close() } catch {}
+  try { rmSync(data, { recursive: true, force: true }) } catch {}
+})
 
 const lib = (name) => import(pathToFileURL(path.join(root, "lib", `${name}.ts`)).href)
 const store = await lib("store")

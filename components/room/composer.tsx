@@ -2,8 +2,9 @@ import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react"
 import { File, Folder, Paperclip, Send, X } from "lucide-react"
 import { toast } from "sonner"
 
-import { PendingFiles, pickPaths, previewText, uploadFile, type Pending } from "@/components/room/attachments"
+import { PendingFiles, pathsToPending, previewText, uploadFile, type Pending } from "@/components/room/attachments"
 import { Avatar, seatLook } from "@/components/room/bits"
+import { usePathPicker } from "@/components/room/folder-picker"
 import { Reveal } from "@/components/room/reveal"
 import { Button } from "@/components/ui/button"
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from "@/components/ui/dropdown-menu"
@@ -59,6 +60,7 @@ export function Composer({
 }) {
   const [picked, setPicked] = useState(false)
   const [dragging, setDragging] = useState(false)
+  const picker = usePathPicker(true)
   const chips = useChipOrder()
   // The (up to) three chips of whoever spoke last, taken when you click into
   // the input to type, and kept while you do so the row doesn't move under you.
@@ -85,12 +87,12 @@ export function Composer({
   }
 
   function pick(kind: "files" | "dirs") {
-    pickPaths(kind)
-      .then((chosen) => {
-        if (chosen.length) onFiles((current) => [...current, ...chosen])
+    void picker
+      .browse({ pick: kind })
+      .then((paths) => {
+        if (paths?.length) onFiles((current) => [...current, ...pathsToPending(kind, paths)])
         inputRef.current?.focus()
       })
-      .catch((error: unknown) => toast.error(error instanceof Error ? error.message : "没打开选择窗口"))
   }
   const formRef = useRef<HTMLFormElement>(null)
 
@@ -214,6 +216,7 @@ export function Composer({
   }
 
   return (
+    <>
     <form
       ref={formRef}
       className="absolute inset-x-0 bottom-0 z-10 px-3 pb-3 md:px-6"
@@ -427,6 +430,8 @@ export function Composer({
         </p>
       </Reveal>
     </form>
+    {picker.dialog}
+    </>
   )
 }
 

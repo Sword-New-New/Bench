@@ -43,20 +43,35 @@ case "$kind" in
     exec "$bin" "${entry[@]}" --resume "$session" "${model[@]}"
     ;;
   codex)
-    bin="$(command -v codex || echo /usr/lib/chatgpt/resources/codex)"
-    [[ -x "$bin" ]] || { echo "找不到 codex 可执行文件" >&2; exit 127; }
+    here="$(cd "$(dirname "$0")" && pwd)"
+    node_bin="$(command -v node || true)"
+    [[ -n "$node_bin" ]] || node_bin=/usr/local/nodejs/bin/node
+    bin="$(command -v codex || true)"
+    if [[ -z "$bin" && -x "$node_bin" ]]; then
+      bin="$("$node_bin" "$here/codex-bin.mjs" --bundled 2>/dev/null || true)"
+    fi
+    if [[ -n "$bin" ]] && command -v cygpath >/dev/null 2>&1 && [[ -e "$bin" ]]; then
+      bin="$(cygpath -u "$bin")"
+    fi
+    [[ -n "$bin" && -x "$bin" ]] || { echo "找不到 codex 可执行文件" >&2; exit 127; }
     [[ -n "${BENCH_MODEL:-}" ]] && model=(-m "$BENCH_MODEL")
     [[ -n "${BENCH_EFFORT:-}" ]] && model+=(-c "model_reasoning_effort=\"$BENCH_EFFORT\"")
     [[ "${BENCH_COMPACT_WINDOW:-}" =~ ^[0-9]+$ ]] && model+=(-c "model_auto_compact_token_limit=$BENCH_COMPACT_WINDOW")
     file="$(find "$HOME/.codex/sessions" -name "rollout-*-$session.jsonl" 2>/dev/null | head -1 || true)"
     if [[ -n "$file" ]]; then
       dir="$(head -1 "$file" | grep -o '"cwd":"[^"]*"' | head -1 | sed 's/^"cwd":"//; s/"$//' || true)"
+      if [[ -z "$dir" || ! -d "$dir" ]] && [[ -x "$node_bin" ]]; then
+        dir="$("$node_bin" -e 'try{const line=require("fs").readFileSync(process.argv[1],"utf8").split("\n")[0];console.log(JSON.parse(line)?.payload?.cwd||"")}catch{}' "$file" 2>/dev/null || true)"
+      fi
+      if command -v cygpath >/dev/null 2>&1 && [[ -n "$dir" ]]; then
+        dir="$(cygpath -u "$dir" 2>/dev/null || echo "$dir")"
+      fi
       [[ -n "$dir" && -d "$dir" ]] && cd "$dir"
     elif [[ -n "${BENCH_NEW_DIR:-}" ]]; then
       cd "$BENCH_NEW_DIR"
     fi
     # Codex doesn't tell its MCP server the thread id; the bench tools need it.
-    exec "$bin" resume "${model[@]}" -c "mcp_servers.bench.env.BENCH_UUID=\"$session\"" "$session"
+    MSYS_NO_PATHCONV=1 exec "$bin" resume "${model[@]}" -c "mcp_servers.bench.env.BENCH_UUID=\"$session\"" "$session"
     ;;
   *)
     echo "$kind 还不能在房间里开终端" >&2

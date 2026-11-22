@@ -9,15 +9,35 @@ set -euo pipefail
 
 id="${1:-}"
 text="${2:-}"
+if [[ -n "${BENCH_PROMPT_FILE:-}" && -f "$BENCH_PROMPT_FILE" ]]; then
+  text="$(cat "$BENCH_PROMPT_FILE")"
+fi
 [[ "$id" =~ ^[A-Za-z0-9._-]+$ ]] || { echo "thread id 不对：$id" >&2; exit 2; }
-bin="$(command -v codex || echo /usr/lib/chatgpt/resources/codex)"
+here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+node_bin="$(command -v node || true)"
+[[ -n "$node_bin" ]] || node_bin=/usr/local/nodejs/bin/node
+bin="${CODEX_BIN:-}"
+if [[ -z "$bin" ]]; then
+  bin="$(command -v codex || true)"
+fi
+# No codex on PATH: the Codex desktop app bundles one.
+if [[ -z "$bin" && -x "$node_bin" ]]; then
+  bin="$("$node_bin" "$here/codex-bin.mjs" --bundled 2>/dev/null || true)"
+fi
+if [[ -n "$bin" ]] && command -v cygpath >/dev/null 2>&1 && [[ -e "$bin" ]]; then
+  bin="$(cygpath -m "$bin")"
+fi
 
 # The turn runs through `codex app-server` (codex-app.mjs), so messages that
 # call the seat while it works go into the same turn with turn/steer. It prints
 # the same events as `codex exec --json`. BENCH_CODEX_EXEC=1 goes back to
 # plain `codex exec`, which only hears them after the turn.
-if [[ "${BENCH_CODEX_EXEC:-}" != "1" ]] && command -v node >/dev/null; then
-  CODEX_BIN="$bin" exec node "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/codex-app.mjs" "$id" "$text" < /dev/null
+if [[ "${BENCH_CODEX_EXEC:-}" != "1" ]] && [[ -x "$node_bin" ]]; then
+  if [[ -n "${BENCH_PROMPT_FILE:-}" && -f "$BENCH_PROMPT_FILE" ]]; then
+    CODEX_BIN="${bin:-${CODEX_BIN:-}}" exec "$node_bin" "$here/codex-app.mjs" "$id" </dev/null
+  else
+    CODEX_BIN="${bin:-${CODEX_BIN:-}}" exec "$node_bin" "$here/codex-app.mjs" "$id" "$text" </dev/null
+  fi
 fi
 
 # Plain `codex exec` would send "/compact" as a message; only the app-server
@@ -46,6 +66,14 @@ fi
 # Nobody can be asked on this path (only codex-app.mjs puts approvals on the
 # page), so it may write in its workspace and nothing more.
 pick+=(-c 'sandbox_mode="workspace-write"' -c 'approval_policy="never"')
+[[ -n "$bin" ]] || { echo "没找到 codex，先装 Codex 的命令行或桌面端" >&2; exit 127; }
+export MSYS_NO_PATHCONV=1
+if [[ -n "${BENCH_PROMPT_FILE:-}" && -f "$BENCH_PROMPT_FILE" && ${#text} -gt 24000 ]]; then
+  exec "$bin" exec resume --skip-git-repo-check --json "${pick[@]}" \
+    -c "mcp_servers.bench.env.BENCH_UUID=\"$id\"" \
+    -c 'mcp_servers.bench.default_tools_approval_mode="approve"' \
+    "$id" - < "$BENCH_PROMPT_FILE"
+fi
 exec "$bin" exec resume --skip-git-repo-check --json "${pick[@]}" \
   -c "mcp_servers.bench.env.BENCH_UUID=\"$id\"" \
   -c 'mcp_servers.bench.default_tools_approval_mode="approve"' \

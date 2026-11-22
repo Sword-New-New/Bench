@@ -6,6 +6,7 @@ import { ApiError } from "@/lib/http"
 import { KINDS, wakeModel } from "@/lib/kinds"
 import { withEffort, withModel } from "@/lib/models"
 import { commandNames, extraBins, pathDelimiter } from "@/lib/platform"
+import { findBundledCodex } from "@/scripts/codex-bin.mjs"
 
 export type Adapter = {
   name: string
@@ -116,6 +117,11 @@ export function whereIs(name: string) {
   return null
 }
 
+// Codex desktop app ships its own codex binary (Linux deb, macOS app, or
+// Windows Store/desktop install), which is not on PATH.
+export function bundledCodex(): string | null {
+  return findBundledCodex()
+}
 export function installed(command: string) {
   const first = command.trim().match(/^(?:'([^']*)'|"([^"]*)"|(\S+))/)
   const bin = first?.[1] ?? first?.[2] ?? first?.[3]
@@ -172,7 +178,7 @@ export function tomlString(file: string, key: string, table = "") {
     // The keys of one table: top level by default, else that [table].
     const text = readFileSync(file, "utf8")
     // A header on a line of its own; comments can mention "[table]" too.
-    const header = table ? new RegExp(`^\\[${table}\\][ \\t]*$`, "m").exec(text) : null
+    const header = table ? new RegExp(`^\\[${table}\\][ \\t]*\\r?$`, "m").exec(text) : null
     if (table && !header) return null
     const body = text.slice(header ? header.index + header[0].length : 0).split(/^\[/m)[0]
     return body.match(new RegExp(`^${key}\\s*=\\s*"([^"]+)"`, "m"))?.[1] ?? null

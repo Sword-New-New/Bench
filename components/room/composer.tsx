@@ -436,7 +436,7 @@ export function Composer({
           {slash === null
             ? null
             : slash.command.mode === "workflow"
-              ? `/${slash.command.name}：${slash.command.about}${slash.text ? "" : " · 后面写上需求"}`
+              ? `/${slash.command.name}：${slash.command.about}${slash.text ? "" : ` · 后面写上${slash.command.hint || "需求"}`}`
             : slash.targets.length === 0 && !sole
               ? `/${slash.command.name} 要发给谁？@ 一个席位，或点下面的名字`
               : slash.command.needsText && !slash.text

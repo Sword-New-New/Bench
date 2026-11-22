@@ -527,7 +527,7 @@ export type PermitRequest = {
   at: number
 }
 
-export type WorkflowKind = "orchestrate" | "plan"
+export type WorkflowKind = "orchestrate" | "plan" | "explore"
 
 export type Workflow = {
   id: string
@@ -539,6 +539,7 @@ export type Workflow = {
   workers?: string[]
   summarizer?: string
   planners?: string[]
+  explorers?: string[]
   note?: string
   createdAt: number
   updatedAt: number

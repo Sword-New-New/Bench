@@ -68,6 +68,30 @@ assert.equal(flows.saveWorkflow(pid, { ...custom, name: "双人设计" }).name, 
 assert.equal(flows.listWorkflows("other-project").length, 0)
 assert.throws(() => flows.deleteWorkflow("other-project", custom.id), /不存在|没有/)
 
+// Multi-AI explore mode: builtin /explore, CRUD, command guard, multi-seat parallel wake
+const builtinExplore = flows.findWorkflow(pid, { command: "explore" })
+assert.throws(() => flows.renderWorkflow(builtinExplore, "探索缓存方案", seats), /还没有配置探索席位/)
+assert.deepEqual(
+  flows.renderWorkflow(builtinExplore, "探索缓存方案", seats, { explorers: ["主控席", "执行席", "汇总席"] }).targets,
+  ["a_0", "a_1", "a_3"],
+)
+assert.throws(() => flows.saveWorkflow(pid, { ...work, id: undefined, command: "explore" }), /explore 命令只用于/)
+const exploreFlow = flows.saveWorkflow(pid, {
+  name: "多 AI 架构探索",
+  kind: "explore",
+  command: "explore",
+  explorers: ["主控席", "执行席", "汇总席"],
+})
+const renderedExplore = flows.renderWorkflow(exploreFlow, "对比三种状态同步方案", seats)
+assert.deepEqual(renderedExplore.targets, ["a_0", "a_1", "a_3"])
+assert.match(renderedExplore.text, /多 AI 联合探索.*不修改代码或文件/)
+assert.match(renderedExplore.text, /探索主题：\n对比三种状态同步方案/)
+const parsedExplore = parseSlash("/explore 探索渲染性能 @汇总席 @主控席 @执行席", seats.map((s) => s.name), [...savedList, exploreFlow])
+assert.equal(parsedExplore.command.mode, "workflow")
+assert.equal(parsedExplore.command.workflowId, exploreFlow.id)
+assert.deepEqual(parsedExplore.targets, ["汇总席", "主控席", "执行席"])
+assert.equal(slashCommands([...savedList, exploreFlow]).filter((c) => c.name === "explore").length, 1)
+
 const parsed = parseSlash("/plan 做改版 @搭档乙 @执行席", seats.map((s) => s.name), savedList)
 assert.equal(parsed.command.mode, "workflow")
 assert.deepEqual(parsed.targets, ["搭档乙", "执行席"], "点名按输入顺序，首位负责统稿")
@@ -114,5 +138,7 @@ store.inProject(pid, () => {
   assert.throws(() => store.workflowAction({ agentId: joined[0].agent.id, token: joined[0].token, action: "delete", id: saved.id }), /只有.*用户/)
   const planned = store.workflowAction({ as: "human", action: "run", command: "plan", targets: ["搭档乙", "执行席"], text: "规划" })
   assert.deepEqual(store.summonCandidates(planned.message).map((a) => a.name).sort(), ["执行席", "搭档乙"].sort())
+  const explored = store.workflowAction({ as: "human", action: "run", command: "explore", targets: ["主控席", "汇总席", "执行席"], text: "多角度探索" })
+  assert.deepEqual(store.summonCandidates(explored.message).map((a) => a.name).sort(), ["主控席", "执行席", "汇总席"].sort())
 })
 console.log("PASS workflows: CRUD, hot reload, persistence, slash parsing, planning and exact wake targets")

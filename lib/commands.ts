@@ -28,12 +28,17 @@ export const SLASH_COMMANDS: SlashCommand[] = [
   { name: "compact", mode: "seat", hint: "", about: "压缩它的上下文（Claude Code、Codex）", needsText: false },
   { name: "stop", mode: "seat", hint: "", about: "停下它手上在做的，排着的也取消", needsText: false },
   { name: "plan", mode: "workflow", hint: "需求", about: "多位搭档共同出计划，确认后再实施", needsText: true },
+  { name: "explore", mode: "workflow", hint: "主题", about: "多位 AI 从不同角度并行探索并汇总方案对比", needsText: true },
 ]
 
 export function slashCommands(workflows: Workflow[] = []): SlashCommand[] {
   const saved = workflows.filter((item) => item.command).map((item): SlashCommand => ({
-    name: item.command!, mode: "workflow", workflowId: item.id, hint: "需求", needsText: true,
-    about: item.kind === "plan" ? `${item.name}：${item.planners?.join(" + ")}` : `${item.name}：${item.lead} → ${item.workers?.join("、")} → ${item.summarizer}`,
+    name: item.command!, mode: "workflow", workflowId: item.id, hint: item.kind === "explore" ? "主题" : "需求", needsText: true,
+    about: item.kind === "plan"
+      ? `${item.name}：${item.planners?.join(" + ")}`
+      : item.kind === "explore"
+        ? `${item.name}：${item.explorers?.join(" + ")}`
+        : `${item.name}：${item.lead} → ${item.workers?.join("、")} → ${item.summarizer}`,
   }))
   return [...SLASH_COMMANDS.filter((item) => !saved.some((s) => s.name === item.name)), ...saved]
 }

@@ -28,9 +28,9 @@ function mergeNames(list: string[], draft: string) {
 }
 
 export function workflowLine(item: Workflow) {
-  return item.kind === "plan"
-    ? `${item.planners?.join(" + ")} · 只做计划`
-    : `${item.lead} 主控 → ${item.workers?.join("、")} 执行 → ${item.summarizer} 汇总`
+  if (item.kind === "plan") return `${item.planners?.join(" + ")} · 只做计划`
+  if (item.kind === "explore") return `${item.explorers?.join(" + ")} · 联合探索`
+  return `${item.lead} 主控 → ${item.workers?.join("、")} 执行 → ${item.summarizer} 汇总`
 }
 
 export function WorkflowsDialog({ open, onOpenChange, workflows, agents, onChanged }: {
@@ -61,7 +61,7 @@ export function WorkflowsDialog({ open, onOpenChange, workflows, agents, onChang
       <DialogContent className="max-h-[85dvh] overflow-y-auto sm:max-w-xl">
         <DialogHeader>
           <DialogTitle>{editing ? editing === "new" ? "新建工作流" : "编辑工作流" : "管理工作流"}</DialogTitle>
-          <DialogDescription>保存谁主控、谁执行、谁汇总，或让多位搭档先共同出计划。仅用于当前项目。</DialogDescription>
+          <DialogDescription>保存谁主控、谁执行、谁汇总，或让多位搭档共同出计划、并行探索方案。仅用于当前项目。</DialogDescription>
         </DialogHeader>
         {editing ? (
           <WorkflowForm key={editing === "new" ? "new" : editing.id} workflow={editing === "new" ? undefined : editing} agents={agents}
@@ -106,6 +106,7 @@ function SeatMultiPicker({
   seats,
   min,
   ordered,
+  roleLabels = ["统稿", "拆解"],
   occupied,
 }: {
   id: string
@@ -117,6 +118,7 @@ function SeatMultiPicker({
   seats: PublicAgent[]
   min: number
   ordered?: boolean
+  roleLabels?: [string, string]
   occupied?: Map<string, string>
 }) {
   const byName = new Map(seats.map((s) => [s.name, s]))
@@ -190,7 +192,7 @@ function SeatMultiPicker({
               >
                 {ordered ? (
                   <span className={`mr-0.5 rounded-full px-1.5 py-0.5 text-[10px] font-medium ${idx === 0 ? "bg-primary text-primary-foreground" : "bg-background/70 text-muted-foreground"}`}>
-                    {idx === 0 ? "1·统稿" : `${idx + 1}·拆解`}
+                    {idx === 0 ? `1·${roleLabels[0]}` : `${idx + 1}·${roleLabels[1]}`}
                   </span>
                 ) : null}
                 {seat ? <span className="size-1.5 shrink-0 rounded-full" style={{ backgroundColor: seat.color }} /> : null}
@@ -363,6 +365,8 @@ function WorkflowForm({ workflow, agents, onCancel, onSaved }: {
   const [summarizer, setSummarizer] = useState(workflow?.summarizer ?? "")
   const [planners, setPlanners] = useState<string[]>(workflow?.planners ?? [])
   const [plannerDraft, setPlannerDraft] = useState("")
+  const [explorers, setExplorers] = useState<string[]>(workflow?.explorers ?? [])
+  const [explorerDraft, setExplorerDraft] = useState("")
   const [note, setNote] = useState(workflow?.note ?? "")
   const [advanced, setAdvanced] = useState(false)
   const [busy, setBusy] = useState(false)
@@ -382,11 +386,12 @@ function WorkflowForm({ workflow, agents, onCancel, onSaved }: {
   async function save(event: React.FormEvent) {
     event.preventDefault()
     const finalPlanners = mergeNames(planners, plannerDraft)
+    const finalExplorers = mergeNames(explorers, explorerDraft)
     const finalWorkers = mergeNames(workers, workerDraft)
     setBusy(true)
     try {
       await api("/api/v1/workflows", { method: "POST", body: JSON.stringify({ as: "human", action: "save", workflow: {
-        id: workflow?.id, name, kind, command, lead: lead.trim(), workers: finalWorkers, summarizer: summarizer.trim(), planners: finalPlanners, note,
+        id: workflow?.id, name, kind, command, lead: lead.trim(), workers: finalWorkers, summarizer: summarizer.trim(), planners: finalPlanners, explorers: finalExplorers, note,
       } }) })
       toast.success("工作流已保存")
       onSaved()
@@ -397,10 +402,11 @@ function WorkflowForm({ workflow, agents, onCancel, onSaved }: {
 
   return (
     <form className="space-y-4" onSubmit={(event) => void save(event)}>
-      <div className="space-y-1.5"><Label htmlFor={`${prefix}-name`}>工作流名称</Label><Input id={`${prefix}-name`} required maxLength={80} value={name} onChange={(e) => setName(e.target.value)} placeholder="例如：主控派活与汇总" /></div>
+      <div className="space-y-1.5"><Label htmlFor={`${prefix}-name`}>工作流名称</Label><Input id={`${prefix}-name`} required maxLength={80} value={name} onChange={(e) => setName(e.target.value)} placeholder={kind === "explore" ? "例如：多 AI 架构探索" : kind === "plan" ? "例如：混合计划模式" : "例如：主控派活与汇总"} /></div>
       <div className="flex flex-wrap gap-2" role="group" aria-label="工作流类型">
         <Button type="button" variant={kind === "orchestrate" ? "default" : "outline"} aria-pressed={kind === "orchestrate"} onClick={() => setKind("orchestrate")}>主控派活与汇总</Button>
         <Button type="button" variant={kind === "plan" ? "default" : "outline"} aria-pressed={kind === "plan"} onClick={() => setKind("plan")}>混合计划模式</Button>
+        <Button type="button" variant={kind === "explore" ? "default" : "outline"} aria-pressed={kind === "explore"} onClick={() => setKind("explore")}>多 AI 探索</Button>
       </div>
       {kind === "plan" ? <>
         <SeatMultiPicker
@@ -413,8 +419,23 @@ function WorkflowForm({ workflow, agents, onCancel, onSaved }: {
           seats={realSeats}
           min={2}
           ordered
+          roleLabels={["统稿", "拆解"]}
         />
         <p className="text-xs text-muted-foreground">首位审查需求并整合计划，其余拆解实施步骤（可用左右箭头调整顺序）。本轮只做计划，确认后再实施。</p>
+      </> : kind === "explore" ? <>
+        <SeatMultiPicker
+          id={`${prefix}-explorers`}
+          label="参与探索的席位"
+          selected={explorers}
+          onChange={setExplorers}
+          draft={explorerDraft}
+          onDraftChange={setExplorerDraft}
+          seats={realSeats}
+          min={2}
+          ordered
+          roleLabels={["汇总", "探索"]}
+        />
+        <p className="text-xs text-muted-foreground">全部席位并行从不同角度调研与发散，首位汇总共识、分歧与候选方向（可用左右箭头调整首位）。本轮只探索不改代码。</p>
       </> : <>
         <SeatSinglePicker id={`${prefix}-lead`} label="主控" value={lead} onChange={setLead} seats={realSeats} occupied={leadUsed} />
         <SeatMultiPicker
@@ -431,7 +452,7 @@ function WorkflowForm({ workflow, agents, onCancel, onSaved }: {
         <SeatSinglePicker id={`${prefix}-summarizer`} label="最终汇总" value={summarizer} onChange={setSummarizer} seats={realSeats} occupied={summarizerUsed} />
         <p className="text-xs text-muted-foreground">开始时只叫醒主控，由主控派活、复核，再交汇总席位收尾。</p>
       </>}
-      <div className="space-y-1.5"><Label htmlFor={`${prefix}-command`}>快捷命令（可选）</Label><Input id={`${prefix}-command`} value={command} maxLength={24} onChange={(e) => setCommand(e.target.value)} placeholder="例如 work，输入 /work 加需求即可使用" /></div>
+      <div className="space-y-1.5"><Label htmlFor={`${prefix}-command`}>快捷命令（可选）</Label><Input id={`${prefix}-command`} value={command} maxLength={24} onChange={(e) => setCommand(e.target.value)} placeholder={kind === "explore" ? "例如 explore，输入 /explore 加主题即可使用" : kind === "plan" ? "例如 plan，输入 /plan 加需求即可使用" : "例如 work，输入 /work 加需求即可使用"} /></div>
       <AdvancedSection open={advanced} onToggle={() => setAdvanced(!advanced)} note="补充协作规则">
         <Label htmlFor={`${prefix}-note`}>补充规则（可选）</Label><Textarea id={`${prefix}-note`} value={note} maxLength={1000} onChange={(e) => setNote(e.target.value)} />
       </AdvancedSection>

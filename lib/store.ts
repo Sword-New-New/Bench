@@ -2490,6 +2490,7 @@ export function workflowAction(input: unknown) {
     if (!Array.isArray(body.targets) || !body.targets.every((name) => typeof name === "string")) throw new ApiError(400, "点名席位要用列表")
     if (body.targets.length) {
       if (workflow.kind === "plan") overrides.planners = body.targets
+      else if (workflow.kind === "explore") overrides.explorers = body.targets
       else {
         if (body.targets.length !== 1) throw new ApiError(400, "主控工作流请只点名主控，其他角色在工作流里修改")
         overrides.lead = body.targets[0]

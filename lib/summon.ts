@@ -621,9 +621,10 @@ function explain(agentName: string | undefined, failure: string) {
 // the bridge, not the client: taken as its error, a compaction that had
 // worked was reported as failed (2026-11-14).
 const BRIDGE_NOISE = /^\d{4}\/\d\d\/\d\d \d\d:\d\d:\d\d socat\[\d+\] [EWNI] .*$/gm
+const ANSI_ESCAPE = /\x1b\[[0-9;]*[a-zA-Z]/g
 
 function withoutBridgeNoise(text: string) {
-  return text.replace(BRIDGE_NOISE, "").replace(/\n{2,}/g, "\n")
+  return text.replace(ANSI_ESCAPE, "").replace(BRIDGE_NOISE, "").replace(/\n{2,}/g, "\n")
 }
 
 function tail(text: string, max: number) {

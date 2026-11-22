@@ -14,6 +14,10 @@ if [[ -n "${BENCH_PROMPT_FILE:-}" && -f "$BENCH_PROMPT_FILE" ]]; then
 fi
 [[ "$id" =~ ^[A-Za-z0-9._-]+$ ]] || { echo "thread id 不对：$id" >&2; exit 2; }
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+here_node="$here"
+if command -v cygpath >/dev/null 2>&1; then
+  here_node="$(cygpath -m "$here")"
+fi
 node_bin="$(command -v node || true)"
 [[ -n "$node_bin" ]] || node_bin=/usr/local/nodejs/bin/node
 bin="${CODEX_BIN:-}"
@@ -22,7 +26,7 @@ if [[ -z "$bin" ]]; then
 fi
 # No codex on PATH: the Codex desktop app bundles one.
 if [[ -z "$bin" && -x "$node_bin" ]]; then
-  bin="$("$node_bin" "$here/codex-bin.mjs" --bundled 2>/dev/null || true)"
+  bin="$("$node_bin" "$here_node/codex-bin.mjs" --bundled 2>/dev/null || true)"
 fi
 if [[ -n "$bin" ]] && command -v cygpath >/dev/null 2>&1 && [[ -e "$bin" ]]; then
   bin="$(cygpath -m "$bin")"
@@ -34,9 +38,9 @@ fi
 # plain `codex exec`, which only hears them after the turn.
 if [[ "${BENCH_CODEX_EXEC:-}" != "1" ]] && [[ -x "$node_bin" ]]; then
   if [[ -n "${BENCH_PROMPT_FILE:-}" && -f "$BENCH_PROMPT_FILE" ]]; then
-    CODEX_BIN="${bin:-${CODEX_BIN:-}}" exec "$node_bin" "$here/codex-app.mjs" "$id" </dev/null
+    CODEX_BIN="${bin:-${CODEX_BIN:-}}" exec "$node_bin" "$here_node/codex-app.mjs" "$id" </dev/null
   else
-    CODEX_BIN="${bin:-${CODEX_BIN:-}}" exec "$node_bin" "$here/codex-app.mjs" "$id" "$text" </dev/null
+    CODEX_BIN="${bin:-${CODEX_BIN:-}}" exec "$node_bin" "$here_node/codex-app.mjs" "$id" "$text" </dev/null
   fi
 fi
 

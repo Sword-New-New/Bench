@@ -44,11 +44,15 @@ case "$kind" in
     ;;
   codex)
     here="$(cd "$(dirname "$0")" && pwd)"
+    here_node="$here"
+    if command -v cygpath >/dev/null 2>&1; then
+      here_node="$(cygpath -m "$here")"
+    fi
     node_bin="$(command -v node || true)"
     [[ -n "$node_bin" ]] || node_bin=/usr/local/nodejs/bin/node
     bin="$(command -v codex || true)"
     if [[ -z "$bin" && -x "$node_bin" ]]; then
-      bin="$("$node_bin" "$here/codex-bin.mjs" --bundled 2>/dev/null || true)"
+      bin="$("$node_bin" "$here_node/codex-bin.mjs" --bundled 2>/dev/null || true)"
     fi
     if [[ -n "$bin" ]] && command -v cygpath >/dev/null 2>&1 && [[ -e "$bin" ]]; then
       bin="$(cygpath -u "$bin")"
@@ -61,7 +65,11 @@ case "$kind" in
     if [[ -n "$file" ]]; then
       dir="$(head -1 "$file" | grep -o '"cwd":"[^"]*"' | head -1 | sed 's/^"cwd":"//; s/"$//' || true)"
       if [[ -z "$dir" || ! -d "$dir" ]] && [[ -x "$node_bin" ]]; then
-        dir="$("$node_bin" -e 'try{const line=require("fs").readFileSync(process.argv[1],"utf8").split("\n")[0];console.log(JSON.parse(line)?.payload?.cwd||"")}catch{}' "$file" 2>/dev/null || true)"
+        file_node="$file"
+        if command -v cygpath >/dev/null 2>&1; then
+          file_node="$(cygpath -m "$file")"
+        fi
+        dir="$("$node_bin" -e 'try{const line=require("fs").readFileSync(process.argv[1],"utf8").split("\n")[0];console.log(JSON.parse(line)?.payload?.cwd||"")}catch{}' "$file_node" 2>/dev/null || true)"
       fi
       if command -v cygpath >/dev/null 2>&1 && [[ -n "$dir" ]]; then
         dir="$(cygpath -u "$dir" 2>/dev/null || echo "$dir")"

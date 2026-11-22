@@ -1,13 +1,15 @@
 import { escapeRegExp } from "@/lib/text"
+import type { Workflow } from "@/lib/types"
 
 // The slash commands the room's input takes (components/room/composer.tsx).
-// They aren't said in the room: each goes to the seats @'d in the same line,
-// through the seat actions (app/api/v1/agents/[id]). Only commands both
-// Claude Code and Codex have, and only ones the room can run on a session
-// without a screen; /model and /effort are the seat menu's 「换模型」.
+// Seat commands go straight to the session actions. Workflow commands become
+// a room message with explicit roles and wake targets; /model and /effort
+// remain the seat menu's 「换模型」.
 
 export type SlashCommand = {
-  name: "goal" | "compact" | "stop"
+  name: string
+  mode: "seat" | "workflow"
+  workflowId?: string
   // What goes after the name, shown in the menu.
   hint: string
   about: string
@@ -18,30 +20,43 @@ export type SlashCommand = {
 export const SLASH_COMMANDS: SlashCommand[] = [
   {
     name: "goal",
+    mode: "seat",
     hint: "<要达成什么> | clear",
     about: "给它定个目标，它一直做到达成为止（Claude Code、Codex）",
     needsText: true,
   },
-  { name: "compact", hint: "", about: "压缩它的上下文（Claude Code、Codex）", needsText: false },
-  { name: "stop", hint: "", about: "停下它手上在做的，排着的也取消", needsText: false },
+  { name: "compact", mode: "seat", hint: "", about: "压缩它的上下文（Claude Code、Codex）", needsText: false },
+  { name: "stop", mode: "seat", hint: "", about: "停下它手上在做的，排着的也取消", needsText: false },
+  { name: "plan", mode: "workflow", hint: "需求", about: "多位搭档共同出计划，确认后再实施", needsText: true },
 ]
+
+export function slashCommands(workflows: Workflow[] = []): SlashCommand[] {
+  const saved = workflows.filter((item) => item.command).map((item): SlashCommand => ({
+    name: item.command!, mode: "workflow", workflowId: item.id, hint: "需求", needsText: true,
+    about: item.kind === "plan" ? `${item.name}：${item.planners?.join(" + ")}` : `${item.name}：${item.lead} → ${item.workers?.join("、")} → ${item.summarizer}`,
+  }))
+  return [...SLASH_COMMANDS.filter((item) => !saved.some((s) => s.name === item.name)), ...saved]
+}
 
 // "/goal 测试全过 @Opus" or "@Opus /goal 测试全过" (the @ may be anywhere in
 // the line) → the command, whom it is for, and the rest of the line.
 // Anything else, including a path like "/home/…", is a message.
-export function parseSlash(text: string, names: string[]) {
+export function parseSlash(text: string, names: string[], workflows: Workflow[] = []) {
   let rest = text
-  const targets: string[] = []
+  const found: { name: string; at: number }[] = []
   for (const name of names) {
     const at = new RegExp(`@${escapeRegExp(name)}(?![\\p{L}\\p{N}_-])`, "gu")
-    if (at.test(rest)) {
-      targets.push(name)
+    const match = at.exec(rest)
+    if (match) {
+      found.push({ name, at: text.indexOf(`@${name}`) })
+      at.lastIndex = 0
       rest = rest.replace(at, " ")
     }
   }
   rest = rest.trim()
-  const match = rest.match(/^\/([a-z]+)(?=\s|$)/)
-  const command = match ? SLASH_COMMANDS.find((item) => item.name === match[1]) : undefined
+  const match = rest.match(/^\/([a-z][a-z0-9-]*)(?=\s|$)/)
+  const command = match ? slashCommands(workflows).find((item) => item.name === match[1]) : undefined
   if (!match || !command) return null
-  return { command, targets, text: rest.slice(match[0].length).replace(/\s+/g, " ").trim() }
+  const body = rest.slice(match[0].length).trim()
+  return { command, targets: found.sort((a, b) => a.at - b.at).map((item) => item.name), text: command.mode === "seat" ? body.replace(/\s+/g, " ") : body }
 }

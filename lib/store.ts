@@ -81,6 +81,7 @@ import type {
   TaskCheck,
   TaskDeputy,
 } from "@/lib/types"
+import { deleteWorkflow, findWorkflow, listWorkflows, renderWorkflow, saveWorkflow } from "@/lib/workflows"
 import { mergeFlowSummaries, splitFlowSummaries } from "@/lib/flow-summary"
 
 const STALE_MS = 40_000
@@ -1138,6 +1139,7 @@ export function snapshot(): RoomSnapshot {
   for (const seat of seats) seat.owes = owed.get(seat.id)
   return {
     project: projectInfo(current.id),
+    workflows: listWorkflows(current.id),
     agents: sortAgents(seats),
     messages: state.messages,
     tasks: snapshotTasks(state.tasks),
@@ -2272,6 +2274,7 @@ export function summonCandidates(message: Message) {
   if (answered?.ask?.answerId === message.id && answered.ask.handed) ids.delete(answered.authorId)
   const found: { id: string; name: string; agentName?: string; session?: string }[] = []
   for (const id of ids) {
+    if (message.workflow && !message.workflow.targets.includes(id)) continue
     const agent = findAgent(id)
     if (!agent || agent.demo) continue
     found.push({
@@ -2391,7 +2394,7 @@ function takePinned(agentId: string) {
 }
 
 // `final`: the room posting a wake's answer (lib/summon.ts), never from the API.
-export function say(input: unknown, { final = false }: { final?: boolean } = {}) {
+export function say(input: unknown, { final = false, workflow }: { final?: boolean; workflow?: Message["workflow"] } = {}) {
   const body = asRecord(input)
   const actor = actorFrom(body)
   const own = attachmentsOf(body.attachments) ?? []
@@ -2413,6 +2416,7 @@ export function say(input: unknown, { final = false }: { final?: boolean } = {})
   // nobody; from then on agents' messages wake no one until the user speaks.
   const end = Boolean(agent) && (body.end === true || text.startsWith(END_MARK))
   let said = end ? { text: clip(text.startsWith(END_MARK) ? text : `${END_MARK}${text}`, 4000), mentions: [] } : lockMentions(clip(text, 4000))
+  if (workflow) said = { text: said.text, mentions: workflow.targets }
   // The user's call (2026-11-15, t_bd01d3c1): said by the user to nobody and
   // answering nothing, it goes to the last AI that spoke here. The @ is
   // written into the text so the room and the seat both see who it reached.
@@ -2435,6 +2439,7 @@ export function say(input: unknown, { final = false }: { final?: boolean } = {})
     authorColor: agent?.color ?? "#1f1a14",
     authorDemo: agent?.demo ?? false,
     ...said,
+    workflow,
     attachments,
     replyTo,
     end: end || undefined,
@@ -2460,6 +2465,39 @@ export function say(input: unknown, { final = false }: { final?: boolean } = {})
     })
   }
   return { message }
+}
+
+// Human-authenticated HTTP actions; reusable by isolated store tests. Agents
+// cannot create a workflow message with trusted wake-target metadata.
+export function workflowAction(input: unknown) {
+  const body = asRecord(input)
+  if (actorFrom(body).type !== "human") throw new ApiError(403, "只有用户能管理或启动工作流")
+  const pid = currentProject()
+  if (body.action === "save") {
+    const workflow = saveWorkflow(pid, body.workflow ?? body)
+    roomChanged()
+    return { workflow }
+  }
+  if (body.action === "delete") {
+    deleteWorkflow(pid, asString(body.id) ?? "")
+    roomChanged()
+    return { ok: true }
+  }
+  if (body.action !== "run") throw new ApiError(400, "工作流操作要选保存、删除或运行")
+  const workflow = findWorkflow(pid, body)
+  const overrides = body.overrides === undefined ? {} : { ...asRecord(body.overrides) }
+  if (body.targets !== undefined) {
+    if (!Array.isArray(body.targets) || !body.targets.every((name) => typeof name === "string")) throw new ApiError(400, "点名席位要用列表")
+    if (body.targets.length) {
+      if (workflow.kind === "plan") overrides.planners = body.targets
+      else {
+        if (body.targets.length !== 1) throw new ApiError(400, "主控工作流请只点名主控，其他角色在工作流里修改")
+        overrides.lead = body.targets[0]
+      }
+    }
+  }
+  const rendered = renderWorkflow(workflow, asString(body.text) ?? "", room().state.agents, overrides)
+  return say({ ...body, text: rendered.text }, { workflow: { id: workflow.id, kind: workflow.kind, targets: rendered.targets } })
 }
 
 // The gist a reply gets as it is posted: its own first line, when the

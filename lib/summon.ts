@@ -3,14 +3,14 @@ import type { Readable } from "node:stream"
 import { createHash, randomBytes } from "node:crypto"
 import { StringDecoder } from "node:string_decoder"
 
-import { adapterFor, commandFor, summonPath, type Adapter } from "@/lib/adapters"
+import { adapterFor, commandFor, modelOf, summonPath, type Adapter } from "@/lib/adapters"
 import { clearSeatUserStopped, markSeatUserStopped } from "@/lib/continue"
 import { compactEnv, CONTEXT_KINDS, seatContext, type SeatContext } from "@/lib/context"
 import { dbLoadLanes, dbSaveLane } from "@/lib/db"
 import { createParser, liveLine } from "@/lib/events"
 import { ApiError } from "@/lib/http"
 import { isSeatStoppedByUser, registerLaneIdle, registerLaneReader } from "@/lib/lane-state"
-import { detectLimit, whenText } from "@/lib/limits"
+import { detectLimit, unwrapErrorMessage, whenText } from "@/lib/limits"
 import { commandLine, killTree } from "@/lib/platform"
 import { accepting, deliver, openTerminal } from "@/lib/terminal"
 import { onTerminalClosed, terminalOpen } from "@/lib/terminal-state"
@@ -68,11 +68,10 @@ import {
   earliestLimitReset,
   autoCheckHere,
 } from "@/lib/store"
-import { failureReason } from "@/lib/plain"
 import { GIST_MAX, withAttachments } from "@/lib/text"
 import type { CallState, Message, PublicAgent, RoomSummary, Run, Task, TaskCheck } from "@/lib/types"
 import { flowsOf } from "@/lib/flow"
-import { isNetworkFailure, retryDelays } from "@/lib/netfail"
+import { capacityFailure, isNetworkFailure, retryDelays } from "@/lib/netfail"
 import { stepOf } from "@/lib/owes"
 import { flowSummaryPrompt, flowsToSummarize } from "@/lib/flow-summary"
 import { autoAcceptChecked } from "@/lib/deputy"
@@ -589,6 +588,12 @@ function streams(command: string) {
 // Failures whose cause is known get said in plain words instead of the
 // client's own error line.
 function explain(agentName: string | undefined, failure: string) {
+  if (agentName === "antigravity" && /已尝试通过 .*启动 Antigravity 桌面端|仍未检测到可连接的 daemon hub/.test(failure)) {
+    return "房间已尝试自动启动 Antigravity 桌面端，但等待超时仍未连上 daemon hub（~/.gemini/antigravity/daemon/hub_*.json）。请检查 Antigravity 窗口是否卡在登录页或启动异常，就绪后再重叫一次。"
+  }
+  if (agentName === "antigravity" && /未找到运行中|请先打开并登录 Antigravity/.test(failure)) {
+    return "桌面端 Antigravity 没有在运行，或还没有可连接的 daemon hub（~/.gemini/antigravity/daemon/hub_*.json）。先打开并登录 Antigravity 桌面端，再重叫一次。"
+  }
   if (agentName === "antigravity" && /trajectory .*not found/.test(failure)) {
     return "agy 和 Antigravity 桌面端的会话记录里都找不到它报的这个会话（~/.gemini/antigravity-cli、~/.gemini/antigravity 的 conversations 下）。会话可能被删了，或者入座时报错了 id，让它重新入座一次。"
   }
@@ -608,7 +613,21 @@ function explain(agentName: string | undefined, failure: string) {
   if (agentName === "dsh" && /cannot compose presets/.test(failure)) {
     return "它是在 DeepSeek Harness 网页端开的会话，带着 Agent 预设；房间用的 dsh-agent 只能接着跑它自己 exec 开的、不带预设的会话，叫不醒网页端的。让它在网页端「守着房间」（循环 bench_wait）就不用唤起；要叫得醒，就在终端用 dsh-agent exec 开会话再接入并坐。写摘要可以先换别人。"
   }
-  return failure
+  const clean = unwrapErrorMessage(failure)
+  const hit = detectLimit(clean) ?? detectLimit(failure)
+  if (hit) {
+    return hit.kind === "balance"
+      ? "账户余额或可用额度不足，请到对应模型服务商或中转站充值后重试，或在席位菜单切换其他客户端接力。"
+      : `模型额度已用完（${hit.label}），可以等待重置后重试，或在席位菜单切换其他客户端接力。`
+  }
+  const cap = capacityFailure(failure, clean)
+  if (cap) {
+    return `服务端当前算力不足或过载（503${cap.model ? `，模型 ${cap.model}` : ""} 暂无可用容量），并非本机网络或个人额度问题。可稍后重试，或在席位菜单切换模型或换客户端接力。`
+  }
+  if (isNetworkFailure(failure, clean)) {
+    return "连接模型服务时发生网络波动或传输中断（如连接断开、TLS/EOF 或超时），可等待自动重试，或检查本机网络与代理设置。"
+  }
+  return clean
 }
 
 // A launcher that runs the client in its own network (bwrap plus socat
@@ -628,41 +647,92 @@ function tail(text: string, max: number) {
   return clean.length > max ? `…${clean.slice(-max)}` : clean
 }
 
-// Did the turn end on the account's usage limit? The client says so in its last
-// words, but its error line (what `failure` holds) can be about anything else,
-// so go by what it said. Said only when the turn failed: a seat that merely
-// quotes the message is not limited.
-function limitOf(log: Run, out: string) {
+function clipFirstLine(text: string, max: number) {
+  const first = unwrapErrorMessage(text).trim().split("\n")[0]?.replace(/\s+/g, " ").trim() ?? "出错"
+  return first.length > max ? `${first.slice(0, max - 1)}…` : first
+}
+
+// Did the turn end on the account's usage limit or exhausted balance? Matched
+// against failure lines, failed step details, and the client's last words — only
+// checked when the turn actually failed so quoting limit text in chat never triggers it.
+function limitOf(log: Run, out: string, failure = "") {
   const last = [...log.steps].reverse().find((step) => step.kind === "text")?.title ?? ""
-  // Codex says it in the error that fails the turn (a note step, lib/events.ts).
-  const failed = log.steps.find((step) => step.kind === "note" && step.state === "failed")?.title ?? ""
-  for (const text of [out, last, failed]) {
-    if (/^\s*You(?:'|’)ve hit your/i.test(text)) {
-      const hit = detectLimit(text)
-      if (hit) return hit
-    }
+  const failedSteps = log.steps.filter((step) => step.state === "failed")
+  const candidates = [
+    failure,
+    ...failedSteps.map((step) => step.output ?? ""),
+    ...failedSteps.map((step) => step.title ?? ""),
+    out,
+    last,
+  ]
+  for (const text of candidates) {
+    if (!text.trim()) continue
+    const hit = detectLimit(text)
+    if (hit) return hit
   }
   return null
 }
 
 // Say in the room that a seat ran out of allowance, with the card that lets
 // the user have it carry on once it resets. Returns whether it was one.
-const SYSTEM_MAX = 30
+const SYSTEM_MAX = 96
 function shortSys(text: string) {
   return text.length > SYSTEM_MAX ? `${text.slice(0, SYSTEM_MAX - 1)}…` : text
 }
 
-function noteLimit(agent: NonNullable<ReturnType<typeof agentState>>, log: Run, out: string) {
-  const hit = limitOf(log, out)
+function shortExplain(agentName: string | undefined, failure: string) {
+  const hit = detectLimit(failure)
+  if (hit) return hit.kind === "balance" ? "余额不足，请充值或换客户端" : `${hit.label}已用完`
+  const clean = unwrapErrorMessage(failure)
+  const cap = capacityFailure(failure, clean)
+  if (cap) return `服务暂无容量（503${cap.model ? `，${cap.model}` : ""}），可重试或换模型`
+  if (isNetworkFailure(failure, clean)) return `网络错误：${clipFirstLine(clean, 44)}`
+  if (agentName === "antigravity" && /已尝试通过 .*启动 Antigravity 桌面端|仍未检测到可连接的 daemon hub/.test(failure)) return "自动启动桌面端超时"
+  if (agentName === "antigravity" && /未找到运行中|请先打开并登录 Antigravity/.test(failure)) return "桌面端未运行"
+  if (agentName === "antigravity" && /trajectory .*not found/.test(failure)) return "找不到会话，需重入座"
+  if (agentName === "antigravity" && /stream was interrupted/i.test(failure)) return "中途中断，查权限或重叫"
+  if (agentName === "workbuddy" && /Authentication required|\/login/i.test(failure)) return "未登录"
+  if (agentName === "cursor" && /Model unavailable on Free/i.test(failure)) return "免费版不支持该模型"
+  if (agentName === "codex" && /This chat uses (\S+), but your current provider is (\S+?)\./.test(failure)) {
+    return "提供方不匹配，需开新会话"
+  }
+  if (agentName === "dsh" && /cannot compose presets/.test(failure)) return "网页预设会话无法后台叫醒"
+  return clipFirstLine(clean, 48)
+}
+
+function callFailureNote(failure: string, tried = "") {
+  const hit = detectLimit(failure)
+  if (hit) return `${hit.label}：${clipFirstLine(hit.text, 90)}`
+  const clean = unwrapErrorMessage(failure)
+  const cap = capacityFailure(failure, clean)
+  if (cap) return `服务暂无容量（503${cap.model ? `，${cap.model}` : ""}）：${clipFirstLine(clean, 72)}${tried}`
+  if (isNetworkFailure(failure, clean)) return `网络错误：${clipFirstLine(clean, 88)}${tried}`
+  return `${clipFirstLine(clean, 120)}${tried}`
+}
+
+function noteLimit(agent: NonNullable<ReturnType<typeof agentState>>, log: Run, out: string, failure = "") {
+  const hit = limitOf(log, out, failure)
   if (!hit) return false
-  const at = autoResumeAt(log, hit)
+  if (!log.steps.some((step) => step.state === "failed" && detectLimit(step.output ?? step.title))) {
+    putStep(log, {
+      id: "limit",
+      at: Date.now(),
+      kind: "note",
+      state: "failed",
+      title: hit.label,
+      output: hit.text,
+    })
+  }
+  const at = hit.kind === "balance" ? undefined : autoResumeAt(log, hit)
   setLimited(log, { resetsAt: hit.resetsAt, resumeAt: at })
-  const when = hit.resetsAt ? `${whenText(hit.resetsAt)}重置` : "未写重置时间"
-  postLimited(shortSys(`${agent.name} 撞上${hit.label}（${when}）`), {
+  const when = hit.resetsAt ? `${whenText(hit.resetsAt)}重置` : hit.kind === "balance" ? "请充值或换客户端" : "未写重置时间"
+  const headline = hit.kind === "balance" ? `${agent.name} ${hit.label}（${when}）` : `${agent.name} 撞上${hit.label}（${when}）`
+  postLimited(shortSys(headline), {
     runId: log.id,
     agentId: agent.id,
     agentName: agent.name,
     label: hit.label,
+    ...(hit.kind ? { kind: hit.kind } : {}),
     resetsAt: hit.resetsAt,
     state: at ? "scheduled" : "open",
     at,
@@ -700,18 +770,18 @@ function rewakeable(log: Run) {
 }
 
 function reportFailure(agent: NonNullable<ReturnType<typeof agentState>>, log: Run, failure: string, out: string, what: string) {
-  if (noteLimit(agent, log, out)) return
+  if (noteLimit(agent, log, out, failure)) return
   const detail = explain(agent.agentName, failure)
+  const clean = unwrapErrorMessage(failure)
   putStep(log, {
     id: "explain",
     at: Date.now(),
     kind: "note",
     state: "failed",
     title: "失败原因说明",
-    output: detail !== failure ? `${detail}\n\n原始报错：\n${failure}` : failure,
+    output: detail !== failure ? `${detail}\n\n原始报错：\n${failure}` : clean !== failure ? `${clean}\n\n原始报错：\n${failure}` : failure,
   })
-  // One whole sentence: who, that it did not work, roughly why, where to look.
-  postSystem(`${what}没成功：${failureReason(agent.agentName, failure)}（看「进展」里它的「过程」）`)
+  postSystem(shortSys(`${what}没成功：${shortExplain(agent.agentName, failure)}`), log.id)
 }
 
 // Runs one command on a seat's session and reports how it went. Its output
@@ -776,8 +846,20 @@ function launch(
     // Some CLIs print their error to stderr and still exit 0 (WorkBuddy's when
     // signed out); with no answer at all, that error is the outcome.
     const said = withoutBridgeNoise(err)
-    const silent = code === 0 && !out.trim() && run.steps.length === 0 && said.trim()
-    const why = failure ?? (code !== 0 ? tail(said, 160) || `退出码 ${code}` : silent ? tail(said, 160) : undefined)
+    const streamErr = parser.error()
+    const failedStepText = run.steps.find((step) => step.state === "failed")?.title ?? ""
+    const silent =
+      code === 0 &&
+      !out.trim() &&
+      (Boolean(streamErr) || Boolean(failedStepText) || (run.steps.length === 0 && Boolean(said.trim())))
+    const usableStreamErr = streamErr && streamErr !== "出错了" ? streamErr : ""
+    const why =
+      failure ??
+      (code !== 0
+        ? usableStreamErr || tail(said, 240) || failedStepText || streamErr || `退出码 ${code}`
+        : silent
+          ? usableStreamErr || failedStepText || tail(said, 240) || streamErr
+          : undefined)
     done(stopped ? { out: "", stopped } : { out, failure: why, lost })
   })
 
@@ -792,6 +874,8 @@ function launch(
   }
   let child: ChildProcessByStdio<null, Readable, Readable>
   try {
+    const adapter = agent.agentName ? adapterFor(agent.agentName) : null
+    const pickedModel = agent.modelPick || (agent.agentName === "codex" && adapter ? modelOf(adapter) : null) || undefined
     child = spawn(launch[0], launch[1], {
       detached: true,
       windowsHide: true,
@@ -809,7 +893,7 @@ function launch(
         // A session the room created: where its first wake starts it.
         ...(agent.workdir ? { BENCH_NEW_DIR: agent.workdir } : {}),
         // The model the user picked for it (lib/models.ts); unset, the default.
-        ...(agent.modelPick ? { BENCH_MODEL: agent.modelPick } : {}),
+        ...(pickedModel ? { BENCH_MODEL: pickedModel } : {}),
         // And how hard it thinks, for the scripts that pass it on.
         ...(agent.effortPick ? { BENCH_EFFORT: agent.effortPick } : {}),
         // Where its context compacts by itself, if the user set one (lib/context.ts).
@@ -1071,7 +1155,7 @@ function run(agentId: string) {
     const still = agentState(agentId)
     const sameBinding = still?.agentName === startedLink.agentName && still?.session === startedLink.session
     if (lost && !stopped) {
-      postSystem(shortSys(`${agent.name} 单行超 8MB 已略过（看过程）`))
+      postSystem(shortSys(`${agent.name} 单行超 8MB 已略过`), log.id)
     }
     if (stopped) {
       if (queue.whisper === undefined) queue.retries = undefined
@@ -1080,6 +1164,7 @@ function run(agentId: string) {
         queue.carry = body
         queue.carryIds = answered
         queue.trigger ??= trigger
+        queue.hops = Math.max(queue.hops, hop)
         syncLane(agentId)
         note(answered, agentId, "queued", { note: "被单独说打断，回完接着做" })
       } else {
@@ -1092,7 +1177,10 @@ function run(agentId: string) {
     } else if (failure) {
       const tries = queue.retries ?? 0
       const delays = retryDelays()
-      const network = !limitOf(log, out) && isNetworkFailure(failure, failedStep(log))
+      const failedOrStreamTexts = log.steps.flatMap((s) =>
+        s.state === "failed" || (s.id === "stream-error" && s.state === "running") ? [s.title, s.output] : [],
+      )
+      const network = !limitOf(log, out, failure) && isNetworkFailure(failure, failedStep(log), ...failedOrStreamTexts)
       if (network && netRetry() && tries < delays.length && sameBinding) {
         // The network dropped: the same messages go again by themselves after
         // a while, as if the wake had been cut short. Nothing is said in the
@@ -1105,15 +1193,16 @@ function run(agentId: string) {
         queue.hops = Math.max(queue.hops, hop)
         queue.retryAt = Date.now() + wait
         syncLane(agentId)
-        note(answered, agentId, "retrying", { note: `${tries + 1}/${delays.length}，${seconds(wait)}后再叫：${failure}` })
-        endRun(log, "failed", `网络断了，${seconds(wait)}后自动重试（${tries + 1}/${delays.length}）：${failure}`)
+        note(answered, agentId, "retrying", { note: `${tries + 1}/${delays.length}，网络错误，${seconds(wait)}后再叫：${clipFirstLine(failure, 80)}` })
+        const cap = capacityFailure(failure, unwrapErrorMessage(failure), ...failedOrStreamTexts)
+        endRun(log, "failed", `${cap ? "服务端暂无容量（503）" : "网络错误"}，${seconds(wait)}后自动重试（${tries + 1}/${delays.length}）：${unwrapErrorMessage(failure)}`)
         seat.settle()
         armRetry(agentId, wait)
         return
       }
       queue.retries = undefined
       const tried = network && tries > 0 ? `（自动重试了 ${tries} 次）` : ""
-      note(answered, agentId, "failed", { note: `${failure}${tried}` })
+      note(answered, agentId, "failed", { note: callFailureNote(failure, tried) })
       reportFailure(agent, log, `${failure}${tried}`, out, `${agent.name} 叫醒`)
     } else if (adapter.reply === "stdout" && still && sameBinding && out) {
       try {
@@ -1139,7 +1228,13 @@ function run(agentId: string) {
         } catch {}
       }
     }
-    endRun(log, failure ? "failed" : "done", failure ? `没成功：${failure}` : undefined)
+    const endShort = failure ? shortExplain(agent.agentName, failure) : undefined
+    endRun(
+      log,
+      failure ? "failed" : "done",
+      endShort ? `没成功：${endShort}` : undefined,
+      failure && endShort !== failure ? failure : undefined,
+    )
     seat.settle()
     run(agentId)
   }, () => note(queue.calls, agentId, "picked", { from: ["started"], run: log.id }))
@@ -1247,7 +1342,7 @@ function writeSummary(agent: NonNullable<ReturnType<typeof agentState>>, adapter
       try {
         saveSummary(out, agent.name, prompt.upToSeq, prompt.flowsAt)
       } catch {
-        postSystem(shortSys(`${agent.name} 未写出房间摘要`))
+        postSystem(shortSys(`${agent.name} 未写出房间摘要`), log.id)
       }
     } else if ((snapshot().summary?.at ?? 0) < asked) {
       // Some models write the summary as their answer instead of calling
@@ -1256,7 +1351,7 @@ function writeSummary(agent: NonNullable<ReturnType<typeof agentState>>, adapter
       if (out.includes("## 结论") && written.includes("## 进行中") && written.includes("## 待定")) {
         saveSummary(written, agent.name, prompt.upToSeq, prompt.flowsAt)
       } else {
-        postSystem(shortSys(`${agent.name} 本轮未交房间摘要`))
+        postSystem(shortSys(`${agent.name} 本轮未交房间摘要`), log.id)
       }
     }
     run(agent.id)
@@ -1704,11 +1799,11 @@ function checkTask(agent: NonNullable<ReturnType<typeof agentState>>, item: { ta
     if (!stopped && !failure) log.answer = out.slice(0, 4000)
     seat.settle()
     // Its checker ran out of allowance: the check goes to another seat now.
-    const limited = !stopped && (failure || verdict?.state === "error") && noteLimit(agent, log, out)
+    const limited = !stopped && (failure || verdict?.state === "error") && noteLimit(agent, log, out, failure ?? "")
     if (limited) repickCheck(item.taskId, "limit", agent.id)
     else if (stopped) setTaskCheck(item.taskId, item.at, { state: "error", note: "复验没跑成：被停下了" })
     else if (failure) {
-      setTaskCheck(item.taskId, item.at, { state: "error", note: `复验没跑成：${failure}` })
+      setTaskCheck(item.taskId, item.at, { state: "error", note: `复验没跑成：${shortExplain(agent.agentName, failure)}` })
     } else if (verdict) {
       setTaskCheck(item.taskId, item.at, verdict)
       autoAcceptChecked(item.taskId)
@@ -1907,11 +2002,12 @@ function compactSession(agent: NonNullable<ReturnType<typeof agentState>>) {
       postSystem(
         shortSys(
           !done
-            ? `${agent.name} 本次未压缩${out.trim() ? "（看过程）" : ""}`
+            ? `${agent.name} 本次未压缩`
             : now
               ? `${agent.name} 已压缩${was ? `：${was}→${now}` : `（现 ${now}）`}`
               : `${agent.name} 已压缩上下文`,
         ),
+        !done && out.trim() ? log.id : undefined,
       )
     }
     run(agent.id)
@@ -2048,7 +2144,7 @@ function answerWhisper(agent: NonNullable<ReturnType<typeof agentState>>, text: 
     }
     // Nothing is said in the room about a failed private turn, except that the
     // account ran out: that one comes with its card.
-    if (failure && !stopped) noteLimit(agent, log, out)
+    if (failure && !stopped) noteLimit(agent, log, out, failure)
     endRun(log, failure || stopped ? "failed" : "done", stopped ? "被停下了" : failure ? `没成功：${failure}` : undefined)
     seat.settle()
     run(agent.id)
@@ -2731,6 +2827,7 @@ function fireResume(agentId: string, at: number) {
         taken > 0
           ? `${name} 的额度恢复了，已经接着做`
           : `${name} 的额度恢复了，但没接上：${why}。要它接着做就 @${name}，或在额度卡上点「现在重试」`,
+        taken > 0 ? undefined : due[0]?.id,
       ),
     )
   } catch {}

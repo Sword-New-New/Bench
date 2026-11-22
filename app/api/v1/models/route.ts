@@ -8,11 +8,13 @@ import { effortLevels, modelChoices } from "@/lib/models"
 export async function GET(request: Request) {
   try {
     await boot()
-    const kind = new URL(request.url).searchParams.get("kind") ?? ""
+    const params = new URL(request.url).searchParams
+    const kind = params.get("kind") ?? ""
+    const refresh = params.get("refresh") === "1"
     const adapter = adapterFor(kind)
     // What an unpicked seat runs on, where its command or client config says.
     const fallback = (adapter && modelOf(adapter)) || null
-    return json({ models: modelChoices(kind), fallback, efforts: effortLevels(kind) })
+    return json({ models: modelChoices(kind, { refresh }), fallback, efforts: effortLevels(kind) })
   } catch (error) {
     return handle(error)
   }

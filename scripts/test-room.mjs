@@ -976,6 +976,9 @@ async function steps(stamp) {
   // and one that says back the to-dos its prompt told it it still owes.
   const mockFlakyName = `mockflaky_${stamp}`
   const mockNetName = `mocknet_${stamp}`
+  const mockBalanceName = `mockbal_${stamp}`
+  const mockStreamNetName = `mockenet_${stamp}`
+  const mockCapacityName = `mockcap_${stamp}`
   const mockOwesName = `mockowes_${stamp}`
   // Gists (t_83c6fcc9): a reply whose first line is its conclusion, a long one
   // that opens with a heading, a summary seat that writes one line per
@@ -1091,6 +1094,21 @@ createInterface({ input: process.stdin }).on("line", async (line) => {
           },
           { name: mockGisterBadName, command: `node -e "process.stderr.write('摘要席位故意出错'); process.exit(2)" {uuid} {text}`, reply: "stdout" },
           { name: mockNetName, command: `node -e "process.stderr.write('TRANSPORT: Connection error.'); process.exit(1)" {uuid} {text}`, reply: "stdout" },
+          {
+            name: mockBalanceName,
+            command: `node -e "console.log(JSON.stringify({ type: 'turn.failed', error: { message: JSON.stringify({ error: { message: 'You exceeded your current quota, please check your plan and billing details.', code: 'insufficient_quota' } }) } }))" {uuid} {text}`,
+            reply: "stdout",
+          },
+          {
+            name: mockStreamNetName,
+            command: `node -e "console.log(JSON.stringify({ type: 'error', message: 'There was a network issue connecting to the server (attempt 1)', retry: true })); console.log(JSON.stringify({ event: 'error', message: 'API error: error decoding response body: EOF' }))" {uuid} {text}`,
+            reply: "stdout",
+          },
+          {
+            name: mockCapacityName,
+            command: `node -e "const msg = 'API error (attempt 5): UNAVAILABLE (code 503): No capacity available for model gemini-4-argon-high on the server'; console.log(JSON.stringify({ event: 'error', message: msg, retry: true })); process.stderr.write(msg); process.exit(1)" {uuid} {text}`,
+            reply: "stdout",
+          },
           { name: mockCheckName, command: checkCmd, reply: "stdout" },
           { name: mockCheckAltName, command: checkCmd, reply: "stdout" },
           // "--json": read as a streaming client, like codex-wake.sh.
@@ -1421,6 +1439,23 @@ createInterface({ input: process.stdin }).on("line", async (line) => {
     const c4 = await request("/api/v1/say", { method: "POST", body: { as: "human", text: `@${badSeat.name} 你会出错` } })
     const end4 = await settled(c4.data.message.id, badSeat.id)
     assert(end4?.state === "failed" && /故意出错|退出码/.test(end4.note || ""), `唤起出错该记成 failed 带原因，实际 ${end4?.state} ${end4?.note}`)
+    const badRun = await request(`/api/v1/runs/${end4.runId}`)
+    assert(
+      badRun.status === 200 &&
+        badRun.data.run?.state === "failed" &&
+        badRun.data.run.steps.some((step) => step.state === "failed" && `${step.title} ${step.output ?? ""}`.includes("mock 故意出错")),
+      `失败 run 的步骤必须在 endRun 后完整保留，实际 steps=${JSON.stringify(badRun.data.run?.steps)}`,
+    )
+    const badRoomMsgs = (await request(`/api/v1/room?project=${project}`)).data.messages.filter(
+      (item) => item.seq > c4.data.message.seq && item.authorId === "room" && item.text.includes(badSeat.name) && item.text.includes("没成功"),
+    )
+    assert(
+      badRoomMsgs.length === 1 &&
+        badRoomMsgs[0].runId === end4.runId &&
+        !badRoomMsgs[0].text.includes("（看过程）") &&
+        badRoomMsgs[0].text.includes("mock 故意出错"),
+      `系统报错消息应带可点 runId 且不被 30 字截断，实际 ${JSON.stringify(badRoomMsgs[0])}`,
+    )
     const badOwes = await owesOf(badSeat.id)
     assert(
       badOwes?.calls?.length === 1 && badOwes.calls[0].messageId === c4.data.message.id && badOwes.tasks.length === 0,
@@ -1511,11 +1546,93 @@ createInterface({ input: process.stdin }).on("line", async (line) => {
       `一直失败：两次重试后该 failed 并写明重试过，实际 ${net.seen.join(" → ")} ${net.call?.note}`,
     )
     const netSaid = await roomSays(n2.data.message.seq, netSeat.name)
-    assert(netSaid.length === 1, `都失败了只在群里报一次错，实际 ${netSaid.length} 条`)
+    assert(
+      netSaid.length === 1 && netSaid[0].runId === net.call.runId && netSaid[0].text.includes("网络错误"),
+      `都失败了只在群里报一次带 runId 的网络错误，实际 ${JSON.stringify(netSaid)}`,
+    )
+    const netRun = await request(`/api/v1/runs/${net.call.runId}`)
+    assert(netRun.status === 200 && (netRun.data.run?.steps?.length ?? 0) > 0, "网络失败 run 的步骤记录必须保留")
 
     const badAgain = await request("/api/v1/say", { method: "POST", body: { as: "human", text: `@${badSeat.name} 不是网络的错` } })
     const bad = await watch(badAgain.data.message.id, badSeat.id, ["answered", "failed", "silent"], 15_000)
     assert(bad.call?.state === "failed" && !bad.seen.includes("retrying"), `非网络的错误不重试，实际 ${bad.seen.join(" → ")}`)
+
+    // Insufficient balance / relay insufficient_quota JSON on stream-json (even exit 0):
+    // must unwrap JSON, skip net retry, post LimitedCard(kind="balance"), and keep steps.
+    const balSeat = await seatIn("去向欠费", mockBalanceName)
+    const balSay = await request("/api/v1/say", { method: "POST", body: { as: "human", text: `@${balSeat.name} 余额测试` } })
+    const balCall = await watch(balSay.data.message.id, balSeat.id, ["answered", "failed", "silent"], 15_000)
+    assert(
+      balCall.call?.state === "failed" && !balCall.seen.includes("retrying") && /余额不足/.test(balCall.call.note || ""),
+      `余额不足报错应直接 failed 且注明余额不足，实际 ${balCall.seen.join(" → ")} ${balCall.call?.note}`,
+    )
+    const balSnap = await request(`/api/v1/room?project=${project}`)
+    const balCard = balSnap.data.messages.find((m) => m.limited?.agentId === balSeat.id)
+    assert(
+      balCard?.limited?.kind === "balance" && balCard.limited.label === "余额不足" && balCard.limited.runId === balCall.call.runId,
+      `余额不足应生成 kind=balance 的 LimitedCard，实际 ${JSON.stringify(balCard)}`,
+    )
+    const balRun = await request(`/api/v1/runs/${balCall.call.runId}`)
+    assert(balRun.data.run?.steps?.some((s) => s.state === "failed"), "余额不足 run 必须保留失败步骤供查看过程")
+
+    // Codex/Antigravity stream errors (`type: "error"` + `event: "error"` with EOF) even when CLI exits 0:
+    // must not be mistaken for silent, must trigger net retry, and must keep stream-error steps.
+    const snetSeat = await seatIn("去向流断", mockStreamNetName)
+    const snetSay = await request("/api/v1/say", { method: "POST", body: { as: "human", text: `@${snetSeat.name} 流网络测试` } })
+    const snet = await watch(snetSay.data.message.id, snetSeat.id, ["answered", "failed", "silent"])
+    assert(
+      snet.call?.state === "failed" &&
+        snet.seen.includes("retrying") &&
+        /网络错误/.test(snet.call.note || "") &&
+        /自动重试了 2 次/.test(snet.call.note || ""),
+      `流内 EOF 网络报错（即使退出码 0）应触发重试并记网络错误，实际 ${snet.seen.join(" → ")} ${snet.call?.note}`,
+    )
+    const snetRun = await request(`/api/v1/runs/${snet.call.runId}`)
+    assert(
+      snetRun.data.run?.steps?.some((s) => s.id === "stream-error" && s.state === "failed"),
+      "流式报错应写入 stream-error 步骤并持久化",
+    )
+
+    // Antigravity "UNAVAILABLE (code 503): No capacity available for model ...":
+    // must trigger net retry, translate explain/end steps & toast to Chinese,
+    // and transition unrecovered "网络重连中：" steps to "网络重连未恢复：".
+    const capSeat = await seatIn("去向满载", mockCapacityName)
+    const capSay = await request("/api/v1/say", { method: "POST", body: { as: "human", text: `@${capSeat.name} 503容量测试` } })
+    const cap = await watch(capSay.data.message.id, capSeat.id, ["answered", "failed", "silent"])
+    assert(
+      cap.call?.state === "failed" &&
+        cap.seen.includes("retrying") &&
+        /服务暂无容量（503，gemini-4-argon-high）/.test(cap.call.note || "") &&
+        /自动重试了 2 次/.test(cap.call.note || ""),
+      `503 模型暂无容量应触发重试并记中文提示，实际 ${cap.seen.join(" → ")} ${cap.call?.note}`,
+    )
+    const capSaid = await roomSays(capSay.data.message.seq, capSeat.name)
+    assert(
+      capSaid.length === 1 && capSaid[0].runId === cap.call.runId && capSaid[0].text.includes("服务暂无容量（503"),
+      `503 容量不足在群里应只发一次带 runId 的中文提示，实际 ${JSON.stringify(capSaid)}`,
+    )
+    const capRun = await request(`/api/v1/runs/${cap.call.runId}`)
+    const capSteps = capRun.data.run?.steps ?? []
+    const capStreamSteps = capSteps.filter((s) => s.id === "stream-error")
+    assert(
+      capStreamSteps.length > 0 &&
+        capStreamSteps.every((s) => s.state === "failed" && !s.title.startsWith("网络重连中：")) &&
+        capStreamSteps.some((s) => s.title.startsWith("网络重连未恢复：")),
+      `失败后的重连步骤应转为「网络重连未恢复：」而非继续显示「网络重连中：」，实际 ${JSON.stringify(capStreamSteps)}`,
+    )
+    const capExplain = capSteps.find((s) => s.id === "explain")
+    assert(
+      capExplain?.output?.includes("503") &&
+        capExplain.output.includes("gemini-4-argon-high") &&
+        capExplain.output.includes("暂无可用容量") &&
+        capExplain.output.includes("原始报错："),
+      `503 失败原因说明应给出中文排查建议与原始报错，实际 ${JSON.stringify(capExplain)}`,
+    )
+    const capEnd = capSteps.find((s) => s.id === "end")
+    assert(
+      capEnd?.title?.startsWith("没成功：服务暂无容量（503，gemini-4-argon-high）") && capEnd.output?.includes("No capacity available"),
+      `结束步骤应显示中文摘要并在结果中保留原始报错，实际 ${JSON.stringify(capEnd)}`,
+    )
 
     // Stopped while it waits for the next try: no more tries.
     const n3 = await request("/api/v1/say", { method: "POST", body: { as: "human", text: `@${netSeat.name} 等重试时被停` } })

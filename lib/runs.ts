@@ -125,7 +125,7 @@ export function putStep(run: Run, step: RunStep) {
   dbSaveRunStep(run.id, index, updated)
 }
 
-export function endRun(run: Run, state: "done" | "failed", note?: string) {
+export function endRun(run: Run, state: "done" | "failed", note?: string, noteOutput?: string) {
   run.state = state
   run.endedAt = Date.now()
   // Anything still marked running never got its result.
@@ -133,10 +133,22 @@ export function endRun(run: Run, state: "done" | "failed", note?: string) {
     const step = run.steps[i]
     if (step.state === "running") {
       step.state = state
+      if (state === "failed" && step.title.startsWith("网络重连中：")) {
+        step.title = step.title.replace(/^网络重连中：/, "网络重连未恢复：")
+      }
       dbSaveRunStep(run.id, i, step)
     }
   }
-  if (note) putStep(run, { id: "end", at: Date.now(), kind: "note", title: note, state })
+  if (note) {
+    putStep(run, {
+      id: "end",
+      at: Date.now(),
+      kind: "note",
+      title: note,
+      ...(noteOutput && noteOutput !== note ? { output: noteOutput } : {}),
+      state,
+    })
+  }
   liveMap().delete(run.id)
   dbSaveRunMeta(run)
 }

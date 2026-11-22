@@ -1,5 +1,5 @@
 import { execFileSync } from "node:child_process"
-import { readFileSync } from "node:fs"
+import { existsSync, readFileSync, statSync } from "node:fs"
 import os from "node:os"
 import path from "node:path"
 
@@ -158,67 +158,93 @@ function dshRoutes(): DshRoutes {
 }
 
 // Lists that take a moment to get (a command, a network fetch) are kept a
-// minute.
-const cached = new Map<string, { at: number; list: ModelChoice[] }>()
-function remember(kind: string, get: () => ModelChoice[]) {
+// minute, unless refreshed explicitly or the underlying client stamp changed.
+const cached = new Map<string, { at: number; stamp?: string; list: ModelChoice[] }>()
+function remember(kind: string, get: () => ModelChoice[], opts?: { refresh?: boolean; stamp?: string }) {
   const hit = cached.get(kind)
-  if (hit && Date.now() - hit.at < 60_000) return hit.list
+  if (!opts?.refresh && hit && Date.now() - hit.at < 60_000 && hit.stamp === opts?.stamp) return hit.list
   let list: ModelChoice[] = []
   try {
     list = get()
   } catch {}
-  cached.set(kind, { at: Date.now(), list })
+  cached.set(kind, { at: Date.now(), stamp: opts?.stamp, list })
   return list
 }
 
 type CodexModel = { slug?: unknown; display_name?: unknown; description?: unknown; visibility?: unknown }
 
 // The keys of a provider in Codex's config.toml: its endpoint, and the API key
-// from env_key or from running its [auth] command, as Codex does.
+// from env_key, from running its [auth] command, or from auth.json (when
+// requires_openai_auth is used), as Codex does.
+function codexAuthKey(config: string) {
+  if (process.env.OPENAI_API_KEY) return process.env.OPENAI_API_KEY
+  try {
+    const auth = JSON.parse(readFileSync(path.join(path.dirname(config), "auth.json"), "utf8")) as { OPENAI_API_KEY?: unknown }
+    return typeof auth.OPENAI_API_KEY === "string" && auth.OPENAI_API_KEY.trim() ? auth.OPENAI_API_KEY.trim() : null
+  } catch {
+    return null
+  }
+}
+
 function providerKey(config: string, provider: string) {
   const env = tomlString(config, "env_key", `model_providers.${provider}`)
-  if (env) return process.env[env] ?? null
+  if (env) return process.env[env] ?? codexAuthKey(config)
   const command = tomlString(config, "command", `model_providers.${provider}.auth`)
-  if (!command) return null
-  const text = readFileSync(config, "utf8")
-  const at = text.search(new RegExp(`^\\[model_providers\\.${provider}\\.auth\\][ \\t]*$`, "m"))
-  const raw = text.slice(at).split(/^\[(?!model_providers\.)/m)[0].match(/^args\s*=\s*(\[.*\])\s*$/m)?.[1]
-  const args = raw ? (JSON.parse(raw) as unknown[]).filter((item): item is string => typeof item === "string") : []
-  return execFileSync(command, args, { encoding: "utf8", timeout: 5000, env: withPath() }).trim() || null
+  if (!command) return codexAuthKey(config)
+  try {
+    const text = readFileSync(config, "utf8")
+    const at = text.search(new RegExp(`^\\[model_providers\\.${provider}\\.auth\\][ \\t]*\\r?$`, "m"))
+    const raw = text.slice(at).split(/^\[(?!model_providers\.)/m)[0].match(/^args\s*=\s*(\[.*\])\s*$/m)?.[1]
+    const args = raw ? (JSON.parse(raw) as unknown[]).filter((item): item is string => typeof item === "string") : []
+    return execFileSync(command, args, { encoding: "utf8", timeout: 5000, env: withPath() }).trim() || codexAuthKey(config)
+  } catch {
+    return codexAuthKey(config)
+  }
 }
 
 // When Codex runs on another provider (top-level model_provider, say a
 // DeepSeek API), its picker's catalog is OpenAI's; list what the provider
 // serves instead (GET <base_url>/models).
 function providerModels(config: string): ModelChoice[] | null {
-  const provider = tomlString(config, "model_provider")
-  if (!provider || provider === "openai") return null
-  const base = tomlString(config, "base_url", `model_providers.${provider}`)
-  if (!base) return null
-  const name = tomlString(config, "name", `model_providers.${provider}`) ?? provider
-  const key = providerKey(config, provider)
-  // The key goes in on stdin, not on the command line.
-  const out = execFileSync("curl", ["-sf", "-m", "10", "-H", "@-", `${base.replace(/\/$/, "")}/models`], {
-    encoding: "utf8",
-    input: key ? `Authorization: Bearer ${key}\n` : "",
-    timeout: 15_000,
-  })
-  const data = (JSON.parse(out) as { data?: { id?: unknown }[] }).data ?? []
-  return data
-    .map((model) => model.id)
-    .filter((id): id is string => typeof id === "string" && PICK.test(id))
-    .sort((a, b) => Number(b.startsWith("deepseek")) - Number(a.startsWith("deepseek")))
-    .map((id) => ({ id, label: id, note: name }))
+  try {
+    const provider = tomlString(config, "model_provider")
+    if (!provider || provider === "openai") return null
+    const base = tomlString(config, "base_url", `model_providers.${provider}`)
+    if (!base) return null
+    const name = tomlString(config, "name", `model_providers.${provider}`) ?? provider
+    const key = providerKey(config, provider)
+    // The key goes in on stdin, not on the command line.
+    const out = execFileSync("curl", ["-sf", "-m", "10", "-H", "@-", `${base.replace(/\/$/, "")}/models`], {
+      encoding: "utf8",
+      input: key ? `Authorization: Bearer ${key}\n` : "",
+      timeout: 15_000,
+    })
+    const data = (JSON.parse(out) as { data?: { id?: unknown }[] }).data ?? []
+    const list = data
+      .map((model) => model.id)
+      .filter((id): id is string => typeof id === "string" && PICK.test(id))
+      .sort((a, b) => Number(b.startsWith("deepseek")) - Number(a.startsWith("deepseek")))
+      .map((id) => ({ id, label: id, note: name }))
+    return list.length ? list : null
+  } catch {
+    return null
+  }
+}
+
+function codexStamp() {
+  const home = process.env.CODEX_HOME || path.join(os.homedir(), ".codex")
+  return [fileStamp(path.join(home, "config.toml")), fileStamp(path.join(home, "auth.json"))].filter(Boolean).join("|")
 }
 
 // The models Codex's own picker shows ("list"), from the catalog it loads, or
 // the provider's when it runs on another one.
 function codexModels(): ModelChoice[] {
   const home = process.env.CODEX_HOME || path.join(os.homedir(), ".codex")
-  const other = providerModels(path.join(home, "config.toml"))
+  const configFile = path.join(home, "config.toml")
+  const other = providerModels(configFile)
   if (other) return other
-  const catalog = tomlString(path.join(home, "config.toml"), "model_catalog_json")
-  for (const file of [catalog, path.join(home, "models_cache.json")]) {
+  const catalog = tomlString(configFile, "model_catalog_json")
+  for (const file of [catalog, path.join(home, "models_cache.json"), path.join(home, "cc-switch-model-catalog.json"), path.join(home, "models.json")]) {
     if (!file) continue
     try {
       const models = (JSON.parse(readFileSync(file, "utf8")) as { models?: CodexModel[] }).models ?? []
@@ -265,24 +291,141 @@ function codebuddyModels(): ModelChoice[] {
   return []
 }
 
+const ANTIGRAVITY_KNOWN: ModelChoice[] = [
+  { id: "gemini-4-neon-xhigh", label: "Gemini 4 Neon (XHigh)", note: "最新旗舰，极深推理" },
+  { id: "gemini-4-neon-high", label: "Gemini 4 Neon (High)", note: "最新旗舰，高阶推理" },
+  { id: "gemini-4-neon-medium", label: "Gemini 4 Neon (Medium)", note: "最新旗舰，均衡主力" },
+  { id: "gemini-4-neon-low", label: "Gemini 4 Neon (Low)", note: "最新旗舰，轻量快速" },
+  { id: "gemini-4-hydrogen-xhigh", label: "Gemini 4 Hydrogen (XHigh)", note: "极深推理，最慢" },
+  { id: "gemini-4-hydrogen-high", label: "Gemini 4 Hydrogen (High)", note: "强推理，慢一些" },
+  { id: "gemini-4-hydrogen-medium", label: "Gemini 4 Hydrogen (Medium)", note: "均衡推理" },
+  { id: "gemini-4-hydrogen-low", label: "Gemini 4 Hydrogen (Low)", note: "轻量快速" },
+  { id: "gemini-4-argon-high", label: "Gemini 4 Argon (High)", note: "高阶推理" },
+  { id: "gemini-4-argon-medium", label: "Gemini 4 Argon (Medium)", note: "均衡推理" },
+  { id: "gemini-4-argon-low", label: "Gemini 4 Argon (Low)", note: "快速推理" },
+  { id: "gemini-3.8-flash-high", label: "Gemini 3.8 Flash (High)" },
+  { id: "gemini-3.8-flash-medium", label: "Gemini 3.8 Flash (Medium)" },
+  { id: "gemini-3.8-flash-low", label: "Gemini 3.8 Flash (Low)" },
+  { id: "gemini-3.5-flash-lite", label: "Gemini 3.5 Flash Lite" },
+  { id: "gemini-3.1-pro", label: "Gemini 3.1 Pro" },
+  { id: "gemini-3.1-pro-low", label: "Gemini 3.1 Pro Low" },
+]
+
+// Internal/unreleased codenames compiled into Antigravity's language_server binary
+// that are not selectable by normal accounts.
+const ANTIGRAVITY_SKIP_FAMILIES = new Set(["carbon"])
+const ANTIGRAVITY_BIN_RE = /gemini-(4(?:\.\d+)?|[5-9](?:\.\d+)?)-([a-z][a-z0-9]*)-(xhigh|high|medium|low)/g
+const TIER_LABEL: Record<string, string> = { xhigh: "XHigh", high: "High", medium: "Medium", low: "Low" }
+const TIER_ORDER: Record<string, number> = { xhigh: 0, high: 1, medium: 2, low: 3 }
+
+function antigravityLanguageServer(): string | null {
+  const candidates = [
+    process.env.AGY_LANGUAGE_SERVER,
+    process.platform === "win32"
+      ? path.win32.join(process.env.LOCALAPPDATA || path.win32.join(os.homedir(), "AppData", "Local"), "Programs", "Antigravity", "resources", "bin", "language_server.exe")
+      : null,
+    process.platform === "darwin" ? "/Applications/Antigravity.app/Contents/Resources/bin/language_server" : null,
+    process.platform === "linux" ? "/usr/lib/antigravity/resources/bin/language_server" : null,
+  ].filter((item): item is string => Boolean(item))
+  return candidates.find((file) => existsSync(file)) ?? null
+}
+
+function fileStamp(file: string | null): string {
+  if (!file) return ""
+  try {
+    const st = statSync(file)
+    return `${file}:${st.mtimeMs}:${st.size}`
+  } catch {
+    return ""
+  }
+}
+
+function antigravityStamp(): string {
+  const ls = antigravityLanguageServer()
+  const bridge = path.join(os.homedir(), ".local", "bin", "agy.mjs")
+  const officialWin =
+    process.platform === "win32" && process.env.LOCALAPPDATA
+      ? path.win32.join(process.env.LOCALAPPDATA, "agy", "bin", "agy.exe")
+      : null
+  return [fileStamp(ls), fileStamp(existsSync(bridge) ? bridge : null), fileStamp(officialWin && existsSync(officialWin) ? officialWin : null)]
+    .filter(Boolean)
+    .join("|")
+}
+
+let agyBinCache: { stamp: string; models: ModelChoice[] } | null = null
+
+// Discover newly shipped Gemini 4+/5+ models directly from the installed
+// Antigravity desktop language_server binary (same pattern as claudeBinaryIds).
+function antigravityBinaryModels(): ModelChoice[] {
+  const ls = antigravityLanguageServer()
+  if (!ls) return []
+  const stamp = fileStamp(ls)
+  if (agyBinCache && agyBinCache.stamp === stamp) return agyBinCache.models
+  try {
+    const text = readFileSync(ls, "latin1")
+    const found = new Map<string, { gen: number; family: string; tier: string }>()
+    for (const match of text.matchAll(ANTIGRAVITY_BIN_RE)) {
+      const [id, genStr, family, tier] = match
+      if (ANTIGRAVITY_SKIP_FAMILIES.has(family) || !PICK.test(id)) continue
+      if (!found.has(id)) found.set(id, { gen: Number(genStr), family, tier })
+    }
+    const models = [...found.entries()]
+      .sort(([, a], [, b]) => b.gen - a.gen || a.family.localeCompare(b.family) || (TIER_ORDER[a.tier] ?? 9) - (TIER_ORDER[b.tier] ?? 9))
+      .map(([id, info]) => {
+        const capFamily = info.family[0].toUpperCase() + info.family.slice(1)
+        return { id, label: `Gemini ${info.gen} ${capFamily} (${TIER_LABEL[info.tier] ?? info.tier})` }
+      })
+    agyBinCache = { stamp, models }
+    return models
+  } catch {
+    return []
+  }
+}
+
 // `agy models` prints "id<TAB>name" a line, after a "Fetching…" line.
+// Merge with ANTIGRAVITY_KNOWN and binary auto-discovery so Neon and future
+// desktop updates appear immediately without hardcoding every release.
 function antigravityModels(): ModelChoice[] {
-  const out = runCli("agy", ["models"], 20_000)
+  const known = new Map(ANTIGRAVITY_KNOWN.map((item) => [item.id, item]))
+  const fromBinary = antigravityBinaryModels()
+  let fromCli: ModelChoice[] = []
+  try {
+    const out = runCli("agy", ["models"], 20_000)
+    fromCli = out
+      .split(/\r?\n/)
+      .map((line) => line.split("\t"))
+      .filter((parts) => parts.length >= 2 && PICK.test(parts[0].trim()))
+      .map(([id, label]) => {
+        const cleanId = id.trim()
+        const preset = known.get(cleanId)
+        return { id: cleanId, label: label.trim(), ...(preset?.note ? { note: preset.note } : {}) }
+      })
+  } catch {}
+
+  const out: ModelChoice[] = []
+  const seen = new Set<string>()
+  const add = (item: ModelChoice) => {
+    if (seen.has(item.id)) return
+    seen.add(item.id)
+    out.push(item)
+  }
+
+  for (const item of fromCli) add(item)
+  for (const item of ANTIGRAVITY_KNOWN) add(item)
+  for (const item of fromBinary) add(item)
   return out
-    .split("\n")
-    .map((line) => line.split("\t"))
-    .filter((parts) => parts.length >= 2 && PICK.test(parts[0].trim()))
-    .map(([id, label]) => ({ id: id.trim(), label: label.trim() }))
 }
 
 // What the room offers for a kind; the page also lets the user type any id.
-export function modelChoices(kind: string): ModelChoice[] {
-  if (kind === "claude") return remember(kind, claudeModels)
-  if (kind === "codex") return remember(kind, codexModels)
-  if (kind === "antigravity") return remember(kind, antigravityModels)
-  if (kind === "cursor") return remember(kind, cursorModels)
-  if (kind === "codebuddy" || kind === "workbuddy") return remember("codebuddy", codebuddyModels)
+export function modelChoices(kind: string, opts?: { refresh?: boolean }): ModelChoice[] {
+  const refresh = opts?.refresh === true
+  if (kind === "claude") return remember(kind, claudeModels, { refresh })
+  if (kind === "codex") return remember(kind, codexModels, { refresh, stamp: codexStamp() })
+  if (kind === "antigravity") return remember(kind, antigravityModels, { refresh, stamp: antigravityStamp() })
+  if (kind === "cursor") return remember(kind, cursorModels, { refresh })
+  if (kind === "codebuddy" || kind === "workbuddy") return remember("codebuddy", codebuddyModels, { refresh })
   if (kind === "dsh") {
+    if (refresh) dshCache = null
     return dshRoutes().flatMap((route) =>
       route.models.map((model) => ({ id: model, label: model.replace(/^[\w-]+:/, ""), note: route.name })),
     )

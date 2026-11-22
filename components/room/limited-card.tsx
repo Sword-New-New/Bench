@@ -20,6 +20,7 @@ export function LimitedCard({
   count = 1,
   projectName,
   onInspect,
+  onOpenRun,
 }: {
   message: Message
   compact?: boolean
@@ -27,6 +28,7 @@ export function LimitedCard({
   count?: number
   projectName?: string
   onInspect?: () => void
+  onOpenRun?: (runId: string) => void
 }) {
   const limited = message.limited
   const [sending, setSending] = useState(false)
@@ -34,18 +36,27 @@ export function LimitedCard({
 
   if (onInspect) {
     return (
-      <div className="rounded-2xl border border-amber-500/35 bg-card px-3 py-2.5 text-xs shadow-sm">
+      <div
+        className={`rounded-2xl border bg-card px-3 py-2.5 text-xs shadow-sm ${
+          limited.kind === "balance" ? "border-destructive/35" : "border-amber-500/35"
+        }`}
+      >
         <p className="flex flex-wrap items-center gap-1.5 font-medium">
           {projectName ? (
             <span className="rounded bg-foreground/[0.06] px-1.5 py-0.5 text-[0.625rem] leading-4 text-muted-foreground">
               {projectName}
             </span>
           ) : null}
-          <span>{limited.agentName} 撞到额度</span>
+          <span>{limited.kind === "balance" ? `${limited.agentName} 余额不足` : `${limited.agentName} 撞到额度`}</span>
         </p>
         <p className="mt-1 text-muted-foreground">{message.text}</p>
         {count > 1 ? <p className="mt-0.5 text-muted-foreground">共撞了 {count} 次</p> : null}
-        <div className="mt-2 flex justify-end">
+        <div className="mt-2 flex justify-end gap-1.5">
+          {onOpenRun && limited.runId ? (
+            <Button type="button" size="xs" variant="ghost" onClick={() => onOpenRun(limited.runId)}>
+              查看过程
+            </Button>
+          ) : null}
           <Button type="button" size="xs" onClick={onInspect}>
             去看
           </Button>
@@ -131,13 +142,26 @@ export function LimitedCard({
     <div
       className={
         compact
-          ? "rounded-2xl border border-amber-500/35 bg-card px-3 py-2.5 text-xs shadow-sm"
-          : "my-2 self-center rounded-2xl border border-amber-500/30 bg-amber-500/[0.08] px-4 py-2.5 text-center text-xs leading-5 text-muted-foreground"
+          ? `rounded-2xl border bg-card px-3 py-2.5 text-xs shadow-sm ${
+              limited.kind === "balance" ? "border-destructive/35" : "border-amber-500/35"
+            }`
+          : `my-2 self-center rounded-2xl border px-4 py-2.5 text-center text-xs leading-5 ${
+              limited.kind === "balance"
+                ? "border-destructive/30 bg-destructive/[0.07] text-destructive dark:text-red-300"
+                : "border-amber-500/30 bg-amber-500/[0.08] text-muted-foreground"
+            }`
       }
     >
-      <p className={compact ? "font-medium text-foreground" : ""}>{message.text}</p>
+      <p className={compact ? "font-medium text-foreground" : "font-medium"}>{message.text}</p>
       {count > 1 ? <p className={compact ? "mt-0.5 text-muted-foreground" : ""}>共撞了 {count} 次</p> : null}
-      <div className={`mt-2 ${compact ? "[&>span]:justify-start" : ""}`}>{body}</div>
+      <div className={`mt-2 flex flex-wrap items-center gap-1.5 ${compact ? "justify-start [&>span]:justify-start" : "justify-center"}`}>
+        {body}
+        {onOpenRun && limited.runId ? (
+          <Button type="button" size="xs" variant="ghost" onClick={() => onOpenRun(limited.runId)}>
+            查看过程
+          </Button>
+        ) : null}
+      </div>
     </div>
   )
 }

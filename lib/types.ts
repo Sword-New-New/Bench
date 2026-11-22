@@ -620,6 +620,7 @@ export type LimitedRun = {
   agentId: string
   agentName: string
   label: string
+  kind?: "quota" | "balance"
   resetsAt?: number
   state: "open" | "scheduled" | "resumed" | "rebound" | "failed" | "dismissed"
   // scheduled: when it will be woken; resumed/rebound: when it was.

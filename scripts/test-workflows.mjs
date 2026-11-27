@@ -107,7 +107,7 @@ connection.exec("DROP TABLE workflows")
 delete globalThis.__benchSqlite.schemaVer
 assert.doesNotThrow(() => db.dbListWorkflows(pid))
 assert.equal(db.getDb(), connection, "迁移沿用现有连接")
-assert.equal(globalThis.__benchSqlite.schemaVer, 2)
+assert.equal(globalThis.__benchSqlite.schemaVer, 3)
 
 // Persistence after a fresh connection and deleting stays deleted.
 db.dbSaveWorkflow(work)

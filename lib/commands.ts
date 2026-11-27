@@ -1,5 +1,6 @@
 import { escapeRegExp } from "@/lib/text"
 import type { Workflow } from "@/lib/types"
+import { workflowStages } from "@/lib/workflow-shared"
 
 // The slash commands the room's input takes (components/room/composer.tsx).
 // Seat commands go straight to the session actions. Workflow commands become
@@ -32,14 +33,18 @@ export const SLASH_COMMANDS: SlashCommand[] = [
 ]
 
 export function slashCommands(workflows: Workflow[] = []): SlashCommand[] {
-  const saved = workflows.filter((item) => item.command).map((item): SlashCommand => ({
-    name: item.command!, mode: "workflow", workflowId: item.id, hint: item.kind === "explore" ? "主题" : "需求", needsText: true,
-    about: item.kind === "plan"
-      ? `${item.name}：${item.planners?.join(" + ")}`
-      : item.kind === "explore"
-        ? `${item.name}：${item.explorers?.join(" + ")}`
-        : `${item.name}：${item.lead} → ${item.workers?.join("、")} → ${item.summarizer}`,
-  }))
+  const saved = workflows.filter((item) => item.command).map((item): SlashCommand => {
+    const stages = workflowStages(item)
+    const chain = stages.map((st) => st.seats.join("、")).filter(Boolean).join(" → ")
+    return {
+      name: item.command!,
+      mode: "workflow",
+      workflowId: item.id,
+      hint: item.kind === "explore" ? "主题" : "需求",
+      needsText: true,
+      about: `${item.name}：${chain || (item.kind === "plan" ? item.planners?.join(" + ") : item.kind === "explore" ? item.explorers?.join(" + ") : `${item.lead} → ${item.workers?.join("、")} → ${item.summarizer}`)}`,
+    }
+  })
   return [...SLASH_COMMANDS.filter((item) => !saved.some((s) => s.name === item.name)), ...saved]
 }
 

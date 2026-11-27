@@ -118,6 +118,16 @@ const SUMMARY_PROMPT_BYTES = 90_000
 // `stop`: ends the command running now, if any. `carry`: the room messages a
 // run was answering when someone interjected; the next run takes them up again.
 // `whisper`: what the user said to this seat alone, run before anything else.
+export type WorkflowJob = {
+  id: string
+  projectId: string
+  agentId: string
+  title: string
+  prompt: string
+  onStart?: (runId: string) => void
+  onFinish: (result: { out: string; failure?: string; stopped?: boolean; runId: string }) => void
+}
+
 type Lane = {
   running: boolean
   paused?: boolean
@@ -137,6 +147,9 @@ type Lane = {
   stop?: () => void
   carry?: string
   whisper?: string
+  // Independent workflow stage turns (lib/workflow-engine.ts), never posted to group chat.
+  workflowJobs?: WorkflowJob[]
+  workflowJobId?: string
   // The latest message that called this seat; the next reply answers it.
   trigger?: string
   // Message IDs explicitly dropped from this seat's wake queue, omitted on next catchUp.
@@ -1138,6 +1151,7 @@ function run(agentId: string) {
   if (!agent || !agent.agentName || !agent.session) {
     note(queue.pending.map((item) => item.id), agentId, "failed", { note: "这个席位没有会话，叫不醒" })
     dropChecks(queue, "复验人没有会话，叫不醒")
+    dropWorkflowJobs(queue, "这个席位没有会话，叫不醒")
     queue.pending = []
     queue.summary = false
     queue.compact = false
@@ -1149,6 +1163,7 @@ function run(agentId: string) {
   if (!adapter) {
     note(queue.pending.map((item) => item.id), agentId, "failed", { note: `没有 ${agent.agentName} 的唤起命令` })
     dropChecks(queue, `没有 ${agent.agentName} 的唤起命令`)
+    dropWorkflowJobs(queue, `没有 ${agent.agentName} 的唤起命令`)
     queue.pending = []
     queue.summary = false
     queue.compact = false
@@ -1175,6 +1190,13 @@ function run(agentId: string) {
   // When the user pauses a seat's queue, queued mentions and tasks stay held
   // in SQLite until resumed (or individually dropped).
   if (queue.paused) return
+
+  const wfJob = queue.workflowJobs?.shift()
+  if (wfJob) {
+    if (queue.workflowJobs?.length === 0) queue.workflowJobs = undefined
+    runWorkflowJob(agent, wfJob)
+    return
+  }
 
   if (queue.summary) {
     queue.summary = false
@@ -2246,6 +2268,107 @@ function answerWhisper(agent: NonNullable<ReturnType<typeof agentState>>, text: 
     seat.settle()
     run(agent.id)
   }, undefined, { promptFile, startedLink })
+}
+
+function dropWorkflowJobs(queue: Lane, reason: string) {
+  const jobs = queue.workflowJobs
+  if (!jobs?.length) return
+  queue.workflowJobs = undefined
+  for (const job of jobs) {
+    try {
+      job.onFinish({ out: "", failure: reason, runId: "" })
+    } catch {}
+  }
+}
+
+function runWorkflowJob(agent: NonNullable<ReturnType<typeof agentState>>, job: WorkflowJob) {
+  const queue = lane(agent.id)
+  const { command, promptFile } = buildWake(agent, introduce(agent) + job.prompt)
+  if (!command) {
+    try {
+      job.onFinish({ out: "", failure: `拼不出 ${agent.name} 的唤起命令`, runId: "" })
+    } catch {}
+    run(agent.id)
+    return
+  }
+  queue.running = true
+  queue.workflowJobId = job.id
+  queue.key = randomBytes(12).toString("hex")
+  queue.project = job.projectId
+  const startedLink = { agentName: agent.agentName, session: agent.session }
+  const log = startRun(agent.id, agent.name, "workflow", { project: job.projectId, ask: job.title })
+  queue.log = log
+  const seat = busy(agent.id, `工作流：${job.title.slice(0, 32)}`)
+  try {
+    job.onStart?.(log.id)
+  } catch {}
+  launch(
+    agent,
+    command,
+    log,
+    seat.live,
+    ({ out, failure, stopped }) => {
+      queue.running = false
+      queue.workflowJobId = undefined
+      queue.key = undefined
+      queue.log = undefined
+      if (!stopped && !failure) {
+        log.answer = out.slice(0, 4000)
+        markWoken(agent.id, startedLink)
+      }
+      if (failure && !stopped) noteLimit(agent, log, out, failure)
+      const endShort = failure ? shortExplain(agent.agentName, failure) : undefined
+      endRun(
+        log,
+        failure || stopped ? "failed" : "done",
+        stopped ? "工作流已停止" : endShort ? `没成功：${endShort}` : undefined,
+        failure && endShort !== failure ? failure : undefined,
+      )
+      seat.settle()
+      try {
+        job.onFinish({
+          out: out.slice(0, 24000),
+          failure: failure ? shortExplain(agent.agentName, failure) : undefined,
+          stopped,
+          runId: log.id,
+        })
+      } catch (error) {
+        console.error(error)
+      }
+      run(agent.id)
+    },
+    undefined,
+    { promptFile, startedLink },
+  )
+}
+
+export function enqueueWorkflowJob(job: WorkflowJob) {
+  inProject(job.projectId, () => {
+    const queue = lane(job.agentId)
+    clearSeatUserStopped(job.agentId)
+    queue.workflowJobs = [...(queue.workflowJobs ?? []), job]
+    run(job.agentId)
+  })
+}
+
+export function cancelWorkflowJob(projectId: string, agentId: string, jobId: string) {
+  inProject(projectId, () => {
+    const queue = lane(agentId)
+    if (queue.workflowJobs?.length) {
+      const idx = queue.workflowJobs.findIndex((item) => item.id === jobId)
+      if (idx >= 0) {
+        const [removed] = queue.workflowJobs.splice(idx, 1)
+        if (queue.workflowJobs.length === 0) queue.workflowJobs = undefined
+        try {
+          removed.onFinish({ out: "", stopped: true, runId: "" })
+        } catch {}
+        return
+      }
+    }
+    if (queue.running && queue.workflowJobId === jobId) {
+      queue.stop?.()
+    }
+  })
 }
 
 function wakeable(agentId: string) {

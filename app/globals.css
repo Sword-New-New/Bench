@@ -1254,6 +1254,18 @@ html:active-view-transition-type(tier-leave)::view-transition-group(.bench-in) {
   box-shadow: 0 0 24px -8px rgba(251, 113, 133, 0.42);
 }
 
+.wf-shell[data-state="waiting"] {
+  background: conic-gradient(
+    from var(--wf-angle),
+    color-mix(in srgb, #f59e0b 18%, var(--border)) 0deg,
+    color-mix(in srgb, #f59e0b 84%, white 10%) 95deg,
+    color-mix(in srgb, #f59e0b 18%, var(--border)) 195deg,
+    color-mix(in srgb, #f59e0b 18%, var(--border)) 360deg
+  );
+  animation: wf-spin 5s linear infinite;
+  box-shadow: 0 0 24px -8px rgba(245, 158, 11, 0.4);
+}
+
 .wf-node {
   border-radius: 0.75rem;
   padding: 1px;
@@ -1288,6 +1300,18 @@ html:active-view-transition-type(tier-leave)::view-transition-group(.bench-in) {
     color-mix(in srgb, #fb7185 25%, var(--border))
   );
   box-shadow: 0 0 18px -5px rgba(251, 113, 133, 0.45);
+}
+
+.wf-node[data-state="waiting_help"] {
+  background: conic-gradient(
+    from var(--wf-angle),
+    color-mix(in srgb, #f59e0b 20%, var(--border)) 0deg,
+    color-mix(in srgb, #f59e0b 90%, white 10%) 95deg,
+    color-mix(in srgb, #f59e0b 20%, var(--border)) 190deg,
+    color-mix(in srgb, #f59e0b 20%, var(--border)) 360deg
+  );
+  animation: wf-spin 3.8s linear infinite;
+  box-shadow: 0 0 20px -4px rgba(245, 158, 11, 0.46);
 }
 
 .wf-node[data-state="idle"] {

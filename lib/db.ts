@@ -2,7 +2,7 @@ import { copyFileSync, existsSync, mkdirSync, readdirSync, readFileSync, renameS
 import path from "node:path"
 import { DatabaseSync, type StatementSync } from "node:sqlite"
 
-import type { Message, Run, RunStep, SeatBinding, SeatProfile, Task, Workflow } from "@/lib/types"
+import type { Message, Run, RunStep, SeatBinding, SeatProfile, Task, Workflow, WorkflowRun } from "@/lib/types"
 
 // Central SQLite store (WAL + FTS5) replacing whole-file JSON rewrites and
 // hard array caps (400 messages / 200 tasks / 80 runs). Uses Node 24's built-in
@@ -41,7 +41,7 @@ type LegacyRoomGlobal = typeof globalThis & {
   __benchUserName?: string
 }
 
-const SCHEMA_VERSION = 2
+const SCHEMA_VERSION = 3
 const WORKFLOW_SCHEMA_SQL = `
 CREATE TABLE IF NOT EXISTS workflows (
   id TEXT PRIMARY KEY,
@@ -51,6 +51,17 @@ CREATE TABLE IF NOT EXISTS workflows (
   FOREIGN KEY(project_id) REFERENCES projects(id) ON DELETE CASCADE
 );
 CREATE INDEX IF NOT EXISTS idx_workflows_project ON workflows(project_id, sort_order);
+
+CREATE TABLE IF NOT EXISTS workflow_runs (
+  id TEXT PRIMARY KEY,
+  project_id TEXT NOT NULL,
+  status TEXT NOT NULL,
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL,
+  data_json TEXT NOT NULL,
+  FOREIGN KEY(project_id) REFERENCES projects(id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_workflow_runs_project ON workflow_runs(project_id, created_at DESC);
 `
 
 const SCHEMA_SQL = `
@@ -529,6 +540,37 @@ export function dbSaveWorkflow(workflow: Workflow) {
 
 export function dbDeleteWorkflow(projectId: string, id: string) {
   stmt("DELETE FROM workflows WHERE project_id = ? AND id = ?").run(projectId, id)
+}
+
+export function dbListWorkflowRuns(projectId: string, limit = 20): WorkflowRun[] {
+  return stmt("SELECT data_json FROM workflow_runs WHERE project_id = ? ORDER BY created_at DESC LIMIT ?")
+    .all(projectId, limit)
+    .map((row) => JSON.parse(String(row.data_json)) as WorkflowRun)
+}
+
+export function dbGetWorkflowRun(id: string): WorkflowRun | null {
+  const row = stmt("SELECT data_json FROM workflow_runs WHERE id = ?").get(id)
+  return row ? (JSON.parse(String(row.data_json)) as WorkflowRun) : null
+}
+
+export function dbSaveWorkflowRun(run: WorkflowRun) {
+  stmt(`INSERT INTO workflow_runs (id, project_id, status, created_at, updated_at, data_json)
+    VALUES (?, ?, ?, ?, ?, ?)
+    ON CONFLICT(id) DO UPDATE SET
+      status = excluded.status,
+      updated_at = excluded.updated_at,
+      data_json = excluded.data_json`)
+    .run(run.id, run.projectId, run.status, run.createdAt, run.updatedAt, JSON.stringify(run))
+}
+
+export function dbDeleteWorkflowRun(projectId: string, id: string) {
+  stmt("DELETE FROM workflow_runs WHERE project_id = ? AND id = ?").run(projectId, id)
+}
+
+export function dbListWaitingWorkflowRuns(): WorkflowRun[] {
+  return stmt("SELECT data_json FROM workflow_runs WHERE status IN ('waiting_gate', 'waiting_help', 'failed') ORDER BY updated_at DESC LIMIT 40")
+    .all()
+    .map((row) => JSON.parse(String(row.data_json)) as WorkflowRun)
 }
 
 // ---- Project & Room persistence ----

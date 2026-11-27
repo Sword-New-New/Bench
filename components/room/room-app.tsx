@@ -1,7 +1,7 @@
 "use client"
 
 import { type ComponentProps, startTransition, useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react"
-import { BellRing, FolderOpen, Gauge, ListTodo, MessageSquare, Monitor, Moon, PanelLeftClose, PanelLeftOpen, Plug, Settings, SlidersHorizontal, Smartphone, Sparkles, Sun, TerminalSquare, Type, UserRound, Users } from "lucide-react"
+import { BellRing, FolderOpen, Gauge, GitBranch, ListTodo, MessageSquare, Monitor, Moon, PanelLeftClose, PanelLeftOpen, Plug, Settings, SlidersHorizontal, Smartphone, Sparkles, Sun, TerminalSquare, Type, UserRound, Users } from "lucide-react"
 import { useTheme } from "next-themes"
 import { toast } from "sonner"
 
@@ -9,6 +9,7 @@ import { AdaptersDialog } from "@/components/room/adapters-dialog"
 import { NameField } from "@/components/room/name-field"
 import { Composer } from "@/components/room/composer"
 import { WorkflowsDialog } from "@/components/room/workflows-dialog"
+import { WorkflowWorkspace } from "@/components/room/workflow-workspace"
 import { draft, useDraft } from "@/components/room/draft"
 import { Ambient, FLOW_EVENT, flowOn, setFlow } from "@/components/room/ambient"
 import { FONT_SIZES, setFontSize, useFontSize, type FontSizeId } from "@/components/room/font-size"
@@ -237,6 +238,16 @@ export function RoomApp() {
   const [live, setLive] = useState(false)
   const [tab, setTab] = useState<TabId>("chat")
   const [simpleTab, setSimpleTab] = useState<SimpleTabId>("chat")
+  const [mainMode, setMainMode] = useState<"chat" | "workflows">("chat")
+  useEffect(() => {
+    const openWf = () => {
+      setMainMode("workflows")
+      setTab("chat")
+      setSimpleTab("chat")
+    }
+    window.addEventListener("bench-open-workflows", openWf)
+    return () => window.removeEventListener("bench-open-workflows", openWf)
+  }, [])
   const layer = useSyncExternalStore(onLayerChange, layerSaved, (): UiLayer => "simple")
   const simple = layer === "simple"
   const leftOpen = useSyncExternalStore(onLeftOpenChange, leftOpenSaved, () => true)
@@ -888,6 +899,9 @@ export function RoomApp() {
   const currentProject = room?.project ?? projects?.find((item) => item.id === projectId) ?? null
   // The front desk shows as one chat window (FrontBar over the thread).
   const desk = Boolean(room?.project.front)
+  const wfRuns = room?.workflowRuns ?? []
+  const wfWaiting = wfRuns.filter((r) => r.status === "waiting_gate" || r.status === "waiting_help" || r.status === "failed").length
+  const wfRunning = wfRuns.filter((r) => r.status === "running").length
   const simpleWaitingCount = !room
     ? 0
     : desk
@@ -902,6 +916,7 @@ export function RoomApp() {
         collectOpenAsks(room.messages, room.openAsks).length +
         groupLimited(room.messages).length +
         room.messages.filter(isPendingInterrupted).length +
+        wfWaiting +
         (digest?.you.filter((row) => row.need === "review").length ?? 0)
   const simpleWorkingCount = desk
     ? (waitingOverview?.workingTotal ??
@@ -1001,6 +1016,53 @@ export function RoomApp() {
           >
             <FolderOpen className="size-4" />
           </button>
+        ) : null}
+        {!currentProject?.front ? (
+          <div
+            role="tablist"
+            aria-label="主视图切换"
+            className="pill inline-flex shrink-0 items-center rounded-full p-0.5 text-xs"
+          >
+            <button
+              type="button"
+              role="tab"
+              aria-selected={mainMode === "chat"}
+              onClick={() => setMainMode("chat")}
+              className={`inline-flex items-center gap-1 rounded-full px-2.5 py-1 font-medium transition-colors ${
+                mainMode === "chat"
+                  ? "bg-foreground/10 text-foreground"
+                  : "text-muted-foreground hover:text-foreground"
+              }`}
+            >
+              <MessageSquare className="size-3.5" />
+              对话
+            </button>
+            <button
+              type="button"
+              role="tab"
+              aria-selected={mainMode === "workflows"}
+              onClick={() => {
+                setMainMode("workflows")
+                setTab("chat")
+                setSimpleTab("chat")
+              }}
+              className={`inline-flex items-center gap-1 rounded-full px-2.5 py-1 font-medium transition-colors ${
+                mainMode === "workflows"
+                  ? "bg-foreground/10 text-foreground"
+                  : "text-muted-foreground hover:text-foreground"
+              }`}
+            >
+              <GitBranch className="size-3.5" />
+              工作流
+              {wfWaiting > 0 ? (
+                <span className="ml-0.5 rounded-full bg-amber-500/20 px-1.5 text-[10px] font-semibold text-amber-500 dark:text-amber-300">
+                  {wfWaiting}
+                </span>
+              ) : wfRunning > 0 ? (
+                <span className="wf-breathe ml-0.5 size-1.5 rounded-full bg-sky-400" />
+              ) : null}
+            </button>
+          </div>
         ) : null}
         <div className="ml-auto flex items-center gap-1.5">
           {projects ? (
@@ -1289,6 +1351,18 @@ export function RoomApp() {
             data-tour="chat"
             className={`${(simple ? simpleTab === "chat" : tab === "chat" || desk) ? "flex" : "hidden"} relative h-full min-h-0 min-w-0 flex-col lg:flex`}
           >
+            {mainMode === "workflows" && !desk ? (
+              <WorkflowWorkspace
+                workflows={room.workflows ?? []}
+                runs={room.workflowRuns ?? []}
+                agents={agents}
+                onManage={() => setWorkflowsOpen(true)}
+                onOpenRun={setRunId}
+                onChanged={() => pullRef.current()}
+                onAddSeat={() => setSpawn({ kind: "", from: null })}
+              />
+            ) : (
+            <>
             {desk ? (
               <FrontBar
                 seat={deskSeat(agents)}
@@ -1454,6 +1528,8 @@ export function RoomApp() {
                 })
               }}
             />
+            </>
+            )}
           </section>
           {simple ? (
             <div className={`${simpleTab === "waiting" ? "block" : "hidden"} h-full min-h-0 px-3 pb-2 lg:block lg:px-0 lg:pb-0`}>

@@ -15,6 +15,7 @@ import {
   dbGetMessage,
   dbGetMeta,
   dbHasAttachment,
+  dbListWorkflowRuns,
   dbLoadMessagesAfter,
   dbLoadOpenAsks,
   dbLoadProjects,
@@ -1137,9 +1138,32 @@ export function snapshot(): RoomSnapshot {
     openAsks,
   )
   for (const seat of seats) seat.owes = owed.get(seat.id)
+  const helpSeatIds = new Set<string>([
+    ...permitsFor(current.id).map((p) => p.agentId),
+    ...[...(openAsks ?? []), ...state.messages]
+      .filter((m) => m.ask?.state === "open")
+      .map((m) => m.authorId),
+  ])
+  const workflowRuns = dbListWorkflowRuns(current.id).map((wfRun) => {
+    if (wfRun.status !== "running") return wfRun
+    let needsHelp = false
+    const stages = wfRun.stages.map((st, idx) => {
+      if (idx !== wfRun.currentStage) return st
+      const nodes = st.nodes.map((node) => {
+        if (node.status === "running" && node.seatId && helpSeatIds.has(node.seatId)) {
+          needsHelp = true
+          return { ...node, status: "waiting_help" as const }
+        }
+        return node
+      })
+      return { ...st, nodes }
+    })
+    return needsHelp ? { ...wfRun, status: "waiting_help" as const, stages } : wfRun
+  })
   return {
     project: projectInfo(current.id),
     workflows: listWorkflows(current.id),
+    workflowRuns,
     agents: sortAgents(seats),
     messages: state.messages,
     tasks: snapshotTasks(state.tasks),

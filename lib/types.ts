@@ -539,7 +539,15 @@ export type PermitRequest = {
   at: number
 }
 
-export type WorkflowKind = "orchestrate" | "plan" | "explore"
+export type WorkflowKind = "orchestrate" | "plan" | "explore" | "custom"
+
+export type WorkflowStage = {
+  id: string
+  title: string
+  seats: string[]
+  instruction: string
+  gate?: boolean
+}
 
 export type Workflow = {
   id: string
@@ -547,6 +555,9 @@ export type Workflow = {
   name: string
   kind: WorkflowKind
   command?: string
+  // Multi-stage pipeline definition (v2). Legacy workflows without `stages`
+  // are normalized on the fly from lead/workers/summarizer/planners/explorers.
+  stages?: WorkflowStage[]
   lead?: string
   workers?: string[]
   summarizer?: string
@@ -557,9 +568,51 @@ export type Workflow = {
   updatedAt: number
 }
 
+export type WorkflowNodeStatus = "idle" | "running" | "waiting_help" | "done" | "failed" | "stopped"
+export type WorkflowRunStatus = "running" | "waiting_gate" | "waiting_help" | "paused" | "done" | "failed" | "stopped"
+
+export type WorkflowRunNode = {
+  id: string
+  seatName: string
+  seatId?: string
+  status: WorkflowNodeStatus
+  runId?: string
+  output?: string
+  error?: string
+  attempt: number
+  startedAt?: number
+  endedAt?: number
+}
+
+export type WorkflowRunStage = {
+  id: string
+  title: string
+  instruction: string
+  gate?: boolean
+  gateStatus?: "pending" | "approved" | "rejected"
+  gateFeedback?: string
+  nodes: WorkflowRunNode[]
+}
+
+export type WorkflowRun = {
+  id: string
+  projectId: string
+  workflowId: string
+  workflowName: string
+  kind: WorkflowKind
+  requirement: string
+  status: WorkflowRunStatus
+  currentStage: number
+  stages: WorkflowRunStage[]
+  createdAt: number
+  updatedAt: number
+  endedAt?: number
+}
+
 export type RoomSnapshot = {
   project: ProjectInfo
   workflows: Workflow[]
+  workflowRuns?: WorkflowRun[]
   agents: PublicAgent[]
   messages: Message[]
   tasks: Task[]
@@ -620,7 +673,7 @@ export type Run = {
   agentName: string
   // compact: the user had the room compact its context (lib/summon.ts compactSession).
   // goal: the user typed /goal for it (lib/summon.ts setGoal); `ask` is what came after.
-  purpose: "reply" | "summary" | "private" | "compact" | "goal" | "check" | "gist"
+  purpose: "reply" | "summary" | "private" | "compact" | "goal" | "check" | "gist" | "workflow"
   // A private run: what the user said and what it answered.
   ask?: string
   answer?: string

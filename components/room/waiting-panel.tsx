@@ -1,8 +1,10 @@
 "use client"
 
 import { useState } from "react"
-import { Check, ChevronDown, ExternalLink } from "lucide-react"
+import { Check, ChevronDown, ExternalLink, GitBranch } from "lucide-react"
+import { toast } from "sonner"
 
+import { api } from "@/components/room/api"
 import { AskCard } from "@/components/room/ask-card"
 import { AwayCard } from "@/components/room/away-card"
 import { DeputyPassList, useDeputyToday } from "@/components/room/front"
@@ -73,9 +75,17 @@ export function WaitingPanel({
         workingTotal: workingCount,
       }
 
-  const totalCount = data
-    ? data.permits.length + data.asks.length + data.limited.length + data.interrupted.length + data.reviews.length
-    : 0
+  const wfWaitingRuns = isFront
+    ? []
+    : (room.workflowRuns ?? []).filter(
+        (r) => r.status === "waiting_gate" || r.status === "failed",
+      )
+  const [wfBusyId, setWfBusyId] = useState<string | null>(null)
+
+  const totalCount =
+    (data
+      ? data.permits.length + data.asks.length + data.limited.length + data.interrupted.length + data.reviews.length
+      : 0) + wfWaitingRuns.length
   // The front desk: a section per project, the most urgent first. In a
   // project itself, one list in the same order (what an AI waits on, then a
   // limit or a restart, then the reviews).
@@ -126,6 +136,68 @@ export function WaitingPanel({
           </p>
         ) : (
           <>
+            {wfWaitingRuns.map((wfRun) => {
+              const stage = wfRun.stages[wfRun.currentStage]
+              const isGate = wfRun.status === "waiting_gate"
+              return (
+                <div
+                  key={wfRun.id}
+                  className={`space-y-2 rounded-2xl border p-3 text-xs ${
+                    isGate
+                      ? "border-amber-500/35 bg-amber-500/[0.08]"
+                      : "border-rose-500/35 bg-rose-500/[0.08]"
+                  }`}
+                >
+                  <div className="flex items-start justify-between gap-2">
+                    <div className="min-w-0 space-y-0.5">
+                      <p className="flex items-center gap-1.5 font-semibold text-foreground">
+                        <GitBranch className={`size-3.5 shrink-0 ${isGate ? "text-amber-500" : "text-rose-500"}`} />
+                        <span className="truncate">{wfRun.workflowName}</span>
+                      </p>
+                      <p className="text-muted-foreground">
+                        {isGate
+                          ? `第 ${wfRun.currentStage + 1} 阶段「${stage?.title ?? ""}」已完成，等你拍板`
+                          : `第 ${wfRun.currentStage + 1} 阶段「${stage?.title ?? ""}」执行遇阻，需要重试或换人`}
+                      </p>
+                    </div>
+                  </div>
+                  <div className="flex flex-wrap items-center justify-end gap-1.5">
+                    <Button
+                      type="button"
+                      size="xs"
+                      variant="outline"
+                      onClick={() => window.dispatchEvent(new Event("bench-open-workflows"))}
+                    >
+                      去工作流看
+                    </Button>
+                    {isGate ? (
+                      <Button
+                        type="button"
+                        size="xs"
+                        disabled={busy || wfBusyId === wfRun.id}
+                        onClick={async () => {
+                          setWfBusyId(wfRun.id)
+                          try {
+                            await api("/api/v1/workflow-runs", {
+                              method: "POST",
+                              body: JSON.stringify({ as: "human", action: "approve", runId: wfRun.id }),
+                            })
+                            toast.success(`「${wfRun.workflowName}」已通过，进入下一阶段`)
+                          } catch (err) {
+                            toast.error(err instanceof Error ? err.message : "操作失败")
+                          } finally {
+                            setWfBusyId(null)
+                          }
+                        }}
+                      >
+                        <Check className="size-3.5" />
+                        通过继续
+                      </Button>
+                    ) : null}
+                  </div>
+                </div>
+              )
+            })}
             {sections.map((section) => (
               <SectionCards
                 key={section.projectId}

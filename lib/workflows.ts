@@ -2,7 +2,8 @@ import { randomBytes } from "node:crypto"
 
 import { dbDeleteWorkflow, dbListWorkflows, dbSaveWorkflow } from "@/lib/db"
 import { ApiError, asRecord, asString } from "@/lib/http"
-import type { Workflow } from "@/lib/types"
+import type { Workflow, WorkflowStage } from "@/lib/types"
+import { workflowStages } from "@/lib/workflow-shared"
 
 const RESERVED_COMMANDS = new Set(["goal", "compact", "stop"])
 const SEAT_NAME = /^[\p{L}\p{N}_-]{1,24}$/u
@@ -24,6 +25,28 @@ function seatNames(value: unknown, label: string, min = 1): string[] {
   return names
 }
 
+function parseStages(value: unknown): WorkflowStage[] {
+  if (!Array.isArray(value) || value.length < 1 || value.length > 6) {
+    throw new ApiError(400, "工作流至少要有 1 个阶段，最多 6 个阶段")
+  }
+  return value.map((raw, index) => {
+    const rec = asRecord(raw)
+    const title = asString(rec.title)
+    if (!title || title.length > 40) throw new ApiError(400, `第 ${index + 1} 阶段名称要填写，最多四十字`)
+    const seats = seatNames(rec.seats, `第 ${index + 1} 阶段「${title}」`, 1)
+    const instruction = asString(rec.instruction) ?? ""
+    if (instruction.length > 1000) throw new ApiError(400, `第 ${index + 1} 阶段指令最多一千字`)
+    const id = asString(rec.id) || `st_${randomBytes(4).toString("hex")}`
+    return {
+      id,
+      title,
+      seats,
+      instruction,
+      ...(rec.gate === true ? { gate: true } : {}),
+    }
+  })
+}
+
 export function listWorkflows(projectId: string): Workflow[] {
   return dbListWorkflows(projectId)
 }
@@ -36,30 +59,63 @@ export function saveWorkflow(projectId: string, input: unknown): Workflow {
   if (id && !old) throw new ApiError(404, "没有这条工作流")
   const name = asString(body.name)
   if (!name || name.length > 80) throw new ApiError(400, "工作流名称要填写，最多八十字")
-  if (body.kind !== "orchestrate" && body.kind !== "plan" && body.kind !== "explore") throw new ApiError(400, "请选择工作流类型")
+  const kind = body.kind === undefined && Array.isArray(body.stages) ? "custom" : body.kind
+  if (kind !== "orchestrate" && kind !== "plan" && kind !== "explore" && kind !== "custom") {
+    throw new ApiError(400, "请选择工作流类型")
+  }
   const command = asString(body.command)?.replace(/^\//, "") || undefined
   if (command && (!/^[a-z][a-z0-9-]{0,23}$/.test(command) || RESERVED_COMMANDS.has(command))) {
     throw new ApiError(400, "快捷命令要用小写字母、数字或横线，不能占用 goal、compact、stop")
   }
-  if (command === "plan" && body.kind !== "plan") throw new ApiError(400, "plan 命令只用于混合计划")
-  if (command === "explore" && body.kind !== "explore") throw new ApiError(400, "explore 命令只用于多 AI 探索")
+  if (command === "plan" && kind !== "plan") throw new ApiError(400, "plan 命令只用于混合计划")
+  if (command === "explore" && kind !== "explore") throw new ApiError(400, "explore 命令只用于多 AI 探索")
   if (command && all.some((item) => item.id !== id && item.command === command)) throw new ApiError(409, "这个快捷命令已存在")
   const note = asString(body.note)
   if (note && note.length > 1000) throw new ApiError(400, "补充规则最多一千字")
-  const roles = body.kind === "plan"
-    ? { planners: seatNames(body.planners, "共同规划", 2) }
-    : body.kind === "explore"
-      ? { explorers: seatNames(body.explorers, "共同探索", 2) }
-      : { lead: seatName(body.lead, "主控"), workers: seatNames(body.workers, "执行"), summarizer: seatName(body.summarizer, "汇总") }
-  if (roles.lead && (roles.workers!.includes(roles.lead) || roles.workers!.includes(roles.summarizer!) || roles.lead === roles.summarizer)) {
-    throw new ApiError(400, "主控、执行和汇总请用不同席位")
+
+  let stages: WorkflowStage[] | undefined
+  let roles: Partial<Workflow> = {}
+  if (Array.isArray(body.stages) && body.stages.length > 0) {
+    stages = parseStages(body.stages)
+    if (kind === "orchestrate" && stages.length >= 3) {
+      roles = { lead: stages[0].seats[0], workers: stages[1].seats, summarizer: stages[stages.length - 1].seats[0] }
+    } else if (kind === "plan" && stages.length >= 1) {
+      const lead = stages[stages.length - 1].seats[0]
+      const peers = stages.slice(0, -1).flatMap((s) => s.seats).filter((s) => s !== lead)
+      roles = { planners: [lead, ...peers] }
+    } else if (kind === "explore" && stages.length >= 1) {
+      const lead = stages[stages.length - 1].seats[0]
+      const peers = stages.slice(0, -1).flatMap((s) => s.seats).filter((s) => s !== lead)
+      roles = { explorers: [lead, ...peers] }
+    }
+  } else if (kind === "custom") {
+    throw new ApiError(400, "自定义工作流至少要配置一个阶段")
+  } else {
+    roles = kind === "plan"
+      ? { planners: seatNames(body.planners, "共同规划", 2) }
+      : kind === "explore"
+        ? { explorers: seatNames(body.explorers, "共同探索", 2) }
+        : { lead: seatName(body.lead, "主控"), workers: seatNames(body.workers, "执行"), summarizer: seatName(body.summarizer, "汇总") }
+    if (roles.lead && (roles.workers!.includes(roles.lead) || roles.workers!.includes(roles.summarizer!) || roles.lead === roles.summarizer)) {
+      throw new ApiError(400, "主控、执行和汇总请用不同席位")
+    }
   }
-  const workflow: Workflow = {
-    id: id ?? `wf_${randomBytes(6).toString("hex")}`, projectId, name, kind: body.kind, command, ...roles, note,
-    createdAt: old?.createdAt ?? Date.now(), updatedAt: Date.now(),
+
+  const draft: Workflow = {
+    id: id ?? `wf_${randomBytes(6).toString("hex")}`,
+    projectId,
+    name,
+    kind,
+    command,
+    ...roles,
+    ...(stages ? { stages } : {}),
+    note,
+    createdAt: old?.createdAt ?? Date.now(),
+    updatedAt: Date.now(),
   }
-  dbSaveWorkflow(workflow)
-  return workflow
+  if (!draft.stages) draft.stages = workflowStages(draft)
+  dbSaveWorkflow(draft)
+  return draft
 }
 
 export function deleteWorkflow(projectId: string, id: string) {

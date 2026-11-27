@@ -7,6 +7,7 @@ import { seatLook } from "@/components/room/bits"
 import { draft } from "@/components/room/draft"
 import { goto } from "@/components/room/refs"
 import type { Message, PublicAgent, Workflow, WorkflowKind } from "@/lib/types"
+import { workflowStages } from "@/lib/workflow-shared"
 
 type NodeState = "idle" | "running" | "done" | "error"
 type TraceState = "idle" | "active" | "done" | "broken"
@@ -18,6 +19,7 @@ export const WORKFLOW_META: Record<
   orchestrate: { badge: "主控派活", accent: "#38bdf8", accent2: "#a78bfa" },
   plan: { badge: "混合计划 · 只规划", accent: "#f59e0b", accent2: "#38bdf8" },
   explore: { badge: "多 AI 探索", accent: "#a78bfa", accent2: "#38bdf8" },
+  custom: { badge: "自定义流水线", accent: "#2dd4bf", accent2: "#38bdf8" },
 }
 
 type ParsedWorkflow = {
@@ -542,6 +544,26 @@ export function WorkflowChips({
         <span className="font-medium">{name}</span>
         {missing ? <span className="text-[10px]">未入座</span> : null}
       </span>
+    )
+  }
+
+  const stages = workflowStages(workflow)
+  if (stages.length > 0) {
+    return (
+      <div className="flex flex-wrap items-center gap-1 text-xs">
+        {stages.map((st, idx) => (
+          <span key={st.id || idx} className="inline-flex flex-wrap items-center gap-1">
+            {idx > 0 ? <span className="px-0.5 text-muted-foreground/70">→</span> : null}
+            <span className="text-[11px] text-muted-foreground">{st.title}</span>
+            {st.seats.map(pill)}
+            {st.gate ? (
+              <span className="rounded-full bg-amber-500/15 px-1.5 py-0.5 text-[10px] font-medium text-amber-600 dark:text-amber-300" title="此阶段完成后停下等你拍板">
+                ⏸
+              </span>
+            ) : null}
+          </span>
+        ))}
+      </div>
     )
   }
 

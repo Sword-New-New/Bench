@@ -54,17 +54,21 @@ export async function uploadFile(file: File) {
   return result.attachment
 }
 
+export function pathsToPending(pick: "files" | "dirs", paths: string[]): Pending[] {
+  return paths.map((file) => ({
+    kind: pick === "dirs" ? "dir" : (mediaKind(file) ?? "file"),
+    name: file.split(/[\\/]/).filter(Boolean).pop() ?? file,
+    path: file,
+  }))
+}
+
 // The desktop's own picker; the room answers with full paths.
 export async function pickPaths(pick: "files" | "dirs"): Promise<Pending[]> {
   const result = await api<{ paths: string[] }>("/api/v1/folder", {
     method: "POST",
     body: JSON.stringify({ as: "human", pick }),
   })
-  return result.paths.map((file) => ({
-    kind: pick === "dirs" ? "dir" : (mediaKind(file) ?? "file"),
-    name: file.split("/").filter(Boolean).pop() ?? file,
-    path: file,
-  }))
+  return pathsToPending(pick, result.paths)
 }
 
 // One line for a message in a reply preview; one with only attachments says

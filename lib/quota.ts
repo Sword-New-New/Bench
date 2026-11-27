@@ -1,9 +1,9 @@
 import { execFile, spawn } from "node:child_process"
-import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs"
+import { mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs"
 import os from "node:os"
 import path from "node:path"
 
-import { installed, summonPath, whereIs } from "@/lib/adapters"
+import { bundledCodex, installed, summonPath, whereIs } from "@/lib/adapters"
 import { cliCommand } from "@/lib/platform"
 import { withReports } from "@/lib/quota-reports"
 
@@ -285,8 +285,7 @@ function codexBin() {
   // The full path: the room's own PATH may not have the folder it is in.
   const found = whereIs("codex")
   if (found) return found
-  const bundled = "/usr/lib/chatgpt/resources/codex"
-  return existsSync(bundled) ? bundled : null
+  return bundledCodex()
 }
 
 function spanOf(minutes: number | null | undefined): { span: string; label: string } {
@@ -381,7 +380,7 @@ function codexAsk(bin: string, method: string): Promise<unknown> {
 //   Gemini Models	Five Hour Limit Remaining	99%	2026-11-10T02:47:20Z
 // It says what is left; the room shows what is used, like the others.
 async function antigravityQuota(): Promise<Quota> {
-  const env = { ...process.env, PATH: summonPath() }
+  const env = { ...process.env, PATH: summonPath(), MSYS_NO_PATHCONV: "1" }
   if (!installed("agy")) return empty("antigravity", { error: "没找到 agy" })
   let stdout = ""
   try {

@@ -1051,7 +1051,7 @@ createInterface({ input: process.stdin }).on("line", async (line) => {
           },
           {
             name: mockSlowName,
-            command: `node -e "setTimeout(() => console.log('[慢轮完成]'), 1200)" {uuid} {text}`,
+            command: `node -e "setTimeout(() => console.log('[慢轮完成]'), 2500)" {uuid} {text}`,
             reply: "stdout",
           },
           // Ends well without a word, and ends in an error.
@@ -1112,7 +1112,7 @@ createInterface({ input: process.stdin }).on("line", async (line) => {
           { name: mockCheckName, command: checkCmd, reply: "stdout" },
           { name: mockCheckAltName, command: checkCmd, reply: "stdout" },
           // "--json": read as a streaming client, like codex-wake.sh.
-          { name: mockCodexName, command: `CODEX_BIN=${fakeCodex} node ./scripts/codex-app.mjs {uuid} {text} # --json`, reply: "stdout" },
+          { name: mockCodexName, command: `CODEX_BIN="${fakeCodex.replaceAll("\\", "/")}" node ./scripts/codex-app.mjs {uuid} {text} # --json`, reply: "stdout" },
           {
             name: mockOwesName,
             command: `node -e "const t = process.argv[2] || ''; const head = '【你名下还没做完的待办】'; console.log(t.includes(head) ? '[欠]' + t.split(head)[1].split('接着做')[0].replace(/\\s+/g, ' ') : '[不欠]')" {uuid} {text}`,
@@ -2171,7 +2171,7 @@ createInterface({ input: process.stdin }).on("line", async (line) => {
     const compactLogFile = pathMod.join(osMod.tmpdir(), `bench-check-compact-${stamp}.log`)
     try {
       const preAdapters = (await request("/api/v1/adapters")).data.agents.map(({ name, command, reply }) => ({ name, command, reply }))
-      const fakeClaudeCheckCmd = `node -e "const fs = require('fs'); const t = process.argv[2] || ''; if (t.trim() === '/compact') { fs.appendFileSync('${compactLogFile}', 'compact\\n'); console.log('Compacted'); } else { console.log('复验结论：通过\\n类别：跑得出\\n通过\\n没验到的：无'); }" {uuid} {text}`
+      const fakeClaudeCheckCmd = `node -e "const fs = require('fs'); const t = process.argv[2] || ''; if (t.trim() === '/compact') { fs.appendFileSync('${compactLogFile.replaceAll("\\", "/")}', 'compact\\n'); console.log('Compacted'); } else { console.log('复验结论：通过\\n类别：跑得出\\n通过\\n没验到的：无'); }" {uuid} {text}`
       const patchedAdapters = [
         ...preAdapters.filter((a) => a.name !== "claude"),
         { name: "claude", command: fakeClaudeCheckCmd, reply: "stdout" },
@@ -2306,13 +2306,14 @@ createInterface({ input: process.stdin }).on("line", async (line) => {
         import { registerHooks } from "node:module";
         import { existsSync } from "node:fs";
         import path from "node:path";
+        import { pathToFileURL } from "node:url";
         const root = process.cwd();
         registerHooks({
           resolve(specifier, context, nextResolve) {
             if (specifier.startsWith("@/")) {
               const target = path.join(root, specifier.slice(2));
               const file = existsSync(target + ".ts") ? target + ".ts" : target;
-              return nextResolve("file://" + file, context);
+              return nextResolve(pathToFileURL(file).href, context);
             }
             return nextResolve(specifier, context);
           }
@@ -2592,7 +2593,9 @@ createInterface({ input: process.stdin }).on("line", async (line) => {
         "ntfy 请求头或路径不对",
       )
       const pushMode = fsMod.statSync(pushConfigFile).mode & 0o777
-      assert(pushMode === 0o600, `data/push.json 权限必须是 0600，实际 0${pushMode.toString(8)}`)
+      if (process.platform !== "win32") {
+        assert(pushMode === 0o600, `data/push.json 权限必须是 0600，实际 0${pushMode.toString(8)}`)
+      }
       await checkNoSecretLeak("ntfy")
 
       pushReceived.length = 0
@@ -3682,23 +3685,28 @@ createInterface({ input: process.stdin }).on("line", async (line) => {
 
   // ---- Auto-continue (t_4494da49) & watched projects (t_0fefb44c) ----
   {
-    const { execFileSync: execSubTest } = await import("node:child_process")
+    const { execFile } = await import("node:child_process")
+    const { promisify } = await import("node:util")
+    const execSubTest = promisify(execFile)
     const pathSub = await import("node:path")
     const keyPath = process.env.BENCH_KEY_FILE || `${process.cwd()}/data/human-key`
-    execSubTest(process.execPath, [pathSub.join(process.cwd(), "scripts/test-continue.mjs")], {
+    await execSubTest(process.execPath, [pathSub.join(process.cwd(), "scripts/test-continue.mjs")], {
       cwd: process.cwd(),
       env: { ...process.env },
       encoding: "utf8",
+      maxBuffer: 16 * 1024 * 1024,
     })
-    execSubTest(process.execPath, [pathSub.join(process.cwd(), "scripts/test-watch.mjs")], {
+    await execSubTest(process.execPath, [pathSub.join(process.cwd(), "scripts/test-watch.mjs")], {
       cwd: process.cwd(),
       env: { ...process.env, BENCH_URL: origin, BENCH_KEY_FILE: keyPath },
       encoding: "utf8",
+      maxBuffer: 16 * 1024 * 1024,
     })
-    execSubTest(process.execPath, [pathSub.join(process.cwd(), "scripts/test-backup.mjs")], {
+    await execSubTest(process.execPath, [pathSub.join(process.cwd(), "scripts/test-backup.mjs")], {
       cwd: process.cwd(),
       env: { ...process.env },
       encoding: "utf8",
+      maxBuffer: 16 * 1024 * 1024,
     })
   }
 

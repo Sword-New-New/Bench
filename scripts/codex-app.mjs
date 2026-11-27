@@ -8,10 +8,17 @@
 // printed as `codex exec --json` lines, which the room already reads.
 
 import { spawn } from "node:child_process"
-import { existsSync } from "node:fs"
+import { readFileSync } from "node:fs"
 import { createInterface } from "node:readline"
+import { findCodex } from "./codex-bin.mjs"
 
-const [thread, text] = process.argv.slice(2)
+const [thread, rawText] = process.argv.slice(2)
+const text =
+  process.env.BENCH_PROMPT_FILE
+    ? readFileSync(process.env.BENCH_PROMPT_FILE, "utf8")
+    : process.env.BENCH_TEXT_STDIN === "1"
+      ? readFileSync(0, "utf8")
+      : rawText
 if (!thread || !/^[A-Za-z0-9._-]+$/.test(thread)) {
   console.error(`thread id 不对：${thread ?? ""}`)
   process.exit(2)
@@ -37,38 +44,60 @@ const clearing = goal !== null && /^(clear|清除|清掉)$/i.test(goal)
 const GOAL_NEXT_MS = 8000
 let goalNext = null
 
-function codexBin() {
-  if (process.env.CODEX_BIN && existsSync(process.env.CODEX_BIN)) return process.env.CODEX_BIN
-  for (const dir of (process.env.PATH || "").split(":")) if (dir && existsSync(`${dir}/codex`)) return `${dir}/codex`
-  return "/usr/lib/chatgpt/resources/codex"
-}
-
 const out = (event) => process.stdout.write(`${JSON.stringify(event)}\n`)
+
+const bin = findCodex()
+if (!bin) {
+  console.error("没找到 codex，先装 Codex 的命令行或桌面端")
+  process.exit(127)
+}
 
 // Same as codex-wake.sh: the bench bridge is told the thread id, and its tools
 // need no clicking since nobody is there.
-const server = spawn(
-  codexBin(),
-  [
-    "app-server",
-    "-c",
-    `mcp_servers.bench.env.BENCH_UUID="${thread}"`,
-    "-c",
-    'mcp_servers.bench.default_tools_approval_mode="approve"',
-    ...(compactAt ? ["-c", `model_auto_compact_token_limit=${compactAt}`] : []),
-  ],
-  { stdio: ["pipe", "pipe", "inherit"] },
-)
+const serverArgs = [
+  "app-server",
+  "-c",
+  `mcp_servers.bench.env.BENCH_UUID="${thread}"`,
+  "-c",
+  'mcp_servers.bench.default_tools_approval_mode="approve"',
+  ...(compactAt ? ["-c", `model_auto_compact_token_limit=${compactAt}`] : []),
+]
+const server =
+  process.platform === "win32" && /\.(cmd|bat)$/i.test(bin)
+    ? spawn(process.env.ComSpec || "cmd.exe", ["/d", "/c", bin, ...serverArgs], { stdio: ["pipe", "pipe", "inherit"], windowsHide: true })
+    : /\.(m?js|cjs)$/i.test(bin)
+      ? spawn(process.execPath, [bin, ...serverArgs], { stdio: ["pipe", "pipe", "inherit"], windowsHide: true })
+      : spawn(bin, serverArgs, { stdio: ["pipe", "pipe", "inherit"], windowsHide: true })
 
 let nextId = 1
 const waiting = new Map()
+server.stdin.on("error", () => {})
 function request(method, params) {
+  if (server.stdin.destroyed || server.killed) return Promise.reject(new Error("codex app-server 标准输入已关闭"))
   const id = nextId++
-  server.stdin.write(`${JSON.stringify({ jsonrpc: "2.0", id, method, params })}\n`)
+  try {
+    server.stdin.write(`${JSON.stringify({ jsonrpc: "2.0", id, method, params })}\n`)
+  } catch (err) {
+    return Promise.reject(err instanceof Error ? err : new Error(String(err)))
+  }
   return new Promise((resolve, reject) => waiting.set(id, { resolve, reject }))
 }
 function notify(method, params) {
-  server.stdin.write(`${JSON.stringify({ jsonrpc: "2.0", method, ...(params ? { params } : {}) })}\n`)
+  if (server.stdin.destroyed || server.killed) return
+  try {
+    server.stdin.write(`${JSON.stringify({ jsonrpc: "2.0", method, ...(params ? { params } : {}) })}\n`)
+  } catch {}
+}
+
+function errorText(err, fallback = "这一轮失败了") {
+  if (!err) return fallback
+  if (typeof err === "string") return err.trim() || fallback
+  const msg = typeof err.message === "string" ? err.message.trim() : ""
+  const details = typeof err.additionalDetails === "string" ? err.additionalDetails.trim() : ""
+  const code = typeof err.codexErrorInfo === "string" ? err.codexErrorInfo.trim() : ""
+  if (msg && details && !msg.includes(details)) return `${msg} (${details})`
+  if (msg && code && !msg.toLowerCase().includes(code.toLowerCase())) return `${msg} (${code})`
+  return msg || details || fallback
 }
 
 let turnId = ""
@@ -163,8 +192,9 @@ function onMessage(message) {
       }
       if (turn.status === "failed" || turn.error) {
         failed = true
-        out({ type: "turn.failed", error: { message: turn.error?.message ?? "这一轮失败了" } })
-        console.error(turn.error?.message ?? "这一轮失败了")
+        const msg = errorText(turn.error, "这一轮失败了")
+        out({ type: "turn.failed", error: { message: msg } })
+        console.error(msg)
       } else {
         out({ type: "turn.completed", usage: {} })
       }
@@ -178,9 +208,12 @@ function onMessage(message) {
         finish(0)
       }
       return
-    case "error":
-      out({ type: "error", message: params.error?.message ?? params.message ?? "出错了" })
+    case "error": {
+      const msg = errorText(params.error, typeof params.message === "string" ? params.message : "出错了")
+      const retry = params.willRetry === true || /^(?:Reconnecting|Retrying)\b/i.test(msg)
+      out({ type: "error", message: msg, ...(retry ? { retry: true } : {}) })
       return
+    }
     default:
   }
 }
@@ -297,9 +330,21 @@ createInterface({ input: server.stdout }).on("line", (line) => {
     onMessage(JSON.parse(line))
   } catch {}
 })
+server.on("error", (error) => {
+  if (!finished) {
+    const msg = `起不来 codex：${error instanceof Error ? error.message : String(error)}`
+    out({ type: "turn.failed", error: { message: msg } })
+    console.error(msg)
+    finish(1)
+  }
+})
 server.on("exit", (code) => {
   if (!finished) {
-    console.error(`codex app-server 退出了（${code}）`)
+    for (const { reject } of waiting.values()) reject(new Error(`codex app-server 退出了（${code}）`))
+    waiting.clear()
+    const msg = `codex app-server 退出了（${code}）`
+    if (!failed && code !== 0) out({ type: "turn.failed", error: { message: msg } })
+    console.error(msg)
     finish(code || 1)
   }
 })
@@ -384,6 +429,8 @@ try {
     out({ type: "turn.started" })
   }
 } catch (error) {
-  console.error(error instanceof Error ? error.message : String(error))
+  const msg = error instanceof Error ? error.message : String(error)
+  out({ type: "turn.failed", error: { message: msg } })
+  console.error(msg)
   finish(1)
 }

@@ -38,9 +38,13 @@ fi
 # Messages that call the seat while it works reach it mid-turn: after each
 # tool call this hook asks the room for them (lib/summon.ts takeQueued).
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+here_node="$here"
+if command -v cygpath >/dev/null 2>&1; then
+  here_node="$(cygpath -m "$here")"
+fi
 hook=()
 if [[ -n "${BENCH_RUN_KEY:-}" ]]; then
-  hook=(--settings "{\"hooks\":{\"PostToolUse\":[{\"matcher\":\"*\",\"hooks\":[{\"type\":\"command\",\"command\":\"node '$here/bench-hook.mjs'\",\"timeout\":5}]}]}}")
+  hook=(--settings "{\"hooks\":{\"PostToolUse\":[{\"matcher\":\"*\",\"hooks\":[{\"type\":\"command\",\"command\":\"node '$here_node/bench-hook.mjs'\",\"timeout\":5}]}]}}")
 fi
 
 file="$(ls "$HOME"/.claude/projects/*/"$session".jsonl 2>/dev/null | head -1 || true)"

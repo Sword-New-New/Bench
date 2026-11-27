@@ -1,5 +1,8 @@
 import { spawn, type ChildProcessByStdio } from "node:child_process"
-import type { Readable } from "node:stream"
+import { unlinkSync, writeFileSync } from "node:fs"
+import os from "node:os"
+import path from "node:path"
+import type { Readable, Writable } from "node:stream"
 import { createHash, randomBytes } from "node:crypto"
 import { StringDecoder } from "node:string_decoder"
 
@@ -11,7 +14,7 @@ import { createParser, liveLine } from "@/lib/events"
 import { ApiError } from "@/lib/http"
 import { isSeatStoppedByUser, registerLaneIdle, registerLaneReader } from "@/lib/lane-state"
 import { detectLimit, unwrapErrorMessage, whenText } from "@/lib/limits"
-import { commandLine, killTree } from "@/lib/platform"
+import { killTree, wakeCommand } from "@/lib/platform"
 import { accepting, deliver, openTerminal } from "@/lib/terminal"
 import { onTerminalClosed, terminalOpen } from "@/lib/terminal-state"
 import { activeRun, endRun, getRun, markResumed, pendingResumes, putStep, setLimited, startRun, takeUnannounced } from "@/lib/runs"
@@ -637,9 +640,10 @@ function explain(agentName: string | undefined, failure: string) {
 // the bridge, not the client: taken as its error, a compaction that had
 // worked was reported as failed (2026-11-14).
 const BRIDGE_NOISE = /^\d{4}\/\d\d\/\d\d \d\d:\d\d:\d\d socat\[\d+\] [EWNI] .*$/gm
+const ANSI_ESCAPE = /\x1b\[[0-9;]*[a-zA-Z]/g
 
 function withoutBridgeNoise(text: string) {
-  return text.replace(BRIDGE_NOISE, "").replace(/\n{2,}/g, "\n")
+  return text.replace(ANSI_ESCAPE, "").replace(BRIDGE_NOISE, "").replace(/\n{2,}/g, "\n")
 }
 
 function tail(text: string, max: number) {
@@ -784,6 +788,51 @@ function reportFailure(agent: NonNullable<ReturnType<typeof agentState>>, log: R
   postSystem(shortSys(`${what}没成功：${shortExplain(agent.agentName, failure)}`), log.id)
 }
 
+const ANTIGRAVITY_INHERITED_ENV = [
+  "ANTIGRAVITY_AGENT",
+  "ANTIGRAVITY_AGENTAPI_EXE",
+  "ANTIGRAVITY_CONVERSATION_ID",
+  "ANTIGRAVITY_PROJECT_ID",
+  "ANTIGRAVITY_SOURCE_METADATA",
+  "ANTIGRAVITY_TRAJECTORY_ID",
+  "ANTIGRAVITY_LS_ADDRESS",
+  "ANTIGRAVITY_CSRF_TOKEN",
+  "ANTIGRAVITY_LS_VERSION",
+]
+
+function cleanChildEnv() {
+  const env = { ...process.env }
+  if (env.BENCH_KEEP_ANTIGRAVITY_ENV !== "1") {
+    for (const key of ANTIGRAVITY_INHERITED_ENV) delete env[key]
+  }
+  return env
+}
+
+function usesPromptFile(agentName: string | undefined) {
+  const raw = agentName ? adapterFor(agentName)?.command ?? "" : ""
+  return /^\.?\/?scripts\/(?:codex-wake|agy-wake)\.sh\b/.test(raw.trim())
+}
+
+// Pass prompts to Bench's codex/agy wake scripts via a temporary UTF-8 file so
+// Windows CreateProcess's 32 KB command-line limit never cuts long wakes in half.
+function buildWake(agent: NonNullable<ReturnType<typeof agentState>>, promptText: string): { command: string | null; promptFile?: string } {
+  const agentName = agent.agentName ?? ""
+  const session = agent.session ?? ""
+  if (usesPromptFile(agentName)) {
+    const file = path.join(os.tmpdir(), `bench-prompt-${process.pid}-${Date.now()}-${randomBytes(4).toString("hex")}.txt`)
+    writeFileSync(file, promptText, { encoding: "utf8", mode: 0o600 })
+    const command = commandFor(agentName, session, "@BENCH_PROMPT_FILE", agent.modelPick, agent.effortPick)
+    if (!command) {
+      try {
+        unlinkSync(file)
+      } catch {}
+      return { command: null }
+    }
+    return { command, promptFile: file }
+  }
+  return { command: commandFor(agentName, session, promptText, agent.modelPick, agent.effortPick) }
+}
+
 // Runs one command on a seat's session and reports how it went. Its output
 // is read line by line as it comes: each step goes into the run log (the
 // 「过程」 panel) and the seat line shows the current one; `out` is the
@@ -796,6 +845,7 @@ function launch(
   done: (result: { out: string; failure?: string; stopped?: boolean; lost?: boolean }) => void,
   // The client's first output: it has the wake.
   first?: () => void,
+  opts?: { promptFile?: string },
 ) {
   const parser = createParser()
   const decoder = new StringDecoder("utf8")
@@ -841,6 +891,11 @@ function launch(
     clearTimeout(endedTimer)
     clearInterval(quiet)
     clearInterval(watch)
+    if (opts?.promptFile) {
+      try {
+        unlinkSync(opts.promptFile)
+      } catch {}
+    }
     if (pending) take(pending)
     const out = parser.answer()
     // Some CLIs print their error to stderr and still exit 0 (WorkBuddy's when
@@ -865,25 +920,25 @@ function launch(
 
   // Its own process group, so stopping it also ends what the shell started.
   // Windows runs it through Git Bash (lib/platform.ts) and has no groups.
-  let launch: [string, string[]]
+  let launch: ReturnType<typeof wakeCommand>
   try {
-    launch = commandLine(command)
+    launch = wakeCommand(command)
   } catch (error) {
     finish(null, (error as Error).message)
     return
   }
-  let child: ChildProcessByStdio<null, Readable, Readable>
+  let child: ChildProcessByStdio<Writable, Readable, Readable> | ChildProcessByStdio<null, Readable, Readable>
   try {
     const adapter = agent.agentName ? adapterFor(agent.agentName) : null
     const pickedModel = agent.modelPick || (agent.agentName === "codex" && adapter ? modelOf(adapter) : null) || undefined
-    child = spawn(launch[0], launch[1], {
+    const base = {
       detached: true,
       windowsHide: true,
       cwd: process.cwd(),
-      stdio: ["ignore", "pipe", "pipe"],
       env: {
-        ...process.env,
+        ...cleanChildEnv(),
         PATH: summonPath(),
+        ...(opts?.promptFile ? { BENCH_PROMPT_FILE: opts.promptFile } : {}),
         BENCH_URL: roomUrl(),
         BENCH_AGENT: agent.agentName,
         BENCH_UUID: agent.session,
@@ -899,7 +954,15 @@ function launch(
         // Where its context compacts by itself, if the user set one (lib/context.ts).
         ...compactEnv(agent),
       },
-    })
+    }
+    child =
+      launch.input !== undefined
+        ? spawn(launch.program, launch.args, { ...base, stdio: ["pipe", "pipe", "pipe"] })
+        : spawn(launch.program, launch.args, { ...base, stdio: ["ignore", "pipe", "pipe"] })
+    if (launch.input !== undefined && child.stdin) {
+      child.stdin.on("error", () => {})
+      child.stdin.end(launch.input)
+    }
   } catch (error) {
     // E2BIG (a prompt too long for one argument) and the like: end it here, or
     // the seat stays 'running' with nothing to stop.
@@ -1113,13 +1176,7 @@ function run(agentId: string) {
   const body = withCarry(carried, fresh)
   const owes = owesLine(agentId, body)
   const wrapped = envelope(owes ? `${body}\n\n${owes}` : body, seen.skipped, seen.summary, adapter.reply === "stdout", agent.agentName ?? "", Boolean(agent.autoFull), agent)
-  const command = commandFor(
-    agent.agentName,
-    agent.session,
-    introduce(agent) + wrapped.text,
-    agent.modelPick,
-    agent.effortPick,
-  )
+  const { command, promptFile } = buildWake(agent, introduce(agent) + wrapped.text)
   const hop = queue.hops
   const trigger = queue.trigger
   const answering = [...(queue.carryIds ?? []), ...queue.pending.map((item) => item.id)]
@@ -1237,7 +1294,7 @@ function run(agentId: string) {
     )
     seat.settle()
     run(agentId)
-  }, () => note(queue.calls, agentId, "picked", { from: ["started"], run: log.id }))
+  }, () => note(queue.calls, agentId, "picked", { from: ["started"], run: log.id }), { promptFile })
 }
 
 // The error step the client's own stream ended on, if any (lib/events.ts).
@@ -1320,7 +1377,7 @@ export function openSeatTerminal(agentId: string, cols?: unknown, rows?: unknown
 function writeSummary(agent: NonNullable<ReturnType<typeof agentState>>, adapter: Adapter) {
   const byStdout = adapter.reply === "stdout"
   const prompt = summaryPrompt(byStdout)
-  const command = commandFor(agent.agentName ?? "", agent.session ?? "", prompt.text, agent.modelPick, agent.effortPick)
+  const { command, promptFile } = buildWake(agent, prompt.text)
   if (!command) return
   const queue = lane(agent.id)
   queue.running = true
@@ -1355,7 +1412,7 @@ function writeSummary(agent: NonNullable<ReturnType<typeof agentState>>, adapter
       }
     }
     run(agent.id)
-  })
+  }, undefined, { promptFile })
 }
 
 // 「请验收时先复验」: when an owner asks for review, the project's checker
@@ -1776,7 +1833,7 @@ function checkTask(agent: NonNullable<ReturnType<typeof agentState>>, item: { ta
     run(agent.id)
     return
   }
-  const command = commandFor(agent.agentName ?? "", agent.session ?? "", checkPrompt(task), agent.modelPick, agent.effortPick)
+  const { command, promptFile } = buildWake(agent, checkPrompt(task))
   if (!command) {
     setTaskCheck(item.taskId, item.at, { state: "error", note: "复验没跑成：拼不出唤起命令" })
     noteCheckSettled(item.taskId)
@@ -1825,7 +1882,7 @@ function checkTask(agent: NonNullable<ReturnType<typeof agentState>>, item: { ta
     }
     if (!limited) noteCheckSettled(item.taskId)
     run(agent.id)
-  })
+  }, undefined, { promptFile })
 }
 
 // 「谁来补摘要句」: a long reply whose first line the rules could not use as
@@ -1922,7 +1979,7 @@ function writeGists(agent: NonNullable<ReturnType<typeof agentState>>, ids: stri
     return
   }
   const { text, taken } = gistPrompt(wanted)
-  const command = commandFor(agent.agentName ?? "", agent.session ?? "", text, agent.modelPick, agent.effortPick)
+  const { command, promptFile } = buildWake(agent, text)
   if (!command) {
     run(agent.id)
     return
@@ -1962,7 +2019,7 @@ function writeGists(agent: NonNullable<ReturnType<typeof agentState>>, ids: stri
     batches.set(agent.id, done)
     if (done % GIST_COMPACT_EVERY === 0 && CONTEXT_KINDS.includes(agent.agentName ?? "")) queue.compact = true
     run(agent.id)
-  })
+  }, undefined, { promptFile })
 }
 
 // The user asked to compact a seat's context: one turn of /compact on its
@@ -1975,7 +2032,7 @@ function tokensText(context: SeatContext | null) {
 }
 
 function compactSession(agent: NonNullable<ReturnType<typeof agentState>>) {
-  const command = commandFor(agent.agentName ?? "", agent.session ?? "", "/compact", agent.modelPick, agent.effortPick)
+  const { command, promptFile } = buildWake(agent, "/compact")
   if (!command) return
   const queue = lane(agent.id)
   queue.running = true
@@ -2011,7 +2068,7 @@ function compactSession(agent: NonNullable<ReturnType<typeof agentState>>) {
       )
     }
     run(agent.id)
-  })
+  }, undefined, { promptFile })
 }
 
 export function requestCompact(agentId: string) {
@@ -2043,7 +2100,7 @@ function goalLine(text: string) {
 }
 
 function setGoal(agent: NonNullable<ReturnType<typeof agentState>>, adapter: Adapter, text: string) {
-  const command = commandFor(agent.agentName ?? "", agent.session ?? "", goalLine(text), agent.modelPick, agent.effortPick)
+  const { command, promptFile } = buildWake(agent, goalLine(text))
   if (!command) return
   const clearing = CLEAR_GOAL.test(text)
   const queue = lane(agent.id)
@@ -2075,7 +2132,7 @@ function setGoal(agent: NonNullable<ReturnType<typeof agentState>>, adapter: Ada
     endRun(log, failure || stopped ? "failed" : "done", stopped ? "被你停下了" : failure ? `没成功：${failure}` : undefined)
     seat.settle()
     run(agent.id)
-  })
+  }, undefined, { promptFile })
 }
 
 export function requestGoal(agentId: string, input: unknown) {
@@ -2124,13 +2181,7 @@ function whisperPrompt(text: string, interrupted: boolean) {
 function answerWhisper(agent: NonNullable<ReturnType<typeof agentState>>, text: string) {
   const queue = lane(agent.id)
   const interrupted = Boolean(queue.carry) || queue.summary === true
-  const command = commandFor(
-    agent.agentName ?? "",
-    agent.session ?? "",
-    introduce(agent) + whisperPrompt(text, interrupted),
-    agent.modelPick,
-    agent.effortPick,
-  )
+  const { command, promptFile } = buildWake(agent, introduce(agent) + whisperPrompt(text, interrupted))
   if (!command) return
   queue.running = true
   const startedLink = { agentName: agent.agentName, session: agent.session }
@@ -2148,7 +2199,7 @@ function answerWhisper(agent: NonNullable<ReturnType<typeof agentState>>, text: 
     endRun(log, failure || stopped ? "failed" : "done", stopped ? "被停下了" : failure ? `没成功：${failure}` : undefined)
     seat.settle()
     run(agent.id)
-  })
+  }, undefined, { promptFile })
 }
 
 function wakeable(agentId: string) {

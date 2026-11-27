@@ -721,11 +721,22 @@ function createIsolatedCopy(repoRoot, copyDir) {
     if (!existsSync(src)) continue
     cpSync(src, path.join(copyDir, item), { recursive: true })
   }
-  // Use hard-linked directory tree (`cp -al`) so Turbopack sees `node_modules`
-  // inside the workspace root without duplicating disk space.
-  const cpRes = spawnSync("cp", ["-al", path.join(repoRoot, "node_modules"), path.join(copyDir, "node_modules")])
-  if (cpRes.status !== 0) {
-    cpSync(path.join(repoRoot, "node_modules"), path.join(copyDir, "node_modules"), { recursive: true })
+  // Use hard-linked directory tree (`cp -al`) on POSIX, or multi-threaded robocopy
+  // on Windows (Turbopack rejects external directory junctions for node_modules).
+  if (process.platform === "win32") {
+    const srcNm = path.join(repoRoot, "node_modules")
+    const dstNm = path.join(copyDir, "node_modules")
+    const rb = spawnSync("robocopy", [srcNm, dstNm, "/E", "/MT:16", "/NFL", "/NDL", "/NJH", "/NJS", "/NC", "/NS", "/NP"], {
+      windowsHide: true,
+    })
+    if (typeof rb.status !== "number" || rb.status >= 8) {
+      cpSync(srcNm, dstNm, { recursive: true })
+    }
+  } else {
+    const cpRes = spawnSync("cp", ["-al", path.join(repoRoot, "node_modules"), path.join(copyDir, "node_modules")])
+    if (cpRes.status !== 0) {
+      cpSync(path.join(repoRoot, "node_modules"), path.join(copyDir, "node_modules"), { recursive: true })
+    }
   }
   mkdirSync(path.join(copyDir, "data"), { recursive: true })
   mkdirSync(path.join(copyDir, "state"), { recursive: true })
@@ -786,7 +797,7 @@ function runRoomTest(copyDir, port, dataDir, script = "scripts/test-room.mjs") {
         BENCH_DATA_DIR: dataDir,
         BENCH_KEY_FILE: path.join(dataDir, "human-key"),
         XDG_STATE_HOME: path.join(copyDir, "state"),
-        BENCH_RETRY_MS: "400,800",
+        BENCH_RETRY_MS: "1200,1600",
         BENCH_GIST_MS: "500",
         BENCH_CHECK_QUIET_MS: "300",
         BENCH_PUSH_MERGE_MS: "600",
@@ -802,11 +813,14 @@ function runRoomTest(copyDir, port, dataDir, script = "scripts/test-room.mjs") {
     child.stderr.on("data", (d) => {
       err += d.toString()
     })
+    const limitMs = process.platform === "win32" ? 360_000 : 180_000
+    let timedOut = false
     const timer = setTimeout(() => {
+      timedOut = true
       try {
         child.kill("SIGKILL")
       } catch {}
-    }, 180_000)
+    }, limitMs)
     child.on("close", (status) => {
       clearTimeout(timer)
       const elapsedMs = Date.now() - startedAt
@@ -830,11 +844,15 @@ function runRoomTest(copyDir, port, dataDir, script = "scripts/test-room.mjs") {
         ok: status === 0,
         status,
         elapsedMs,
-        summary: lastLine.slice(0, 160),
+        summary: (timedOut ? `超时(${Math.round(limitMs / 1000)}s)：${lastLine}` : lastLine).slice(0, 160),
         output: combined,
       })
     })
   })
+}
+
+function matchLineEndings(sample, text) {
+  return sample.includes("\r\n") ? text.replace(/\r?\n/g, "\r\n") : text
 }
 
 async function main() {
@@ -848,7 +866,8 @@ async function main() {
   // Verify every fault target exists uniquely in the current repo before spinning up a server.
   for (const fault of selected) {
     const src = readFileSync(path.join(repoRoot, fault.file), "utf8")
-    const occurrences = src.split(fault.find).length - 1
+    const find = matchLineEndings(src, fault.find)
+    const occurrences = src.split(find).length - 1
     if (occurrences !== 1) {
       throw new Error(`故障 [${fault.id}] 在 ${fault.file} 中匹配到 ${occurrences} 处（必须恰好为 1 处）`)
     }
@@ -863,26 +882,32 @@ async function main() {
   createIsolatedCopy(repoRoot, copyDir)
 
   const logFd = openSync(path.join(copyDir, "dev.log"), "a")
-  const server = spawn("npx", ["next", "dev", "-H", "127.0.0.1", "-p", String(port)], {
+  const nextBin = path.join(repoRoot, "node_modules", "next", "dist", "bin", "next")
+  const server = spawn(process.execPath, [nextBin, "dev", "-H", "127.0.0.1", "-p", String(port)], {
     cwd: copyDir,
     env: cleanEnv({
       BENCH_DATA_DIR: dataDir,
       XDG_STATE_HOME: path.join(copyDir, "state"),
       BENCH_URL: `http://127.0.0.1:${port}`,
-      BENCH_RETRY_MS: "400,800",
+      BENCH_RETRY_MS: "1200,1600",
       BENCH_GIST_MS: "500",
       BENCH_CHECK_QUIET_MS: "300",
       BENCH_PUSH_MERGE_MS: "600",
       BENCH_PUSH_PERMIT_MS: "1200",
     }),
     stdio: ["ignore", logFd, logFd],
-    detached: true,
+    detached: process.platform !== "win32",
+    windowsHide: true,
   })
   closeSync(logFd)
 
   const killServer = () => {
     try {
-      if (server.pid) process.kill(-server.pid, "SIGKILL")
+      if (process.platform === "win32" && server.pid) {
+        spawnSync("taskkill", ["/PID", String(server.pid), "/T", "/F"], { windowsHide: true })
+      } else if (server.pid) {
+        process.kill(-server.pid, "SIGKILL")
+      }
     } catch {}
     try {
       server.kill("SIGKILL")
@@ -891,7 +916,20 @@ async function main() {
 
   const results = []
   try {
-    await waitServerReady(port)
+    await waitServerReady(port, 90_000)
+  } catch (err) {
+    let devLog = ""
+    try {
+      devLog = readFileSync(path.join(copyDir, "dev.log"), "utf8")
+    } catch {}
+    killServer()
+    try {
+      rmSync(copyDir, { recursive: true, force: true })
+    } catch {}
+    const excerpt = devLog.length > 3000 ? `${devLog.slice(0, 1500)}\n...\n${devLog.slice(-1500)}` : devLog
+    throw new Error(`${err instanceof Error ? err.message : String(err)}\n--- dev.log ---\n${excerpt}`)
+  }
+  try {
     console.log(`[2/3] 运行干净基线测试（scripts/test-room.mjs）…`)
     const baseline = await runRoomTest(copyDir, port, dataDir)
     if (!baseline.ok) {
@@ -906,7 +944,9 @@ async function main() {
       const original = readFileSync(targetPath, "utf8")
       let testRes
       try {
-        const mutated = original.replace(fault.find, fault.replace)
+        const find = matchLineEndings(original, fault.find)
+        const replace = matchLineEndings(original, fault.replace)
+        const mutated = original.replace(find, replace)
         if (mutated === original) {
           throw new Error(`故障 [${fault.id}] 替换未生效`)
         }
@@ -934,9 +974,9 @@ async function main() {
     }
   } finally {
     killServer()
-    await new Promise((r) => setTimeout(r, 300))
+    await new Promise((r) => setTimeout(r, 400))
     try {
-      spawnSync("rm", ["-rf", copyDir])
+      rmSync(copyDir, { recursive: true, force: true })
     } catch {}
   }
 

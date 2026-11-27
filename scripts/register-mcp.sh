@@ -22,6 +22,7 @@ fi
 
 kind="${kinds[0]:-}"
 root="$(cd "$(dirname "$0")/.." && pwd)"
+root_node="$root"
 script="$root/scripts/bench-mcp.mjs"
 node="$(command -v node || true)"
 [[ -n "$node" ]] || node=/usr/local/nodejs/bin/node
@@ -29,6 +30,7 @@ node="$(command -v node || true)"
 # Git Bash on Windows: what goes into a client's config must be a Windows path
 # (C:/Program Files/nodejs/node.exe), not /c/Program Files/….
 if command -v cygpath >/dev/null 2>&1; then
+  root_node="$(cygpath -m "$root")"
   script="$(cygpath -m "$script")"
   node="$(cygpath -m "$node")"
 fi
@@ -66,7 +68,7 @@ todo=""
 backup_file() {
   local file="$1"
   [[ -f "$file" ]] || return 0
-  "$node" "$root/scripts/merge-mcp.mjs" --backup "$file"
+  "$node" "$root_node/scripts/merge-mcp.mjs" --backup "$file"
 }
 
 guard_json_and_backup() {
@@ -209,7 +211,7 @@ guard_yaml_list_and_backup() {
 
 # Merge the bench entry into a JSON config: merge_json FILE [TOP_JSON] [STYLE] [SERVER_JSON].
 merge_json() {
-  "$node" "$root/scripts/merge-mcp.mjs" "$1" "${3:-mcpServers}" "$kind" "${2:-{\}}" "${4:-{\}}"
+  "$node" "$root_node/scripts/merge-mcp.mjs" "$1" "${3:-mcpServers}" "$kind" "${2:-{\}}" "${4:-{\}}"
 }
 
 case "$kind" in
@@ -221,20 +223,23 @@ case "$kind" in
     "$bin" mcp add --scope user bench -- "$node" "$script" --agent claude
     ;;
   codex)
-    bin="$(command -v codex || echo /usr/lib/chatgpt/resources/codex)"
-    [[ -x "$bin" ]] || { echo "找不到 codex 可执行文件" >&2; exit 1; }
+    bin="$(command -v codex || "$node" "$root_node/scripts/codex-bin.mjs" --bundled || true)"
+    if [[ -n "$bin" ]] && command -v cygpath >/dev/null 2>&1 && [[ -e "$bin" ]]; then
+      bin="$(cygpath -u "$bin")"
+    fi
+    [[ -n "$bin" && -x "$bin" ]] || { echo "找不到 codex（命令行或桌面端）" >&2; exit 1; }
     codex_cfg="${CODEX_HOME:-$HOME/.codex}/config.toml"
     guard_toml_and_backup "$codex_cfg"
-    "$bin" mcp remove bench >/dev/null 2>&1 || true
-    "$bin" mcp add bench -- "$node" "$script" --agent codex
+    MSYS_NO_PATHCONV=1 "$bin" mcp remove bench >/dev/null 2>&1 || true
+    MSYS_NO_PATHCONV=1 "$bin" mcp add bench -- "$node" "$script" --agent codex
     # bench_wait blocks up to ~9 minutes; Codex's default tool timeout is 60 s.
     "$node" -e '
       const fs = require("node:fs")
       const file = process.argv[1]
       if (!fs.existsSync(file)) process.exit(0)
       const text = fs.readFileSync(file, "utf8")
-      const next = text.replace(/(\[mcp_servers\.bench\]\n(?:(?!\[)[^\n]*\n)*)/, (block) =>
-        /tool_timeout_sec/.test(block) ? block : block.replace(/\n*$/, "\ntool_timeout_sec = 600\n\n"))
+      const next = text.replace(/(\[mcp_servers\.bench\]\r?\n(?:(?!\[)[^\n]*\n)*)/, (block) =>
+        /tool_timeout_sec/.test(block) ? block : block.replace(/\r?\n*$/, "\ntool_timeout_sec = 600\n\n"))
       fs.writeFileSync(file, next)
     ' "$codex_cfg"
     ;;

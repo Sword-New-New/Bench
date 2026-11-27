@@ -1,5 +1,5 @@
 import { execFileSync } from "node:child_process"
-import { existsSync, readFileSync, statSync } from "node:fs"
+import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs"
 import os from "node:os"
 import path from "node:path"
 
@@ -157,17 +157,66 @@ function dshRoutes(): DshRoutes {
   return routes
 }
 
-// Lists that take a moment to get (a command, a network fetch) are kept a
-// minute, unless refreshed explicitly or the underlying client stamp changed.
-const cached = new Map<string, { at: number; stamp?: string; list: ModelChoice[] }>()
-function remember(kind: string, get: () => ModelChoice[], opts?: { refresh?: boolean; stamp?: string }) {
-  const hit = cached.get(kind)
-  if (!opts?.refresh && hit && Date.now() - hit.at < 60_000 && hit.stamp === opts?.stamp) return hit.list
+// Lists are kept in memory + data/models-cache.json and reused without
+// re-running slow CLIs or network fetches until the user clicks 「刷新」.
+type CachedEntry = { at: number; stamp?: string; list: ModelChoice[] }
+const cached = new Map<string, CachedEntry>()
+
+function modelsCacheFile() {
+  const dir = process.env.BENCH_DATA_DIR || path.join(process.cwd(), "data")
+  return path.join(dir, "models-cache.json")
+}
+
+function readDiskCache(): Record<string, CachedEntry> {
+  try {
+    const raw = JSON.parse(readFileSync(modelsCacheFile(), "utf8")) as Record<string, CachedEntry>
+    return raw && typeof raw === "object" ? raw : {}
+  } catch {
+    return {}
+  }
+}
+
+function writeDiskEntry(kind: string, entry: CachedEntry) {
+  try {
+    const file = modelsCacheFile()
+    mkdirSync(path.dirname(file), { recursive: true })
+    const all = readDiskCache()
+    all[kind] = entry
+    writeFileSync(file, JSON.stringify(all, null, 2), "utf8")
+  } catch {}
+}
+
+function remember(
+  kind: string,
+  get: () => ModelChoice[],
+  opts?: { refresh?: boolean; stamp?: string; localOnly?: () => ModelChoice[] },
+) {
+  if (!opts?.refresh) {
+    const mem = cached.get(kind)
+    if (mem && (!opts?.stamp || mem.stamp === opts.stamp)) return mem.list
+    const disk = readDiskCache()[kind]
+    if (disk && Array.isArray(disk.list) && disk.list.length > 0 && (!opts?.stamp || disk.stamp === opts.stamp)) {
+      cached.set(kind, disk)
+      return disk.list
+    }
+    if (opts?.localOnly) {
+      let local: ModelChoice[] = []
+      try {
+        local = opts.localOnly()
+      } catch {}
+      if (local.length > 0) {
+        cached.set(kind, { at: Date.now(), stamp: opts.stamp, list: local })
+        return local
+      }
+    }
+  }
   let list: ModelChoice[] = []
   try {
     list = get()
   } catch {}
-  cached.set(kind, { at: Date.now(), stamp: opts?.stamp, list })
+  const entry: CachedEntry = { at: Date.now(), stamp: opts?.stamp, list }
+  cached.set(kind, entry)
+  if (list.length > 0) writeDiskEntry(kind, entry)
   return list
 }
 
@@ -382,9 +431,21 @@ function antigravityBinaryModels(): ModelChoice[] {
   }
 }
 
+function antigravityLocalModels(): ModelChoice[] {
+  const out: ModelChoice[] = []
+  const seen = new Set<string>()
+  const add = (item: ModelChoice) => {
+    if (seen.has(item.id)) return
+    seen.add(item.id)
+    out.push(item)
+  }
+  for (const item of ANTIGRAVITY_KNOWN) add(item)
+  for (const item of antigravityBinaryModels()) add(item)
+  return out
+}
+
 // `agy models` prints "id<TAB>name" a line, after a "Fetching…" line.
-// Merge with ANTIGRAVITY_KNOWN and binary auto-discovery so Neon and future
-// desktop updates appear immediately without hardcoding every release.
+// Only invoked on explicit refresh so opening 「开新会话」 stays instant.
 function antigravityModels(): ModelChoice[] {
   const known = new Map(ANTIGRAVITY_KNOWN.map((item) => [item.id, item]))
   const fromBinary = antigravityBinaryModels()
@@ -421,7 +482,9 @@ export function modelChoices(kind: string, opts?: { refresh?: boolean }): ModelC
   const refresh = opts?.refresh === true
   if (kind === "claude") return remember(kind, claudeModels, { refresh })
   if (kind === "codex") return remember(kind, codexModels, { refresh, stamp: codexStamp() })
-  if (kind === "antigravity") return remember(kind, antigravityModels, { refresh, stamp: antigravityStamp() })
+  if (kind === "antigravity") {
+    return remember(kind, antigravityModels, { refresh, stamp: antigravityStamp(), localOnly: antigravityLocalModels })
+  }
   if (kind === "cursor") return remember(kind, cursorModels, { refresh })
   if (kind === "codebuddy" || kind === "workbuddy") return remember("codebuddy", codebuddyModels, { refresh })
   if (kind === "dsh") {

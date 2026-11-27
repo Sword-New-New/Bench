@@ -40,13 +40,23 @@ export function insertMention(text: string, name: string, start: number, end = s
   return { text: before + piece + after, caret: before.length + piece.length + (spaced ? 1 : 0) }
 }
 
+// Strip fenced code blocks and inline code spans so example mentions like
+// `` `@所有人` `` inside documentation or code snippets do not wake seats.
+function stripCode(text: string): string {
+  return text
+    .replace(/```[\s\S]*?```/g, " ")
+    .replace(/~~~[\s\S]*?~~~/g, " ")
+    .replace(/`[^`\n]+`/g, " ")
+}
+
 export function mentionedAgentIds(
   text: string,
   agents: { id: string; name: string }[],
 ): string[] {
+  const plain = stripCode(text)
   const ids = new Set<string>()
   const has = (name: string) =>
-    new RegExp(`@${escapeRegExp(name)}(?![\\p{L}\\p{N}_-])`, "u").test(text)
+    new RegExp(`@${escapeRegExp(name)}(?![\\p{L}\\p{N}_-])`, "u").test(plain)
 
   if (has("所有人") || has("everyone")) {
     for (const agent of agents) ids.add(agent.id)
@@ -60,9 +70,10 @@ export function mentionedAgentIds(
 }
 
 export function unknownMentions(text: string, names: string[]): string[] {
+  const plain = stripCode(text)
   const known = new Set(names)
   const found = new Set<string>()
-  for (const match of text.matchAll(/@([\p{L}\p{N}_-]+)/gu)) {
+  for (const match of plain.matchAll(/@([\p{L}\p{N}_-]+)/gu)) {
     const name = match[1]
     if (!name || name === "所有人" || name === "everyone" || known.has(name)) {
       continue

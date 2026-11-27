@@ -107,10 +107,10 @@ export function renderWorkflow(workflow: Workflow, input: string, seats: Seat[],
   const called = workflow.kind === "plan" ? planners : workflow.kind === "explore" ? explorers : [lead]
   const targets = called.map((name) => seats.find((seat) => seat.name === name)!.id)
   const rules = workflow.kind === "plan"
-    ? `本轮只做联合规划，不修改代码或文件，也不启动实施。\n${planners[0]} 负责需求边界、潜在风险与验收审查；${planners.slice(1).join("、")} 负责工程拆解、改动点与实施步骤。各自先给出意见，交叉对照后由 ${planners[0]} 整合统一分步计划、成本和待用户拍板的选项；等待用户确认再动手。不要互相反复唤起。`
+    ? `本轮只做联合规划，不修改代码或文件，也不启动实施。\n${planners[0]} 负责需求边界、潜在风险与验收审查；${planners.slice(1).join("、")} 负责工程拆解、改动点与实施步骤。各自先给出意见（完成后请在回复中明确 @${planners[0]}），交叉对照后由 ${planners[0]} 整合统一分步计划、成本和待用户拍板的选项；等待用户确认再动手。不要互相反复唤起。`
     : workflow.kind === "explore"
-      ? `本轮为多 AI 联合探索，只做调研、分析与方案发散，不修改代码或文件，也不启动实施。\n${explorers.join("、")} 各自先独立从不同角度深入探索（可行思路、技术/架构路线对比、潜在盲点与边界风险、代码或事实依据），避免盲目附和他人观点。各自给出有依据的发现后，由 ${explorers[0]} 汇总对照全部观点：提炼共识、标出分歧与权衡、给出 2～3 个可落地的候选方向及下一步建议，等待用户拍板。不要互相反复唤起。`
-      : `主控：${lead}；执行：${workers.join("、")}；汇总：${summarizer}。\n主控负责拆解方案、派活执行并复核结果；执行席位按主控要求干活，把结果回给主控。全部完成后由主控点名交接给汇总席位。最终汇总只由 ${summarizer} 输出并收尾，其他席位不再重复长篇总结。当前只唤醒主控，由主控决定何时派活。`
+      ? `本轮为多 AI 联合探索，只做调研、分析与方案发散，不修改代码或文件，也不启动实施。\n${explorers.join("、")} 各自先独立从不同角度深入探索（可行思路、技术/架构路线对比、潜在盲点与边界风险、代码或事实依据），避免盲目附和他人观点。各自给出有依据的发现后请在回复中明确 @${explorers[0]}，由 ${explorers[0]} 汇总对照全部观点：提炼共识、标出分歧与权衡、给出 2～3 个可落地的候选方向及下一步建议，等待用户拍板。不要互相反复唤起。`
+      : `主控：${lead}；执行：${workers.join("、")}；汇总：${summarizer}。\n主控负责拆解方案、用 @席位名 派活给执行席位并复核结果（示例文案里的 @ 请放进代码块，避免误唤起无关席位）；执行席位按主控要求干活，完成后必须在回复中明确 @${lead} 交由主控复核（不写 @ 不会唤起主控）。全部复核完成后由主控明确 @${summarizer} 交接给汇总席位。最终汇总只由 ${summarizer} 输出并收尾，其他席位不再重复长篇总结。当前只唤醒主控，由主控决定何时派活。`
   const heading = workflow.kind === "explore" ? "探索主题" : "用户需求"
   const text = `${called.map((name) => `@${name}`).join(" ")}\n【工作流：${workflow.name}】\n${rules}${workflow.note ? `\n补充规则：${workflow.note}` : ""}\n\n${heading}：\n${requirement}`
   if (text.length > 4000) throw new ApiError(400, "需求和补充规则合起来过长，请缩短后发送")

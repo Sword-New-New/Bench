@@ -123,9 +123,6 @@ export function Roster(props: Props) {
   const { agents, adapters } = props
   const now = useTick(10_000)
   const others = agents.filter((agent) => kindOf(agent) === null)
-  // The five core kinds always get a row; any other kind once it has a seat.
-  const seated = new Set(agents.map((agent) => kindOf(agent)?.id))
-  const shown = KINDS.filter((kind) => kind.core || seated.has(kind.id))
   const quotas = useQuotas()
   const speeds = useSpeeds()
   // Read again whenever a seat starts or ends a wake.
@@ -140,11 +137,8 @@ export function Roster(props: Props) {
   const toggle = (id: string) => save(open.includes(id) ? open.filter((item) => item !== id) : [...open, id])
 
   const seatsOf = (kind: Kind) => agents.filter((agent) => kindOf(agent)?.id === kind.id)
-  // An empty room lists every client in full, as the way in; otherwise the
-  // ones without a seat fold into a small line each, after the others.
   const empty = agents.length === 0
-  const withSeats = shown.filter((kind) => seatsOf(kind).length > 0)
-  const without = shown.filter((kind) => seatsOf(kind).length === 0)
+  const withSeats = KINDS.filter((kind) => seatsOf(kind).length > 0)
   const allOpen = withSeats.length > 0 && withSeats.every((kind) => open.includes(kind.id))
 
   const group = (kind: Kind, folding: boolean) => {
@@ -190,34 +184,31 @@ export function Roster(props: Props) {
             {allOpen ? <ChevronsDownUp /> : <ChevronsUpDown />}
           </Button>
         ) : null}
-        <Button type="button" variant="ghost" size="xs" onClick={() => props.onJoin()}>
+        <Button type="button" variant="ghost" size="xs" onClick={() => props.onSpawn("", null)}>
           <Plus />
-          接入 AI
+          添加 AI
         </Button>
       </div>
       {/* tier-rows: these fade in one after another when the room opens (globals.css). */}
       <div className="tier-rows min-h-0 flex-1 space-y-1 overflow-y-auto px-2 pb-3">
         {empty ? (
-          shown.map((kind) => group(kind, false))
+          <div className="flex flex-col items-center justify-center gap-3 px-4 py-12 text-center">
+            <p className="text-sm text-muted-foreground">还没有 AI 入座</p>
+            <Button type="button" size="sm" onClick={() => props.onSpawn("", null)}>
+              <Plus />
+              添加 AI
+            </Button>
+            <button
+              type="button"
+              className="flex items-center gap-1 text-xs text-muted-foreground transition-colors hover:text-foreground"
+              onClick={() => props.onJoin()}
+            >
+              <Plug className="size-3" />
+              接入已有会话
+            </button>
+          </div>
         ) : (
-          <>
-            {withSeats.map((kind) => group(kind, true))}
-            {without.length > 0 ? (
-              <div className="pt-1">
-                {without.map((kind) => (
-                  <KindStub
-                    key={kind.id}
-                    kind={kind}
-                    state={reach(kind, [], adapters)}
-                    open={open.includes(kind.id)}
-                    onToggle={() => toggle(kind.id)}
-                    onJoin={props.onJoin}
-                    onSpawn={props.onSpawn}
-                  />
-                ))}
-              </div>
-            ) : null}
-          </>
+          withSeats.map((kind) => group(kind, true))
         )}
 
         {others.length > 0 ? (
@@ -229,66 +220,6 @@ export function Roster(props: Props) {
           </section>
         ) : null}
       </div>
-    </div>
-  )
-}
-
-// A client nobody here uses yet: one small line. A click unfolds the two ways
-// in: the room starts a session of it, or one already open joins.
-function KindStub({
-  kind,
-  state,
-  open,
-  onToggle,
-  onJoin,
-  onSpawn,
-}: {
-  kind: Kind
-  state: ReturnType<typeof reach>
-  open: boolean
-  onToggle: () => void
-  onJoin: (kind?: string) => void
-  onSpawn: (kind: string, from: PublicAgent | null) => void
-}) {
-  return (
-    <div>
-      <button
-        type="button"
-        className="group/stub flex w-full items-center gap-3 rounded-xl px-3 py-1 text-left transition-colors hover:bg-sidebar-accent/70"
-        title={`接入 ${kind.label}`}
-        aria-expanded={open}
-        onClick={onToggle}
-      >
-        <span className="grid w-9 shrink-0 place-items-center opacity-60 grayscale-[.4] group-hover/stub:opacity-100 group-hover/stub:grayscale-0">
-          <Avatar name={kind.label} color={kind.color} kind={kind} size="sm" />
-        </span>
-        <span className="truncate text-[0.8125rem] text-muted-foreground group-hover/stub:text-foreground">{kind.label}</span>
-        <span className={`shrink-0 text-[0.6875rem] ${state.tone === "warn" ? WARN : "text-muted-foreground/70"}`}>{state.text}</span>
-        <ChevronRight className={`ml-auto size-3.5 shrink-0 text-muted-foreground transition-transform duration-200 ${open ? "rotate-90" : ""}`} />
-      </button>
-      <Reveal open={open}>
-        <div className="flex flex-wrap gap-1 pt-0.5 pr-2 pb-1 pl-14">
-          {kind.spawn ? (
-            <button
-              type="button"
-              className="-ml-1.5 flex items-center gap-1.5 rounded-lg px-1.5 py-0.5 text-xs text-muted-foreground transition-colors hover:bg-sidebar-accent/70 hover:text-foreground"
-              title="后台新建会话并入座"
-              onClick={() => onSpawn(kind.id, null)}
-            >
-              <Plus className="size-3.5" />
-              开新会话
-            </button>
-          ) : null}
-          <button
-            type="button"
-            className="-ml-1.5 flex items-center gap-1.5 rounded-lg px-1.5 py-0.5 text-xs text-muted-foreground transition-colors hover:bg-sidebar-accent/70 hover:text-foreground"
-            onClick={() => onJoin(kind.id)}
-          >
-            <Plug className="size-3.5" />
-            接入 AI
-          </button>
-        </div>
-      </Reveal>
     </div>
   )
 }

@@ -1,7 +1,7 @@
 "use client"
 
 import { type ComponentProps, startTransition, useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react"
-import { BellRing, FolderOpen, Gauge, ListTodo, MessageSquare, Monitor, Moon, Plug, Settings, SlidersHorizontal, Smartphone, Sparkles, Sun, TerminalSquare, Type, UserRound, Users } from "lucide-react"
+import { BellRing, FolderOpen, Gauge, ListTodo, MessageSquare, Monitor, Moon, PanelLeftClose, PanelLeftOpen, Plug, Settings, SlidersHorizontal, Smartphone, Sparkles, Sun, TerminalSquare, Type, UserRound, Users } from "lucide-react"
 import { useTheme } from "next-themes"
 import { toast } from "sonner"
 
@@ -86,7 +86,33 @@ import {
 import type { Message, Project, ProjectInfo, PublicAgent, RoomSnapshot, Task } from "@/lib/types"
 
 type TabId = "chat" | "people" | "tasks"
-type SimpleTabId = "chat" | "waiting"
+type SimpleTabId = "people" | "chat" | "waiting"
+
+const LEFT_OPEN_KEY = "bench-left-open"
+const LEFT_OPEN_EVENT = "bench-left-open"
+let leftOpenNow = true
+
+function onLeftOpenChange(callback: () => void) {
+  window.addEventListener(LEFT_OPEN_EVENT, callback)
+  return () => window.removeEventListener(LEFT_OPEN_EVENT, callback)
+}
+
+function leftOpenSaved(): boolean {
+  try {
+    const saved = localStorage.getItem(LEFT_OPEN_KEY)
+    if (saved === "0") leftOpenNow = false
+    else if (saved === "1") leftOpenNow = true
+  } catch {}
+  return leftOpenNow
+}
+
+function setLeftOpen(value: boolean) {
+  leftOpenNow = value
+  try {
+    localStorage.setItem(LEFT_OPEN_KEY, value ? "1" : "0")
+  } catch {}
+  window.dispatchEvent(new Event(LEFT_OPEN_EVENT))
+}
 
 // Two UI layers remembered in this browser (defaults to first/simple layer:
 // conversation + 「等你定」; full three-column detail view sits on the second layer).
@@ -213,6 +239,7 @@ export function RoomApp() {
   const [simpleTab, setSimpleTab] = useState<SimpleTabId>("chat")
   const layer = useSyncExternalStore(onLayerChange, layerSaved, (): UiLayer => "simple")
   const simple = layer === "simple"
+  const leftOpen = useSyncExternalStore(onLeftOpenChange, leftOpenSaved, () => true)
   // The composer's text lives in its own store (draft.ts, draft.set below),
   // so typing doesn't redraw the room.
   // 「重新编辑」 on a recalled message puts its words back in the composer.
@@ -936,23 +963,33 @@ export function RoomApp() {
       <div className="flex min-w-0 flex-1 flex-col">
       <div className="shrink-0 px-3 pt-2 lg:px-4">
       <header className="flex h-12 items-center gap-3 pr-1 pl-1">
+        <button
+          type="button"
+          className="hidden size-7 shrink-0 place-items-center rounded-full text-muted-foreground transition-colors hover:bg-foreground/[0.06] hover:text-foreground lg:grid"
+          title={leftOpen ? "收起左侧栏" : "展开左侧栏"}
+          aria-label={leftOpen ? "收起左侧栏" : "展开左侧栏"}
+          aria-expanded={leftOpen}
+          onClick={() => setLeftOpen(!leftOpen)}
+        >
+          {leftOpen ? <PanelLeftClose className="size-4" /> : <PanelLeftOpen className="size-4" />}
+        </button>
         <Mark />
         <h1 className="sr-only">并坐</h1>
         <div className="min-w-0" data-tour="project">
-          {/* From lg on the second layer the project rail switches, creates and opens settings, so
-              the header only says where this one lives. On the first layer and at the desk there is no rail. */}
-          <div className={simple || currentProject?.front ? "" : "lg:hidden"}>
+          {/* When the left pane is open on lg+, it handles project switching;
+              when collapsed (or at the front desk / narrow screens), show the header menu. */}
+          <div className={!leftOpen || currentProject?.front ? "" : "lg:hidden"}>
             <ProjectMenu
               projects={projects ?? []}
               current={currentProject}
-              alwaysShowName={simple}
+              alwaysShowName={!leftOpen}
               onPick={openProject}
               onCreate={() => setProjectDialog({ editing: null })}
               onEdit={() => room && setProjectDialog({ editing: room.project })}
               onEnableFront={frontProject ? undefined : enableFront}
             />
           </div>
-          {simple || currentProject?.front ? null : <ProjectPlace project={currentProject} />}
+          {!leftOpen || currentProject?.front ? null : <ProjectPlace project={currentProject} />}
         </div>
         {currentProject?.dir && !currentProject.front ? (
           <button
@@ -1168,10 +1205,16 @@ export function RoomApp() {
       {!room ? (
         <div
           className={`grid min-h-0 flex-1 gap-4 p-3 lg:px-4 lg:pt-1 lg:pb-4 ${
-            simple ? "lg:grid-cols-[1fr_340px]" : "lg:grid-cols-[300px_1fr_300px]"
+            leftOpen
+              ? simple
+                ? "lg:grid-cols-[300px_1fr_340px]"
+                : "lg:grid-cols-[300px_1fr_300px]"
+              : simple
+                ? "lg:grid-cols-[1fr_340px]"
+                : "lg:grid-cols-[1fr_300px]"
           }`}
         >
-          {(simple ? ["对话", "等你定"] : ["入口", "对话", "待办"]).map((label) => (
+          {(leftOpen ? (simple ? ["入口", "对话", "等你定"] : ["入口", "对话", "待办"]) : simple ? ["对话", "等你定"] : ["对话", "待办"]).map((label) => (
             <div key={label} className="frost animate-pulse rounded-2xl p-4 text-sm text-muted-foreground">
               正在打开{label}
             </div>
@@ -1180,57 +1223,68 @@ export function RoomApp() {
       ) : (
         <div
           className={`grid min-h-0 flex-1 grid-rows-[minmax(0,1fr)] pt-2 lg:gap-4 lg:px-4 lg:pt-1 lg:pb-4 ${
-            simple ? "lg:grid-cols-[minmax(0,1fr)_340px]" : desk ? "lg:grid-cols-[300px_minmax(0,1fr)]" : "lg:grid-cols-[300px_minmax(0,1fr)_300px]"
+            leftOpen
+              ? simple
+                ? "lg:grid-cols-[300px_minmax(0,1fr)_340px]"
+                : desk
+                  ? "lg:grid-cols-[300px_minmax(0,1fr)]"
+                  : "lg:grid-cols-[300px_minmax(0,1fr)_300px]"
+              : simple
+                ? "lg:grid-cols-[minmax(0,1fr)_340px]"
+                : desk
+                  ? "lg:grid-cols-[minmax(0,1fr)]"
+                  : "lg:grid-cols-[minmax(0,1fr)_300px]"
           }`}
         >
-          {/* Second layer only: project rail + seats column (ordinary projects). */}
-          {/* At the desk too, from lg: walking in from the project list, the
-              list stays, so a project is one click back (AverageJoe
-              2026-11-18: 「能点进去但点不回来」). There it is the list, not a roster. */}
-          {!simple ? (
-            <aside className={`${tab === "people" && !desk ? "block" : "hidden"} h-full min-h-0 lg:block`}>
-              <LeftPane
-                projects={projects ?? []}
-                current={room.project}
-                className="h-full min-h-0"
-                onOpen={openProject}
-                onPrefetch={prefetch}
-                onCreate={() => setProjectDialog({ editing: null })}
-                onEdit={(project) => setProjectDialog({ editing: project })}
-                onEnableFront={enableFront}
-                roster={(head) => (
-              <Roster
-                head={head}
-                agents={agents}
-                adapters={adapters}
-                focusId={focusId}
-                busy={busy}
-                onMention={mention}
-                onFocus={(id) => {
-                  setFocusId(id)
-                  setTab("chat")
-                }}
-                onLeave={setLeaving}
-                onRename={(agent) => {
-                  setNewName(agent.name)
-                  setRenaming(agent)
-                }}
-                onOpenRun={setRunId}
-                onWhisper={(agent) => setWhisperId(agent.id)}
-                onModel={(agent) => setModelId(agent.id)}
-                onSpawn={(kind, from) => setSpawn({ kind, from })}
-                onStop={stopSeat}
-                onCompact={compactSeat}
-                onJoin={(kind) => {
-                  setJoinKind(kind ?? null)
-                  setJoinTour(false)
-                  setJoinOpen(true)
-                }}
-              />
-                )}
-              />
-            </aside>
-          ) : null}
+          {/* Left pane: project rail + seats column, visible in both simple and full
+              layers and collapsible from the header toggle on lg+. */}
+          <aside
+            className={`${
+              (simple ? simpleTab === "people" : tab === "people") && !desk ? "block" : "hidden"
+            } h-full min-h-0 ${leftOpen ? "lg:block" : "lg:hidden"}`}
+          >
+            <LeftPane
+              projects={projects ?? []}
+              current={room.project}
+              className="h-full min-h-0"
+              onOpen={openProject}
+              onPrefetch={prefetch}
+              onCreate={() => setProjectDialog({ editing: null })}
+              onEdit={(project) => setProjectDialog({ editing: project })}
+              onEnableFront={enableFront}
+              roster={(head) => (
+                <Roster
+                  head={head}
+                  agents={agents}
+                  adapters={adapters}
+                  focusId={focusId}
+                  busy={busy}
+                  onMention={mention}
+                  onFocus={(id) => {
+                    setFocusId(id)
+                    setTab("chat")
+                    setSimpleTab("chat")
+                  }}
+                  onLeave={setLeaving}
+                  onRename={(agent) => {
+                    setNewName(agent.name)
+                    setRenaming(agent)
+                  }}
+                  onOpenRun={setRunId}
+                  onWhisper={(agent) => setWhisperId(agent.id)}
+                  onModel={(agent) => setModelId(agent.id)}
+                  onSpawn={(kind, from) => setSpawn({ kind, from })}
+                  onStop={stopSeat}
+                  onCompact={compactSeat}
+                  onJoin={(kind) => {
+                    setJoinKind(kind ?? null)
+                    setJoinTour(false)
+                    setJoinOpen(true)
+                  }}
+                />
+              )}
+            />
+          </aside>
           <section
             data-tour="chat"
             className={`${(simple ? simpleTab === "chat" : tab === "chat" || desk) ? "flex" : "hidden"} relative h-full min-h-0 min-w-0 flex-col lg:flex`}
@@ -1524,7 +1578,18 @@ export function RoomApp() {
       </div>
 
       {simple ? (
-        <nav className="frost grid shrink-0 grid-cols-2 lg:hidden">
+        <nav className={`frost grid shrink-0 lg:hidden ${desk ? "grid-cols-2" : "grid-cols-3"}`}>
+          {!desk ? (
+            <button
+              type="button"
+              className={`flex flex-col items-center gap-0.5 py-2 text-[0.6875rem] ${simpleTab === "people" ? "text-foreground" : "text-muted-foreground"}`}
+              onClick={() => setSimpleTab("people")}
+              aria-current={simpleTab === "people" ? "page" : undefined}
+            >
+              <Users className="size-5" />
+              <span>入口</span>
+            </button>
+          ) : null}
           <button
             type="button"
             className={`flex flex-col items-center gap-0.5 py-2 text-[0.6875rem] ${simpleTab === "chat" ? "text-foreground" : "text-muted-foreground"}`}
@@ -1591,8 +1656,15 @@ export function RoomApp() {
         kind={spawn?.kind ?? null}
         from={spawn?.from ?? null}
         agents={agents}
+        adapters={adapters}
         preset={spawn?.preset ?? null}
         onKind={(kind) => setSpawn((current) => (current ? { ...current, kind } : current))}
+        onJoin={(kind) => {
+          setSpawn(null)
+          setJoinKind(kind ?? null)
+          setJoinTour(false)
+          setJoinOpen(true)
+        }}
         onClose={() => setSpawn(null)}
       />
       <SeatProfileDialog agents={agents} adapters={adapters} />

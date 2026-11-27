@@ -1,11 +1,11 @@
 "use client"
 
 import { useEffect, useState } from "react"
-import { FolderGit2, FolderOpen, FolderSearch, Folders, FolderTree, Loader2 } from "lucide-react"
+import { ArrowLeft, FolderGit2, FolderOpen, FolderSearch, Folders, FolderTree, Loader2, Plug } from "lucide-react"
 import { toast } from "sonner"
 
 import { AdvancedSection } from "@/components/room/advanced"
-import { api } from "@/components/room/api"
+import { api, type AdapterInfo } from "@/components/room/api"
 import { usePathPicker } from "@/components/room/folder-picker"
 import { ModelField, NO_LIMITS, type Limits } from "@/components/room/model-field"
 import { Button } from "@/components/ui/button"
@@ -53,19 +53,25 @@ export function SpawnDialog({
   kind,
   from,
   agents,
+  adapters,
   onClose,
   preset,
   onKind,
+  onJoin,
 }: {
   kind: string | null
   from: PublicAgent | null
   agents: PublicAgent[]
+  adapters?: AdapterInfo[] | null
   onClose: () => void
   preset?: SpawnPreset | null
-  // With a preset: another kind picked in the dialog.
+  // With a preset or picker step: another kind picked in the dialog.
   onKind?: (kind: string) => void
+  onJoin?: (kind?: string) => void
 }) {
+  const picking = kind === ""
   const info = KINDS.find((item) => item.id === kind)
+  const [fromPicker, setFromPicker] = useState(false)
   const [spaces, setSpaces] = useState<Workspace[] | null>(null)
   const [name, setName] = useState("")
   const [role, setRole] = useState("")
@@ -92,11 +98,13 @@ export function SpawnDialog({
 
   // Fresh fields each time it opens.
   const [shown, setShown] = useState<string | null>(null)
-  const key = kind ? `${kind}:${from?.id ?? ""}:${preset ? "preset" : ""}` : null
+  const key = kind !== null ? `${kind}:${from?.id ?? ""}:${preset ? "preset" : ""}` : null
   // Switching kinds inside a preset dialog keeps what was typed.
   const sameOpening = Boolean(preset && shown && key && shown.split(":").slice(1).join(":") === key.split(":").slice(1).join(":"))
   if (key !== shown) {
     setShown(key)
+    if (kind === null) setFromPicker(false)
+    else if (kind === "") setFromPicker(true)
     setModel("")
     setEffort("")
     setLimits(NO_LIMITS)
@@ -211,18 +219,79 @@ export function SpawnDialog({
     }
   }
 
+  const spawnableKinds = KINDS.filter((item) => item.spawn)
+    .map((item) => {
+      const adapter = adapters?.find((a) => a.name === item.id)
+      const installed = adapter ? adapter.installed : true
+      return { item, installed }
+    })
+    .sort((a, b) => Number(b.installed) - Number(a.installed) || Number(Boolean(b.item.core)) - Number(Boolean(a.item.core)))
+
   return (
     <Dialog open={kind !== null} onOpenChange={(open) => !open && onClose()}>
       <DialogContent className="max-h-[calc(100dvh-2rem)] overflow-y-auto sm:max-w-md">
+        {picking ? (
+          <>
+            <DialogHeader>
+              <DialogTitle>添加 AI</DialogTitle>
+              <DialogDescription>先选择一个要加入房间的 Agent 软件，再配置名字与模型。</DialogDescription>
+            </DialogHeader>
+            <div className="grid grid-cols-2 gap-2">
+              {spawnableKinds.map(({ item, installed }) => (
+                <button
+                  key={item.id}
+                  type="button"
+                  disabled={!installed}
+                  title={installed ? `新建 ${item.harness} 会话` : `本机未检测到 ${item.harness}`}
+                  className="flex items-center gap-2.5 rounded-xl border border-border bg-background/60 px-3 py-2.5 text-left transition-colors enabled:hover:border-foreground/30 enabled:hover:bg-muted/60 disabled:cursor-not-allowed disabled:opacity-45"
+                  onClick={() => onKind?.(item.id)}
+                >
+                  <span className="size-2.5 shrink-0 rounded-full" style={{ background: item.color }} aria-hidden="true" />
+                  <span className="min-w-0 flex-1">
+                    <span className="block truncate text-sm font-medium">{item.label}</span>
+                    <span className="block truncate text-[0.6875rem] text-muted-foreground">
+                      {installed ? item.harness : "未安装"}
+                    </span>
+                  </span>
+                </button>
+              ))}
+            </div>
+            {onJoin ? (
+              <div className="flex items-center justify-between border-t border-border/60 pt-3 text-xs text-muted-foreground">
+                <span>已有正在运行的会话或其他客户端？</span>
+                <button
+                  type="button"
+                  className="inline-flex items-center gap-1 font-medium text-foreground hover:underline"
+                  onClick={() => onJoin()}
+                >
+                  <Plug className="size-3.5" />
+                  接入已有会话
+                </button>
+              </div>
+            ) : null}
+          </>
+        ) : (
+          <>
         <DialogHeader>
           <DialogTitle className="flex items-center gap-2">
+            {fromPicker && !preset ? (
+              <button
+                type="button"
+                className="-ml-1 grid size-6 place-items-center rounded-md text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
+                title="重选 Agent 软件"
+                aria-label="重选 Agent 软件"
+                onClick={() => onKind?.("")}
+              >
+                <ArrowLeft className="size-4" />
+              </button>
+            ) : null}
             <span>{preset ? preset.title : "开新会话"}</span>
             {!preset && info ? <span className="text-xs font-normal text-muted-foreground">{info.label}</span> : null}
           </DialogTitle>
           <DialogDescription>
             {preset
               ? preset.note
-              : kind && kind !== "claude" && kind !== "cursor"
+              : kind && kind !== "claude" && kind !== "cursor" && kind !== "antigravity"
                 ? "后台建好会话并入座（约十余秒），之后直接 @ 它。"
                 : "后台建好会话直接入座，首次点名时启动。"}
           </DialogDescription>
@@ -398,6 +467,8 @@ export function SpawnDialog({
             </Button>
           </DialogFooter>
         </form>
+          </>
+        )}
       </DialogContent>
       {picker.dialog}
     </Dialog>

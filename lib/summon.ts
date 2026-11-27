@@ -1,5 +1,5 @@
 import { spawn, type ChildProcessByStdio } from "node:child_process"
-import { unlinkSync, writeFileSync } from "node:fs"
+import { mkdirSync, unlinkSync, writeFileSync } from "node:fs"
 import os from "node:os"
 import path from "node:path"
 import type { Readable, Writable } from "node:stream"
@@ -19,6 +19,7 @@ import { accepting, deliver, openTerminal } from "@/lib/terminal"
 import { onTerminalClosed, terminalOpen } from "@/lib/terminal-state"
 import { activeRun, endRun, getRun, markResumed, pendingResumes, putStep, setLimited, startRun, takeUnannounced } from "@/lib/runs"
 import {
+  adoptPendingSession,
   agentState,
   bindProject,
   CATCH_UP_CHARS,
@@ -837,6 +838,29 @@ function buildWake(agent: NonNullable<ReturnType<typeof agentState>>, promptText
 // is read line by line as it comes: each step goes into the run log (the
 // 「过程」 panel) and the seat line shows the current one; `out` is the
 // final answer.
+function syncAdoptedMcpState(adopted: NonNullable<ReturnType<typeof adoptPendingSession>>, agentId: string) {
+  try {
+    const dir = path.join(process.env.XDG_STATE_HOME || path.join(os.homedir(), ".local", "state"), "bench-mcp")
+    mkdirSync(dir, { recursive: true })
+    try {
+      unlinkSync(path.join(dir, `${adopted.agentName}-${adopted.oldSession}.json`))
+    } catch {}
+    const body = JSON.stringify({
+      agentId,
+      token: adopted.token,
+      name: adopted.name,
+      project: adopted.project,
+      cursor: snapshot().seq,
+    })
+    writeFileSync(path.join(dir, `${adopted.agentName}-${adopted.session}.json`), body, { mode: 0o600 })
+    writeFileSync(
+      path.join(dir, `${adopted.agentName}-name-${Buffer.from(`${adopted.project}/${adopted.name}`).toString("hex")}.json`),
+      body,
+      { mode: 0o600 },
+    )
+  } catch {}
+}
+
 function launch(
   agent: NonNullable<ReturnType<typeof agentState>>,
   command: string,
@@ -845,7 +869,7 @@ function launch(
   done: (result: { out: string; failure?: string; stopped?: boolean; lost?: boolean }) => void,
   // The client's first output: it has the wake.
   first?: () => void,
-  opts?: { promptFile?: string },
+  opts?: { promptFile?: string; startedLink?: { agentName?: string; session?: string } },
 ) {
   const parser = createParser()
   const decoder = new StringDecoder("utf8")
@@ -855,6 +879,7 @@ function launch(
   let finished = false
   let shownAt = 0
   let endedTimer: NodeJS.Timeout | undefined
+  let adopted = false
   const take = bindProject((line: string) => {
     const wasEnded = parser.ended()
     for (const step of parser.feed(line)) {
@@ -863,6 +888,17 @@ function launch(
       if (text && Date.now() - shownAt >= LIVE_GAP_MS) {
         shownAt = Date.now()
         live(text)
+      }
+    }
+    if (!adopted && agent.session?.startsWith("pending-")) {
+      const real = parser.sessionId()
+      if (real) {
+        const saved = adoptPendingSession(agent.id, real)
+        if (saved) {
+          adopted = true
+          if (opts?.startedLink) opts.startedLink.session = real
+          syncAdoptedMcpState(saved, agent.id)
+        }
       }
     }
     // Its turn is over. Give the process a moment to exit on its own; if it
@@ -1294,7 +1330,7 @@ function run(agentId: string) {
     )
     seat.settle()
     run(agentId)
-  }, () => note(queue.calls, agentId, "picked", { from: ["started"], run: log.id }), { promptFile })
+  }, () => note(queue.calls, agentId, "picked", { from: ["started"], run: log.id }), { promptFile, startedLink })
 }
 
 // The error step the client's own stream ended on, if any (lib/events.ts).
@@ -2132,7 +2168,7 @@ function setGoal(agent: NonNullable<ReturnType<typeof agentState>>, adapter: Ada
     endRun(log, failure || stopped ? "failed" : "done", stopped ? "被你停下了" : failure ? `没成功：${failure}` : undefined)
     seat.settle()
     run(agent.id)
-  }, undefined, { promptFile })
+  }, undefined, { promptFile, startedLink })
 }
 
 export function requestGoal(agentId: string, input: unknown) {
@@ -2199,7 +2235,7 @@ function answerWhisper(agent: NonNullable<ReturnType<typeof agentState>>, text: 
     endRun(log, failure || stopped ? "failed" : "done", stopped ? "被停下了" : failure ? `没成功：${failure}` : undefined)
     seat.settle()
     run(agent.id)
-  }, undefined, { promptFile })
+  }, undefined, { promptFile, startedLink })
 }
 
 function wakeable(agentId: string) {

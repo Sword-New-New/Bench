@@ -59,6 +59,8 @@ const serverArgs = [
   "-c",
   `mcp_servers.bench.env.BENCH_UUID="${thread}"`,
   "-c",
+  `mcp_servers.bench.env.BENCH_URL="${room}"`,
+  "-c",
   'mcp_servers.bench.default_tools_approval_mode="approve"',
   ...(compactAt ? ["-c", `model_auto_compact_token_limit=${compactAt}`] : []),
 ]

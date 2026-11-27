@@ -12,6 +12,13 @@ set -euo pipefail
 id="${1:?缺少 conversation id}"
 shift
 
+is_pending=0
+conv_args=(--conversation "$id")
+if [[ "$id" == pending-* ]]; then
+  is_pending=1
+  conv_args=()
+fi
+
 desk="$HOME/.gemini/antigravity"
 cli="$HOME/.gemini/antigravity-cli"
 src="$desk/conversations/$id.db"
@@ -44,7 +51,7 @@ if [[ -f "${agy_bin}.mjs" ]] && grep -q "agentapi" "${agy_bin}.mjs" 2>/dev/null;
 fi
 
 cloned_now=""
-if [[ $desktop_bridge -eq 0 && -f "$src" && -n "$py" ]]; then
+if [[ $is_pending -eq 0 && $desktop_bridge -eq 0 && -f "$src" && -n "$py" ]]; then
   mkdir -p "$cli/conversations" "$cli/brain"
   py_src="$(py_path "$src")"
   py_dst="$(py_path "$cli/conversations/$id.db")"
@@ -116,6 +123,6 @@ if [[ -n "${BENCH_PROMPT_FILE:-}" && -f "$BENCH_PROMPT_FILE" ]] && ! grep -q "BE
       replaced+=("$arg")
     fi
   done
-  exec "$agy_bin" --conversation "$id" "${perm[@]}" "${replaced[@]}"
+  exec "$agy_bin" "${conv_args[@]}" "${perm[@]}" "${replaced[@]}"
 fi
-exec "$agy_bin" --conversation "$id" "${perm[@]}" "$@"
+exec "$agy_bin" "${conv_args[@]}" "${perm[@]}" "$@"

@@ -110,6 +110,7 @@ export function createParser() {
   // hours without the closing "result" (t_16ecccd4): lib/summon.ts ends it
   // after a quiet while. Any later event clears it.
   let repliedAt: number | undefined
+  let sessionId: string | undefined
   let lastError = ""
   let transientError = false
   let n = 0
@@ -284,7 +285,10 @@ export function createParser() {
     }
 
     // Antigravity: {"event": "step_update" | "result" | "error"}.
-    else if (event.event === "step_update") {
+    const agyConv = str(event.conversation_id) || str(obj(event.result).conversation_id)
+    if (agyConv && !sessionId) sessionId = agyConv
+
+    if (event.event === "step_update") {
       const step = obj(event.step_update)
       repliedAt = step.step_type === "agent_response" && step.state !== "ACTIVE" ? Date.now() : undefined
       const index = Number(step.step_index)
@@ -330,7 +334,14 @@ export function createParser() {
     return (afterTools.join("\n\n") || final || lastText).trim()
   }
 
-  return { feed, answer, ended: () => ended, repliedAt: () => (ended ? undefined : repliedAt), error: () => lastError }
+  return {
+    feed,
+    answer,
+    ended: () => ended,
+    repliedAt: () => (ended ? undefined : repliedAt),
+    error: () => lastError,
+    sessionId: () => sessionId,
+  }
 }
 
 // What the seat line says while a step runs.

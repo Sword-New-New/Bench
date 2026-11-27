@@ -1765,6 +1765,26 @@ export function rebindAgent(
   return { agent: present(agent), token: agent.token }
 }
 
+// Replace a lazy `pending-*` placeholder session with the real id returned on
+// the seat's first wake (e.g. Antigravity's conversation_id).
+export function adoptPendingSession(id: string, realSession: string) {
+  const clean = realSession.trim()
+  if (!clean || clean.startsWith("pending-")) return null
+  const agent = findAgent(id)
+  if (!agent || !agent.session?.startsWith("pending-")) return null
+  const oldSession = agent.session
+  agent.session = clean
+  roomChanged()
+  return {
+    agentName: agent.agentName ?? "",
+    oldSession,
+    session: clean,
+    token: agent.token,
+    name: agent.name,
+    project: currentProject(),
+  }
+}
+
 export function restoreAgentBinding(id: string, index: number) {
   const agent = findAgent(id)
   if (!agent) throw new ApiError(404, "这个席位不在了")

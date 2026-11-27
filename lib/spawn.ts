@@ -454,7 +454,10 @@ async function createClientSession(
   pick: string | null,
 ) {
   if (kindId === "dsh") return newDshSession(dir, about, pick)
-  if (kindId === "antigravity") return newAgySession(dir, about, pick)
+  if (kindId === "antigravity") {
+    if (!installed("agy")) throw new ApiError(501, "没找到 agy，先装 Antigravity 的命令行")
+    return `pending-${randomUUID()}`
+  }
   if (kindId === "codex") return newCodexSession(dir, about, pick)
   if (kindId === "cursor") return newCursorSession(dir)
   if (kindId === "codebuddy" || kindId === "workbuddy") return newBuddySession(kindId, dir, about, pick)

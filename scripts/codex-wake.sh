@@ -67,6 +67,9 @@ fi
 if [[ "${BENCH_COMPACT_WINDOW:-}" =~ ^[0-9]+$ ]]; then
   pick+=(-c "model_auto_compact_token_limit=$BENCH_COMPACT_WINDOW")
 fi
+if [[ -n "${BENCH_URL:-}" ]]; then
+  pick+=(-c "mcp_servers.bench.env.BENCH_URL=\"$BENCH_URL\"")
+fi
 # Nobody can be asked on this path (only codex-app.mjs puts approvals on the
 # page), so it may write in its workspace and nothing more.
 pick+=(-c 'sandbox_mode="workspace-write"' -c 'approval_policy="never"')

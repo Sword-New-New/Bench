@@ -279,7 +279,9 @@
  */
 [data-slot="dialog-content"]::after {
   content: "";
-  position: absolute;
+  /* fixed stays anchored to the popup's padding box (via its translate) so
+     scrollable dialogs (overflow-y-auto) don't scroll the rim across content. */
+  position: fixed;
   inset: 0;
   border-radius: inherit;
   padding: 1px;

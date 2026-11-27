@@ -2,7 +2,7 @@ import { copyFileSync, existsSync, mkdirSync, readdirSync, readFileSync, renameS
 import path from "node:path"
 import { DatabaseSync, type StatementSync } from "node:sqlite"
 
-import type { Message, Run, RunStep, SeatBinding, SeatProfile, Task } from "@/lib/types"
+import type { Message, Run, RunStep, SeatBinding, SeatProfile, Task, Workflow } from "@/lib/types"
 
 // Central SQLite store (WAL + FTS5) replacing whole-file JSON rewrites and
 // hard array caps (400 messages / 200 tasks / 80 runs). Uses Node 24's built-in
@@ -27,6 +27,7 @@ type DbBundle = {
   stmts: Map<string, StatementSync>
   // ensureSchemaColumns has run on this connection.
   columns?: boolean
+  schemaVer?: number
 }
 
 type LegacyRoomGlobal = typeof globalThis & {
@@ -39,6 +40,18 @@ type LegacyRoomGlobal = typeof globalThis & {
   __benchRuns?: Run[]
   __benchUserName?: string
 }
+
+const SCHEMA_VERSION = 2
+const WORKFLOW_SCHEMA_SQL = `
+CREATE TABLE IF NOT EXISTS workflows (
+  id TEXT PRIMARY KEY,
+  project_id TEXT NOT NULL,
+  sort_order INTEGER NOT NULL DEFAULT 0,
+  data_json TEXT NOT NULL,
+  FOREIGN KEY(project_id) REFERENCES projects(id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_workflows_project ON workflows(project_id, sort_order);
+`
 
 const SCHEMA_SQL = `
 CREATE TABLE IF NOT EXISTS meta (
@@ -181,6 +194,7 @@ CREATE TABLE IF NOT EXISTS lane_queue (
   created_at INTEGER NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_lane_queue_agent ON lane_queue(agent_id, seq);
+${WORKFLOW_SCHEMA_SQL}
 `
 
 function bundle(): DbBundle {
@@ -197,6 +211,11 @@ function bundle(): DbBundle {
       g.__benchSqlite.stmts.clear()
       g.__benchSqlite.columns = true
     }
+    if (g.__benchSqlite.schemaVer !== SCHEMA_VERSION) {
+      g.__benchSqlite.db.exec(WORKFLOW_SCHEMA_SQL)
+      g.__benchSqlite.stmts.clear()
+      g.__benchSqlite.schemaVer = SCHEMA_VERSION
+    }
     return g.__benchSqlite
   }
   if (g.__benchSqlite?.db.isOpen) {
@@ -212,7 +231,7 @@ function bundle(): DbBundle {
   db.exec("PRAGMA busy_timeout = 5000;")
   db.exec(SCHEMA_SQL)
   ensureSchemaColumns(db)
-  const created: DbBundle = { file: target, db, stmts: new Map(), columns: true }
+  const created: DbBundle = { file: target, db, stmts: new Map(), columns: true, schemaVer: SCHEMA_VERSION }
   g.__benchSqlite = created
   migrateLegacyJsonIfNeeded(created)
   cleanFtsResidue(db)
@@ -494,6 +513,22 @@ export function dbGetMeta(key: string): string | undefined {
 
 export function dbSetMeta(key: string, value: string) {
   stmt("INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)").run(key, value)
+}
+
+export function dbListWorkflows(projectId: string): Workflow[] {
+  return stmt("SELECT data_json FROM workflows WHERE project_id = ? ORDER BY sort_order, rowid")
+    .all(projectId).map((row) => JSON.parse(String(row.data_json)) as Workflow)
+}
+
+export function dbSaveWorkflow(workflow: Workflow) {
+  stmt(`INSERT INTO workflows (id, project_id, sort_order, data_json)
+    VALUES (?, ?, (SELECT COALESCE(MAX(sort_order), -1) + 1 FROM workflows WHERE project_id = ?), ?)
+    ON CONFLICT(id) DO UPDATE SET data_json = excluded.data_json WHERE workflows.project_id = excluded.project_id`)
+    .run(workflow.id, workflow.projectId, workflow.projectId, JSON.stringify(workflow))
+}
+
+export function dbDeleteWorkflow(projectId: string, id: string) {
+  stmt("DELETE FROM workflows WHERE project_id = ? AND id = ?").run(projectId, id)
 }
 
 // ---- Project & Room persistence ----

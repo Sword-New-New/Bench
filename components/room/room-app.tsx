@@ -8,6 +8,7 @@ import { toast } from "sonner"
 import { AdaptersDialog } from "@/components/room/adapters-dialog"
 import { NameField } from "@/components/room/name-field"
 import { Composer } from "@/components/room/composer"
+import { WorkflowsDialog } from "@/components/room/workflows-dialog"
 import { draft, useDraft } from "@/components/room/draft"
 import { Ambient, FLOW_EVENT, flowOn, setFlow } from "@/components/room/ambient"
 import { FONT_SIZES, setFontSize, useFontSize, type FontSizeId } from "@/components/room/font-size"
@@ -224,6 +225,10 @@ export function RoomApp() {
     return () => window.removeEventListener(EDIT_EVENT, edit)
   }, [])
   const [reply, setReply] = useState<Message | null>(null)
+  const [workflowsOpen, setWorkflowsOpen] = useState(false)
+  const [workflowPick, setWorkflowPick] = useState<{ projectId: string; id: string } | null>(null)
+  const selectedWorkflow = workflowPick?.projectId === room?.project.id
+    ? room?.workflows?.find((item) => item.id === workflowPick?.id) ?? null : null
   const [focusId, setFocusId] = useState<string | null>(null)
   const [joinOpen, setJoinOpen] = useState(false)
   const [firstDone, setFirstDone] = useState(false)
@@ -664,7 +669,27 @@ export function RoomApp() {
 
   // A slash command from the input (lib/commands.ts): to each seat @'d in it,
   // through the seat actions; nothing is said in the room.
+  function sendWorkflow(input: { id?: string; command?: string; text: string; targets?: string[] }) {
+    if (!input.text) return void toast.error("先写上要做什么")
+    void run(async () => {
+      await api("/api/v1/workflows", {
+        method: "POST",
+        body: JSON.stringify({ as: "human", action: "run", ...input, replyTo: reply?.id,
+          attachments: files.map(({ kind, name, path }) => ({ kind, name, path })),
+        }),
+      })
+      for (const item of files) if (item.preview) URL.revokeObjectURL(item.preview)
+      setFiles([])
+      draft.set("")
+      setReply(null)
+    })
+  }
+
   function sendSlash({ command, targets: named, text }: NonNullable<ReturnType<typeof parseSlash>>) {
+    if (command.mode === "workflow") {
+      sendWorkflow({ id: command.workflowId, command: command.name, text, targets: named })
+      return
+    }
     // At the front desk there is one seat to mean: no @ needed.
     const sole = room?.project.front ? deskSeat(agents)?.name : undefined
     const targets = named.length === 0 && sole ? [sole] : named
@@ -1283,6 +1308,10 @@ export function RoomApp() {
             {/* Over the thread, in the blank to its left; lets the scroll through. */}
             {!simple && view === "chat" && !desk ? <Trajectory agents={agents} messages={visibleMessages} onOpenRun={setRunId} /> : null}
             <DraftComposer
+              workflows={room.workflows ?? []}
+              workflow={selectedWorkflow}
+              onWorkflow={(item) => setWorkflowPick(item ? { projectId: room.project.id, id: item.id } : null)}
+              onManageWorkflows={() => setWorkflowsOpen(true)}
               placeholder={room.project.front ? frontHint(agents) : undefined}
               sole={room.project.front ? deskSeat(agents)?.name : undefined}
               agents={agents}
@@ -1336,9 +1365,14 @@ export function RoomApp() {
                 const slash = parseSlash(
                   text,
                   agents.map((agent) => agent.name),
+                  room.workflows,
                 )
                 if (slash) {
                   sendSlash(slash)
+                  return
+                }
+                if (selectedWorkflow) {
+                  sendWorkflow({ id: selectedWorkflow.id, text })
                   return
                 }
                 const attachments = files.map(({ kind, name, path }) => ({ kind, name, path }))
@@ -1565,6 +1599,9 @@ export function RoomApp() {
       <ModelDialog agent={agents.find((agent) => agent.id === modelId) ?? null} onClose={() => setModelId(null)} />
       <CommitDialog />
       <PushDialog />
+      {room ? <WorkflowsDialog key={room.project.id} open={workflowsOpen} onOpenChange={setWorkflowsOpen}
+        workflows={room.workflows ?? []} agents={agents}
+        onChanged={() => { void api<RoomSnapshot>("/api/v1/room").then(setRoom).catch((err: unknown) => toast.error(err instanceof Error ? err.message : "刷新失败")) }} /> : null}
       <WhisperDialog
         agent={agents.find((agent) => agent.id === whisperId) ?? null}
         onClose={() => setWhisperId(null)}

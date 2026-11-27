@@ -1,19 +1,20 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react"
-import { File, Folder, Paperclip, Send, X } from "lucide-react"
+import { File, Folder, GitBranch, Paperclip, Send, X } from "lucide-react"
 import { toast } from "sonner"
 
 import { PendingFiles, pathsToPending, previewText, uploadFile, type Pending } from "@/components/room/attachments"
 import { Avatar, seatLook } from "@/components/room/bits"
 import { usePathPicker } from "@/components/room/folder-picker"
 import { Reveal } from "@/components/room/reveal"
+import { workflowLine } from "@/components/room/workflows-dialog"
 import { Button } from "@/components/ui/button"
-import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from "@/components/ui/dropdown-menu"
+import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuSeparator, DropdownMenuTrigger } from "@/components/ui/dropdown-menu"
 import { Label } from "@/components/ui/label"
 import { Textarea } from "@/components/ui/textarea"
-import { SLASH_COMMANDS, parseSlash } from "@/lib/commands"
+import { slashCommands, parseSlash } from "@/lib/commands"
 import { KINDS, kindOf } from "@/lib/kinds"
 import { escapeRegExp, insertMention, mentionedAgentIds, unknownMentions } from "@/lib/text"
-import type { Message, PublicAgent } from "@/lib/types"
+import type { Message, PublicAgent, Workflow } from "@/lib/types"
 
 export const DOCK_EVENT = "bench-dock"
 
@@ -36,6 +37,10 @@ export function Composer({
   speakers = [],
   placeholder,
   sole,
+  workflows = [],
+  workflow,
+  onWorkflow,
+  onManageWorkflows,
 }: {
   agents: PublicAgent[]
   value: string
@@ -57,6 +62,10 @@ export function Composer({
   // The one seat everything said here goes to (the front desk): a command
   // needs no @.
   sole?: string
+  workflows?: Workflow[]
+  workflow?: Workflow | null
+  onWorkflow?: (workflow: Workflow | null) => void
+  onManageWorkflows?: () => void
 }) {
   const [picked, setPicked] = useState(false)
   const [dragging, setDragging] = useState(false)
@@ -147,12 +156,13 @@ export function Composer({
       : agents.filter((agent) => agent.name.toLowerCase().includes(query.toLowerCase())).slice(0, 6)
   // Typing a command's name at the very start: the commands that fit.
   // (After any @s in front of it, too.)
-  const slashQuery = value.match(/^(?:@\S+\s+)*\/([a-z]*)$/)?.[1] ?? null
+  const slashQuery = value.match(/^(?:@\S+\s+)*\/([a-z0-9-]*)$/)?.[1] ?? null
   const slashMatches =
-    slashQuery === null ? [] : SLASH_COMMANDS.filter((item) => item.name.startsWith(slashQuery) && item.name !== slashQuery)
+    slashQuery === null ? [] : slashCommands(workflows).filter((item) => item.name.startsWith(slashQuery) && item.name !== slashQuery)
   const slash = parseSlash(
     value,
     agents.map((agent) => agent.name),
+    workflows,
   )
   const unknown = unknownMentions(
     value,
@@ -161,7 +171,7 @@ export function Composer({
   // Said to nobody and answering nothing, the room sends it to the last AI
   // that spoke here (lib/store.ts say, t_bd01d3c1): say who before it goes.
   const fallback =
-    reply || slash || mentionedAgentIds(value, agents).length
+    reply || slash || workflow || mentionedAgentIds(value, agents).length
       ? undefined
       : agents.find((agent) => agent.id === speakers.find((id) => agents.some((seat) => seat.id === id && !seat.demo)))
 
@@ -185,7 +195,7 @@ export function Composer({
   const ordered = upFront(chips.sort(targets), recent)
 
   function insertCommand(name: string) {
-    onChange(value.replace(/\/[a-z]*$/, `/${name} `))
+    onChange(value.replace(/\/[a-z0-9-]*$/, `/${name} `))
     inputRef.current?.focus()
   }
 
@@ -245,6 +255,13 @@ export function Composer({
           addBlobs(event.dataTransfer.files)
         }}
       >
+        {workflow ? (
+          <div className="flex items-start gap-2 border-b border-foreground/8 px-3.5 py-2 text-xs">
+            <GitBranch className="mt-0.5 size-3.5 shrink-0" />
+            <div className="min-w-0 flex-1"><p className="font-medium">按「{workflow.name}」发送</p><p className="mt-0.5 break-words text-muted-foreground">{workflowLine(workflow)}</p></div>
+            <button type="button" aria-label="取消工作流模式" className="rounded p-1 hover:bg-muted" onClick={() => onWorkflow?.(null)}><X className="size-3.5" /></button>
+          </div>
+        ) : null}
         <Reveal open={reply !== null}>
           {reply ? (
             <div className="flex items-center gap-2 border-b border-foreground/8 px-3.5 py-2 text-xs text-muted-foreground">
@@ -363,6 +380,17 @@ export function Composer({
               </DropdownMenuItem>
             </DropdownMenuContent>
           </DropdownMenu>
+          {onManageWorkflows ? (
+            <DropdownMenu>
+              <DropdownMenuTrigger aria-label="工作流" title="按保存的分工发送" className="grid size-8 shrink-0 place-items-center rounded-full text-muted-foreground transition-colors hover:bg-foreground/6 hover:text-foreground aria-expanded:bg-foreground/6"><GitBranch className="size-4" /></DropdownMenuTrigger>
+              <DropdownMenuContent side="top" align="start" className="max-h-80 max-w-[calc(100vw-2rem)] overflow-y-auto">
+                <DropdownMenuItem onClick={() => onWorkflow?.(null)}>普通对话</DropdownMenuItem>
+                {workflows.map((item) => <DropdownMenuItem key={item.id} onClick={() => onWorkflow?.(item)}><div className="min-w-0"><p>{item.name}</p><p className="break-words text-xs text-muted-foreground">{workflowLine(item)}</p></div></DropdownMenuItem>)}
+                <DropdownMenuSeparator />
+                <DropdownMenuItem onClick={onManageWorkflows}>管理工作流…</DropdownMenuItem>
+              </DropdownMenuContent>
+            </DropdownMenu>
+          ) : null}
           <div className="-my-1.5 flex min-w-0 flex-1 items-center overflow-x-auto py-1.5">
             <span className="shrink-0 px-1 text-xs text-muted-foreground">发给</span>
             {ordered.map(({ kind, seat, label }) => (
@@ -410,6 +438,8 @@ export function Composer({
         <p className="pill mx-auto mt-1.5 w-fit max-w-3xl rounded-full px-3 py-0.5 text-[0.6875rem] text-muted-foreground">
           {slash === null
             ? null
+            : slash.command.mode === "workflow"
+              ? `/${slash.command.name}：${slash.command.about}${slash.text ? "" : ` · 后面写上${slash.command.hint || "需求"}`}`
             : slash.targets.length === 0 && !sole
               ? `/${slash.command.name} 要发给谁？@ 一个席位，或点下面的名字`
               : slash.command.needsText && !slash.text

@@ -193,6 +193,8 @@ export type Message = {
   authorColor: string
   authorDemo: boolean
   text: string
+  // Exact wake targets for a workflow launch; quoted @s and replyTo are context.
+  workflow?: { id: string; kind: WorkflowKind; targets: string[] }
   // When the room itself wakes a seat to carry on (lib/continue.ts), `text` is
   // the short one-line note shown in the thread while `wakeText` is the fuller
   // instruction handed to that seat.
@@ -525,8 +527,27 @@ export type PermitRequest = {
   at: number
 }
 
+export type WorkflowKind = "orchestrate" | "plan" | "explore"
+
+export type Workflow = {
+  id: string
+  projectId: string
+  name: string
+  kind: WorkflowKind
+  command?: string
+  lead?: string
+  workers?: string[]
+  summarizer?: string
+  planners?: string[]
+  explorers?: string[]
+  note?: string
+  createdAt: number
+  updatedAt: number
+}
+
 export type RoomSnapshot = {
   project: ProjectInfo
+  workflows: Workflow[]
   agents: PublicAgent[]
   messages: Message[]
   tasks: Task[]

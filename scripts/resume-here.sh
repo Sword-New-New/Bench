@@ -24,6 +24,21 @@ for root in "${roots[@]}"; do
   fi
 done
 if [[ -z "$file" ]]; then
+  # Lazy first wake for CodeBuddy / WorkBuddy: create the session under the room's
+  # chosen UUID in BENCH_NEW_DIR instead of requiring a pre-created transcript file.
+  if [[ -n "${BENCH_NEW_DIR:-}" && -d "$BENCH_NEW_DIR" ]]; then
+    export BENCH_CONFIG_DIR="${roots[0]/#\~/$HOME}"
+    cd "$BENCH_NEW_DIR"
+    replaced=()
+    for arg in "$@"; do
+      if [[ "$arg" == "-r" ]]; then
+        replaced+=(--session-id)
+      else
+        replaced+=("$arg")
+      fi
+    done
+    exec "${replaced[@]}"
+  fi
   echo "在 $dirs 里找不到会话 $session" >&2
   exit 2
 fi

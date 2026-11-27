@@ -284,10 +284,15 @@ export function createParser() {
       noteError(steps, now, raw, retry, "stream-error")
     }
 
-    // Antigravity: {"event": "step_update" | "result" | "error"}.
-    const agyConv = str(event.conversation_id) || str(obj(event.result).conversation_id)
-    if (agyConv && !sessionId) sessionId = agyConv
+    // Capture real session/thread/conversation id for lazy `pending-*` seats.
+    const foundId =
+      str(event.conversation_id) ||
+      str(obj(event.result).conversation_id) ||
+      str(event.thread_id) ||
+      str(event.session_id)
+    if (foundId && !foundId.startsWith("pending-") && !sessionId) sessionId = foundId
 
+    // Antigravity: {"event": "step_update" | "result" | "error"}.
     if (event.event === "step_update") {
       const step = obj(event.step_update)
       repliedAt = step.step_type === "agent_response" && step.state !== "ACTIVE" ? Date.now() : undefined

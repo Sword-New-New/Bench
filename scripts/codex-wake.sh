@@ -75,6 +75,18 @@ fi
 pick+=(-c 'sandbox_mode="workspace-write"' -c 'approval_policy="never"')
 [[ -n "$bin" ]] || { echo "没找到 codex，先装 Codex 的命令行或桌面端" >&2; exit 127; }
 export MSYS_NO_PATHCONV=1
+if [[ "$id" == pending-* ]]; then
+  if [[ -n "${BENCH_PROMPT_FILE:-}" && -f "$BENCH_PROMPT_FILE" && ${#text} -gt 24000 ]]; then
+    exec "$bin" exec --skip-git-repo-check --json "${pick[@]}" \
+      -C "${BENCH_NEW_DIR:-$PWD}" \
+      -c 'mcp_servers.bench.default_tools_approval_mode="approve"' \
+      - < "$BENCH_PROMPT_FILE"
+  fi
+  exec "$bin" exec --skip-git-repo-check --json "${pick[@]}" \
+    -C "${BENCH_NEW_DIR:-$PWD}" \
+    -c 'mcp_servers.bench.default_tools_approval_mode="approve"' \
+    "$text" < /dev/null
+fi
 if [[ -n "${BENCH_PROMPT_FILE:-}" && -f "$BENCH_PROMPT_FILE" && ${#text} -gt 24000 ]]; then
   exec "$bin" exec resume --skip-git-repo-check --json "${pick[@]}" \
     -c "mcp_servers.bench.env.BENCH_UUID=\"$id\"" \

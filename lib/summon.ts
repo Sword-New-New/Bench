@@ -831,7 +831,17 @@ function buildWake(agent: NonNullable<ReturnType<typeof agentState>>, promptText
     }
     return { command, promptFile: file }
   }
-  return { command: commandFor(agentName, session, promptText, agent.modelPick, agent.effortPick) }
+  let command = commandFor(agentName, session, promptText, agent.modelPick, agent.effortPick)
+  // Lazy DeepSeek (`dsh`) session: first wake runs `dsh-agent exec` in the seat's
+  // workdir without the placeholder `pending-*` uuid, adopting the real thread_id.
+  if (command && agentName === "dsh" && session.startsWith("pending-")) {
+    const quotedId = `'${session.replaceAll("'", `'\\''`)}'`
+    const execCmd = command
+      .replace(/^(\s*dsh-agent\s+)resume\b/, "$1exec")
+      .replace(` ${quotedId} `, " ")
+    command = agent.workdir ? `cd ${JSON.stringify(agent.workdir)} && ${execCmd}` : execCmd
+  }
+  return { command }
 }
 
 // Runs one command on a seat's session and reports how it went. Its output

@@ -289,11 +289,7 @@ export function SpawnDialog({
             {!preset && info ? <span className="text-xs font-normal text-muted-foreground">{info.label}</span> : null}
           </DialogTitle>
           <DialogDescription>
-            {preset
-              ? preset.note
-              : kind && kind !== "claude" && kind !== "cursor" && kind !== "antigravity"
-                ? "后台建好会话并入座（约十余秒），之后直接 @ 它。"
-                : "后台建好会话直接入座，首次点名时启动。"}
+            {preset ? preset.note : "后台建好会话直接入座，首次点名时启动。"}
           </DialogDescription>
         </DialogHeader>
         <form

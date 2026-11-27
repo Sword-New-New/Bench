@@ -12,7 +12,7 @@ import { readFileSync } from "node:fs"
 import { createInterface } from "node:readline"
 import { findCodex } from "./codex-bin.mjs"
 
-const [thread, rawText] = process.argv.slice(2)
+let [thread, rawText] = process.argv.slice(2)
 const text =
   process.env.BENCH_PROMPT_FILE
     ? readFileSync(process.env.BENCH_PROMPT_FILE, "utf8")
@@ -386,12 +386,24 @@ try {
   const full = await fullNow()
   const policy = full ? "never" : key ? "on-request" : "never"
   const sandboxPolicy = full ? { type: "dangerFullAccess" } : { type: "workspaceWrite" }
-  await request("thread/resume", {
-    threadId: thread,
-    approvalPolicy: policy,
-    approvalsReviewer: "user",
-    sandbox: full ? "danger-full-access" : "workspace-write",
-  })
+  if (thread.startsWith("pending-")) {
+    const startedThread = await request("thread/start", {
+      cwd: process.env.BENCH_NEW_DIR || process.cwd(),
+      approvalPolicy: policy,
+      approvalsReviewer: "user",
+      sandbox: full ? "danger-full-access" : "workspace-write",
+    })
+    const realId = startedThread?.thread?.id || startedThread?.threadId || startedThread?.id
+    if (typeof realId !== "string" || !realId) throw new Error("codex thread/start 没返回 thread id")
+    thread = realId
+  } else {
+    await request("thread/resume", {
+      threadId: thread,
+      approvalPolicy: policy,
+      approvalsReviewer: "user",
+      sandbox: full ? "danger-full-access" : "workspace-write",
+    })
+  }
   out({ type: "thread.started", thread_id: thread })
   if (compacting) {
     await request("thread/compact/start", { threadId: thread })

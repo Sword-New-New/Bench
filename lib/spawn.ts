@@ -450,17 +450,29 @@ function asText(value: unknown, max: number) {
 async function createClientSession(
   kindId: string,
   dir: string,
-  about: { name: string; role: string; project: string },
-  pick: string | null,
+  _about: { name: string; role: string; project: string },
+  _pick: string | null,
 ) {
-  if (kindId === "dsh") return newDshSession(dir, about, pick)
+  if (kindId === "dsh") {
+    if (!installed("dsh-agent")) throw new ApiError(501, "没找到 dsh-agent，先装 DeepSeek 的命令行")
+    return `pending-${randomUUID()}`
+  }
   if (kindId === "antigravity") {
     if (!installed("agy")) throw new ApiError(501, "没找到 agy，先装 Antigravity 的命令行")
     return `pending-${randomUUID()}`
   }
-  if (kindId === "codex") return newCodexSession(dir, about, pick)
+  if (kindId === "codex") {
+    const bin = installed("codex") ? "codex" : bundledCodex()
+    if (!bin) throw new ApiError(501, "没找到 codex，先装 Codex 的命令行或桌面端")
+    return `pending-${randomUUID()}`
+  }
   if (kindId === "cursor") return newCursorSession(dir)
-  if (kindId === "codebuddy" || kindId === "workbuddy") return newBuddySession(kindId, dir, about, pick)
+  if (kindId === "codebuddy" || kindId === "workbuddy") {
+    const bundled = "/opt/apps/com.tencent.workbuddy/files/resources/app.asar.unpacked/cli/bin/codebuddy"
+    const bin = installed("codebuddy") ? "codebuddy" : kindId === "workbuddy" && isFile(bundled) ? bundled : null
+    if (!bin) throw new ApiError(501, "没找到 codebuddy，先装 CodeBuddy Code 的命令行（npm i -g @tencent-ai/codebuddy-code）")
+    return randomUUID()
+  }
   return randomUUID()
 }
 

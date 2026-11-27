@@ -578,7 +578,17 @@ const CHECK: Record<string, string> = {
 // not seem to vanish: who it called, what became of each call, and the one
 // line they answered with. It fades once the line belongs to a to-do's row
 // (or after five minutes).
-export function JustSaid({ messages, agents, digest }: { messages: Message[]; agents: PublicAgent[]; digest: Digest }) {
+export function JustSaid({
+  messages,
+  agents,
+  digest,
+  onOpenRun,
+}: {
+  messages: Message[]
+  agents: PublicAgent[]
+  digest: Digest
+  onOpenRun?: (runId: string) => void
+}) {
   const now = useTick(15_000)
   const onRows = useMemo(() => {
     const ids = new Set<string>()
@@ -603,12 +613,33 @@ export function JustSaid({ messages, agents, digest }: { messages: Message[]; ag
               <span className="shrink-0 font-medium text-foreground">你刚说的</span>
               <span className="min-w-0 truncate">{message.text.replace(/\s+/g, " ")}</span>
             </p>
-            <p className="mt-0.5 flex min-w-0 items-center gap-x-3 text-[0.6875rem] text-muted-foreground">
-              {calls.map((call) => (
-                <span key={call.id} className="shrink-0">
-                  {call.name} · {CALL[call.state] ?? call.state}
-                </span>
-              ))}
+            <p className="mt-0.5 flex min-w-0 flex-wrap items-center gap-x-3 gap-y-0.5 text-[0.6875rem] text-muted-foreground">
+              {calls.map((call) => {
+                const isFailed = call.state === "failed"
+                const label = `${call.name} · ${CALL[call.state] ?? call.state}${
+                  isFailed && call.note ? `（${call.note.length > 40 ? `${call.note.slice(0, 40)}…` : call.note}）` : ""
+                }`
+                if (onOpenRun && call.runId) {
+                  return (
+                    <button
+                      key={call.id}
+                      type="button"
+                      onClick={() => call.runId && onOpenRun(call.runId)}
+                      className={`shrink-0 cursor-pointer underline decoration-current/35 underline-offset-2 hover:decoration-current ${
+                        isFailed ? "text-red-600 dark:text-red-400" : call.state === "retrying" ? "text-amber-700 dark:text-amber-300" : ""
+                      }`}
+                      title={[call.note, "点击查看过程"].filter(Boolean).join(" · ")}
+                    >
+                      {label}
+                    </button>
+                  )
+                }
+                return (
+                  <span key={call.id} className={`shrink-0 ${isFailed ? "text-red-600 dark:text-red-400" : ""}`} title={call.note}>
+                    {label}
+                  </span>
+                )
+              })}
               {answer ? (
                 <span className="min-w-0 truncate text-foreground">
                   {answer.authorName}：{answer.gist?.text ?? gistOf(answer.text) ?? answer.text.replace(/\s+/g, " ").slice(0, 80)}

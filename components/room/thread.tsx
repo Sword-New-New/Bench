@@ -901,7 +901,7 @@ function ChainLine({
           )
         ) : null}
         <Reached message={message} />
-        <Calls message={message} />
+        <Calls message={message} onOpenRun={onOpenRun} />
         <div className="mt-0.5 -ml-1 flex items-center gap-1">
           {sum.info ? <SummaryButton state={sum} node={() => row.current} /> : <FoldButton fold={fold} />}
           {message.runId ? (
@@ -1078,7 +1078,7 @@ function MessageRow({
         </p>
       )
     }
-    return <LimitedCard message={message} />
+    return <LimitedCard message={message} onOpenRun={onOpenRun} />
   }
 
   if (message.relay?.kind === "batch") return <BatchCard message={message} />
@@ -1099,10 +1099,30 @@ function MessageRow({
   }
 
   if (message.kind === "system") {
+    const isFailure = /没成功|失败|网络错误|余额不足|出错/.test(message.text)
     return (
-      <p className="my-2 self-center rounded-full bg-muted px-3 py-1 text-center text-xs leading-5 text-muted-foreground">
-        {message.text}
-      </p>
+      <div
+        className={`my-2 flex max-w-full flex-wrap items-center justify-center gap-2 self-center rounded-full px-3 py-1 text-center text-xs leading-5 ${
+          isFailure
+            ? "border border-destructive/25 bg-destructive/10 text-destructive dark:text-red-300"
+            : "bg-muted text-muted-foreground"
+        }`}
+      >
+        <span className="break-words">{message.text}</span>
+        {message.runId ? (
+          <button
+            type="button"
+            onClick={() => message.runId && onOpenRun(message.runId)}
+            className={`shrink-0 cursor-pointer rounded-full px-2 py-0.5 text-[0.6875rem] font-medium underline-offset-2 hover:underline ${
+              isFailure
+                ? "bg-destructive/15 text-destructive hover:bg-destructive/25 dark:text-red-200"
+                : "bg-background/70 text-foreground hover:bg-background"
+            }`}
+          >
+            查看过程
+          </button>
+        ) : null}
+      </div>
     )
   }
 
@@ -1174,7 +1194,7 @@ function MessageRow({
           ) : null}
           {message.attachments?.length ? <MessageFiles files={message.attachments} align="end" folded={folded(fold)} /> : null}
           {chat ? null : <Reached message={message} align="end" />}
-          <Calls message={message} align="end" />
+          <Calls message={message} align="end" onOpenRun={onOpenRun} />
           <div className="mt-1 flex items-center justify-end gap-2 text-[0.6875rem] text-muted-foreground">
             <FoldButton fold={fold} />
             <RecallButton message={message} />
@@ -1249,7 +1269,7 @@ function MessageRow({
           )
         ) : null}
         {chat ? null : <Reached message={message} />}
-        <Calls message={message} />
+        <Calls message={message} onOpenRun={onOpenRun} />
         <div className="mt-1 flex items-center gap-1">
           {sum.info ? <SummaryButton state={sum} node={() => row.current} /> : <FoldButton fold={fold} />}
           {message.runId ? (
@@ -1412,7 +1432,15 @@ const CALL_TONE = {
   flat: "text-muted-foreground",
 }
 
-function Calls({ message, align = "start" }: { message: Message; align?: "start" | "end" }) {
+function Calls({
+  message,
+  align = "start",
+  onOpenRun,
+}: {
+  message: Message
+  align?: "start" | "end"
+  onOpenRun: (runId: string) => void
+}) {
   if (message.recalled) return null
   // Handed over mid-run: the line above already says so.
   const reached = new Set((message.reached ?? []).map((item) => item.id))
@@ -1429,20 +1457,36 @@ function Calls({ message, align = "start" }: { message: Message; align?: "start"
         const look = CALL_LOOK[call.state]
         // Taken by the seat itself (its wait loop, its terminal): no wake of
         // the room's to watch, so not "working".
-        // A retry's note starts with which try it is: 「1/2，20 秒后再叫：…」.
+        // A retry's note starts with which try it is: 「1/2，网络错误，20 秒后再叫：…」.
         const text =
           call.state === "picked" && !call.runId
             ? "已取走"
             : call.state === "retrying"
               ? `${look.text} ${call.note?.match(/^\d+\/\d+/)?.[0] ?? ""}`.trim()
               : look.text
-        const why = call.state === "failed" && call.note ? `：${call.note.length > 28 ? `${call.note.slice(0, 28)}…` : call.note}` : ""
+        const why =
+          call.state === "failed" && call.note
+            ? `：${call.note.length > 64 ? `${call.note.slice(0, 64)}…` : call.note}`
+            : call.state === "retrying" && call.note
+              ? `（网络错误）`
+              : ""
+        const title = [call.note, clock(call.at)].filter(Boolean).join(" · ")
+        if (call.runId) {
+          return (
+            <button
+              key={call.id}
+              type="button"
+              onClick={() => call.runId && onOpenRun(call.runId)}
+              className={`${CALL_TONE[look.tone]} cursor-pointer text-left underline decoration-current/35 underline-offset-2 hover:decoration-current`}
+              title={title ? `${title}（点击查看过程）` : "点击查看过程"}
+            >
+              {call.name} {text}
+              {why}
+            </button>
+          )
+        }
         return (
-          <span
-            key={call.id}
-            className={CALL_TONE[look.tone]}
-            title={[call.note, clock(call.at)].filter(Boolean).join(" · ")}
-          >
+          <span key={call.id} className={CALL_TONE[look.tone]} title={title}>
             {call.name} {text}
             {why}
           </span>

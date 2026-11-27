@@ -284,6 +284,7 @@ function SectionCards({
           count={item.count}
           compact
           projectName={name}
+          onOpenRun={onOpenRun}
           onInspect={isFront ? () => openProjectAt(item.projectId) : undefined}
         />
       ))}

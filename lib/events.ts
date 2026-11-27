@@ -1,3 +1,4 @@
+import { unwrapErrorMessage } from "@/lib/limits"
 import { liveToolLine } from "@/lib/plain"
 import { baseName } from "@/lib/platform"
 import type { RunStep } from "@/lib/types"
@@ -109,8 +110,32 @@ export function createParser() {
   // hours without the closing "result" (t_16ecccd4): lib/summon.ts ends it
   // after a quiet while. Any later event clears it.
   let repliedAt: number | undefined
+  let lastError = ""
+  let transientError = false
   let n = 0
   const id = () => `s${++n}`
+
+  function noteError(steps: RunStep[], now: number, raw: string, retry: boolean, key: string) {
+    const clean = unwrapErrorMessage(raw)
+    if (!clean) return
+    lastError = clean
+    transientError = retry
+    steps.push({
+      id: key,
+      at: now,
+      kind: "note",
+      title: retry ? `网络重连中：${short(clean, 80)}` : short(clean, 100),
+      output: clean !== raw.trim() ? `${clean}\n\n原始报错：\n${raw.trim()}` : clean,
+      state: retry ? "running" : "failed",
+    })
+  }
+
+  function recoverTransient(steps: RunStep[], now: number) {
+    if (!transientError) return
+    lastError = ""
+    transientError = false
+    steps.push({ id: "stream-error", at: now, kind: "note", title: "网络重连后已恢复", state: "done" })
+  }
 
   function text(steps: RunStep[], value: string, key?: string) {
     const clean = value.trim()
@@ -184,6 +209,7 @@ export function createParser() {
       // and it said nothing (Fable 23:44, Opus1 23:55 on 2026-11-15).
     } else if (type === "result" || (typeof event.result === "string" && event.session_id)) {
       if (typeof event.result === "string") final = event.result
+      recoverTransient(steps, now)
       ended = true
     }
 
@@ -240,18 +266,24 @@ export function createParser() {
       } else if (event.item_type === "text") text(steps, str(event.text))
     } else if (type === "final") {
       final = str(event.text)
+      recoverTransient(steps, now)
       ended = true
     } else if (type === "turn.completed") {
       // Codex: the turn is over.
+      recoverTransient(steps, now)
       ended = true
     } else if (type === "turn.failed") {
       // Codex: the turn failed (the usage limit, say). Kept as a step so the
       // panel and the room can say why; not "ended", the process exits itself.
-      const message = str(obj(event.error).message)
-      if (message) steps.push({ id: "turn-failed", at: now, kind: "note", title: message, state: "failed" })
+      const message = str(obj(event.error).message) || str(event.message)
+      noteError(steps, now, message, false, "turn-failed")
+    } else if (type === "error") {
+      const raw = str(event.message) || str(obj(event.error).message)
+      const retry = event.retry === true || /^(?:Reconnecting|Retrying)\b/i.test(raw)
+      noteError(steps, now, raw, retry, "stream-error")
     }
 
-    // Antigravity: {"event": "step_update" | "result"}.
+    // Antigravity: {"event": "step_update" | "result" | "error"}.
     else if (event.event === "step_update") {
       const step = obj(event.step_update)
       repliedAt = step.step_type === "agent_response" && step.state !== "ACTIVE" ? Date.now() : undefined
@@ -273,8 +305,14 @@ export function createParser() {
         deltas.set(index, (deltas.get(index) ?? "") + str(step.text_delta))
         if (step.state !== "ACTIVE") text(steps, deltas.get(index) ?? "", `agy${index}`)
       }
+    } else if (event.event === "error") {
+      repliedAt = undefined
+      const raw = str(event.message) || str(obj(event.error).message)
+      const retry = event.retry === true || (event.retry !== false && /^API error \(attempt\b/i.test(raw))
+      noteError(steps, now, raw, retry, "stream-error")
     } else if (event.event === "result") {
       final = str(obj(event.result).response)
+      recoverTransient(steps, now)
       ended = true
     }
 
@@ -292,7 +330,7 @@ export function createParser() {
     return (afterTools.join("\n\n") || final || lastText).trim()
   }
 
-  return { feed, answer, ended: () => ended, repliedAt: () => (ended ? undefined : repliedAt) }
+  return { feed, answer, ended: () => ended, repliedAt: () => (ended ? undefined : repliedAt), error: () => lastError }
 }
 
 // What the seat line says while a step runs.
@@ -300,5 +338,6 @@ export function createParser() {
 export function liveLine(step: RunStep) {
   if (step.kind === "text") return `「${short(step.output ?? step.title, 40)}」`
   if (step.kind === "tool" && step.state === "running") return liveToolLine(step) ?? `正在${step.title}`
+  if (step.kind === "note" && step.state === "running") return short(step.title, 48)
   return null
 }

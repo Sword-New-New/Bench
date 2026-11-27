@@ -990,10 +990,23 @@ export function dbSaveRunMeta(run: Run) {
   const { steps: _steps, ...metaOnly } = run
   void _steps
   stmt(
-    `INSERT OR REPLACE INTO runs (
+    `INSERT INTO runs (
        id, agent_id, agent_name, project_id, purpose, state, started_at, ended_at,
        interrupted, announced, resumed_at, limited_resume_at, data_json
-     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+     ON CONFLICT(id) DO UPDATE SET
+       agent_id = excluded.agent_id,
+       agent_name = excluded.agent_name,
+       project_id = excluded.project_id,
+       purpose = excluded.purpose,
+       state = excluded.state,
+       started_at = excluded.started_at,
+       ended_at = excluded.ended_at,
+       interrupted = excluded.interrupted,
+       announced = excluded.announced,
+       resumed_at = excluded.resumed_at,
+       limited_resume_at = excluded.limited_resume_at,
+       data_json = excluded.data_json`,
   ).run(
     run.id,
     run.agentId,

@@ -1819,10 +1819,11 @@ export function setSeatModel(
   const agent = findAgent(id)
   if (!agent) throw new ApiError(404, "这个席位不在了")
   const sameModel = (agent.modelPick ?? null) === pick
+  const sameShown = !shown || agent.model === shown
   const sameEffort = (agent.effortPick ?? null) === effort
   const sameWindow = window === undefined || (agent.windowPick ?? null) === window
   const samePct = pct === undefined || (agent.compactPct ?? null) === pct
-  if (sameModel && sameEffort && sameWindow && samePct) return { agent: present(agent) }
+  if (sameModel && sameShown && sameEffort && sameWindow && samePct) return { agent: present(agent) }
   if (pick) agent.modelPick = pick
   else delete agent.modelPick
   if (effort) agent.effortPick = effort
@@ -1831,9 +1832,9 @@ export function setSeatModel(
   else if (window === null) delete agent.windowPick
   if (pct) agent.compactPct = pct
   else if (pct === null) delete agent.compactPct
-  agent.model = shown
+  if (shown) agent.model = clip(shown, 48)
   const said = [
-    sameModel ? "" : pick ? `用 ${clip(pick, 14)}` : "默认模型",
+    sameModel && sameShown ? "" : pick ? `用 ${clip(pick, 14)}` : shown ? `默认（${clip(shown, 12)}）` : "默认模型",
     sameEffort ? "" : effort ? `强度 ${effort}` : "默认强度",
     sameWindow ? "" : window ? `窗口 ${window / 10_000}万` : "默认窗口",
     samePct ? "" : pct ? `${pct}%压缩` : "默认压缩",
@@ -2073,7 +2074,7 @@ export function join(input: unknown) {
       throw new ApiError(409, `席位「${existing.name}」已切换到其他客户端会话，旧会话不能自动抢回；如需切回请在网页席位菜单操作`)
     }
     if (existing.name !== name) renameAgent(existing.id, name)
-    existing.model = model
+    existing.model = existing.modelPick ? clip(existing.modelPick, 48) : model
     existing.role = role
     existing.strengths = strengths
     if (link) {
@@ -2657,7 +2658,7 @@ export function relayClosed() {
   return room().state.relayClosed === true
 }
 
-export function postSystem(text: string) {
+export function postSystem(text: string, runId?: string) {
   const message = appendMessage({
     kind: "system",
     authorId: "room",
@@ -2666,6 +2667,7 @@ export function postSystem(text: string) {
     authorDemo: false,
     text: clip(text, 500),
     mentions: [],
+    ...(runId ? { runId } : {}),
   })
   commit()
   return message

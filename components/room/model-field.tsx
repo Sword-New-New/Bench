@@ -1,7 +1,7 @@
 "use client"
 
-import { useEffect, useState } from "react"
-import { Loader2 } from "lucide-react"
+import { useCallback, useEffect, useState } from "react"
+import { Loader2, RefreshCw } from "lucide-react"
 import { toast } from "sonner"
 
 import { AdvancedSection } from "@/components/room/advanced"
@@ -57,6 +57,7 @@ function wan(tokens: number) {
 
 export function useModelChoices(kind: string | null) {
   const [found, setFound] = useState<Found | null>(null)
+  const [refreshing, setRefreshing] = useState(false)
   useEffect(() => {
     if (!kind) return
     let stop = false
@@ -67,7 +68,17 @@ export function useModelChoices(kind: string | null) {
       stop = true
     }
   }, [kind])
-  return found
+
+  const refresh = useCallback(() => {
+    if (!kind || refreshing) return
+    setRefreshing(true)
+    api<Found>(`/api/v1/models?kind=${encodeURIComponent(kind)}&refresh=1`)
+      .then((data) => setFound(data))
+      .catch(() => toast.error("刷新模型列表失败"))
+      .finally(() => setRefreshing(false))
+  }, [kind, refreshing])
+
+  return { found, refreshing, refresh }
 }
 
 // Developer knobs for model picking: custom model id, reasoning effort, and
@@ -98,7 +109,7 @@ export function ModelAdvancedFields({
   found?: Found | null
   id?: string
 }) {
-  const fetched = useModelChoices(givenFound === undefined ? kind : null)
+  const { found: fetched } = useModelChoices(givenFound === undefined ? kind : null)
   const found = givenFound === undefined ? fetched : givenFound
   const choices = found?.models ?? null
   const listed = choices?.some((choice) => choice.id === value) ?? false
@@ -235,7 +246,7 @@ export function ModelField({
   id?: string
   advancedMode?: "collapsible" | "inline" | "external"
 }) {
-  const found = useModelChoices(kind)
+  const { found, refreshing, refresh } = useModelChoices(kind)
   const choices = found?.models ?? null
   const fallback = found?.fallback?.replace(/^[\w-]+:/, "")
   const listed = choices?.some((choice) => choice.id === value) ?? false
@@ -270,7 +281,21 @@ export function ModelField({
   return (
     <div className="space-y-3">
       <div className="space-y-1.5">
-        <Label htmlFor={id}>模型</Label>
+        <div className="flex items-center justify-between gap-2">
+          <Label htmlFor={id}>模型</Label>
+          {choices !== null ? (
+            <button
+              type="button"
+              onClick={refresh}
+              disabled={refreshing}
+              className="inline-flex items-center gap-1 text-[0.6875rem] text-muted-foreground hover:text-foreground disabled:opacity-50"
+              title="重新读取当前客户端可用模型"
+            >
+              <RefreshCw className={`size-3 ${refreshing ? "animate-spin" : ""}`} />
+              {refreshing ? "刷新中…" : "刷新"}
+            </button>
+          ) : null}
+        </div>
         {choices === null ? (
           <p className="flex items-center gap-1.5 py-1 text-xs text-muted-foreground">
             <Loader2 className="size-3 animate-spin" />
@@ -315,14 +340,18 @@ export function ModelDialog({ agent, onClose }: { agent: PublicAgent | null; onC
   const [limits, setLimits] = useState<Limits>(NO_LIMITS)
   const [sending, setSending] = useState(false)
   const [shown, setShown] = useState<string | null>(null)
+  const { found } = useModelChoices(agent?.agentName ?? null)
+  const fallback = found?.fallback?.replace(/^[\w-]+:/, "") ?? null
   if ((agent?.id ?? null) !== shown) {
     setShown(agent?.id ?? null)
     setValue(agent?.modelPick ?? "")
     setEffort(agent?.effortPick ?? "")
     setLimits(limitsOf(agent))
   }
+  const effectiveShown = value || fallback || (agent?.model ?? "")
   const unchanged =
     value === (agent?.modelPick ?? "") &&
+    effectiveShown === (agent?.model ?? "") &&
     effort === (agent?.effortPick ?? "") &&
     limits.window === limitsOf(agent).window &&
     limits.pct === limitsOf(agent).pct

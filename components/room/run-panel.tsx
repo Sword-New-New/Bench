@@ -90,7 +90,11 @@ export function RunPanel({ runId, onClose }: { runId: string | null; onClose: ()
           {run?.steps.map((step) => <StepRow key={step.id} step={step} start={run.startedAt} />)}
           {run && run.steps.length === 0 ? (
             <p className="py-6 text-center text-xs text-muted-foreground">
-              {state === "running" ? "暂无动静…" : "无步骤记录（该客户端只返回最终结果）"}
+              {state === "running"
+                ? "暂无动静…"
+                : state === "failed"
+                  ? "未记录到客户端内部步骤（可对照调用栏与失败提示排查）"
+                  : "无步骤记录（该客户端只返回最终结果）"}
             </p>
           ) : null}
         </div>
@@ -112,7 +116,7 @@ function StepIcon({ step }: { step: RunStep }) {
 }
 
 export function StepRow({ step, start }: { step: RunStep; start: number }) {
-  const [open, setOpen] = useState(false)
+  const [open, setOpen] = useState(step.state === "failed")
   // A title cut off by the panel's width opens too, even with nothing more
   // behind it: something it said, short enough to be its own full text.
   const titleRef = useRef<HTMLSpanElement>(null)
@@ -131,7 +135,11 @@ export function StepRow({ step, start }: { step: RunStep; start: number }) {
   }, [step.title])
   const more = Boolean(step.input || (step.output && step.output !== step.title) || clipped)
   return (
-    <div className="rounded-lg border border-transparent hover:border-border">
+    <div
+      className={`rounded-lg border hover:border-border ${
+        step.state === "failed" ? "border-destructive/25 bg-destructive/[0.04]" : "border-transparent"
+      }`}
+    >
       <button
         type="button"
         className="flex w-full items-start gap-2 px-2 py-1.5 text-left text-xs disabled:cursor-default"

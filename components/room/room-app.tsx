@@ -1208,7 +1208,7 @@ export function RoomApp() {
           ) : null}
           <section
             data-tour="chat"
-            className={`${(simple ? simpleTab === "chat" : tab === "chat" || desk) ? "flex" : "hidden"} relative h-full min-h-0 flex-col lg:flex`}
+            className={`${(simple ? simpleTab === "chat" : tab === "chat" || desk) ? "flex" : "hidden"} relative h-full min-h-0 min-w-0 flex-col lg:flex`}
           >
             {desk ? (
               <FrontBar
@@ -1307,7 +1307,7 @@ export function RoomApp() {
                               : room
                           }
                         />
-                        {digest ? <JustSaid messages={room.messages} agents={room.agents} digest={digest} /> : null}
+                        {digest ? <JustSaid messages={room.messages} agents={room.agents} digest={digest} onOpenRun={setRunId} /> : null}
                       </>
                     ) : null}
                     <SummaryNudge

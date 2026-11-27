@@ -11,9 +11,10 @@
 // seen: their allowance was not used up when this was written).
 
 export type LimitHit = {
-  // What ran out, in words for the page: "5 小时额度".
+  // What ran out, in words for the page: "5 小时额度" or "余额不足".
   label: string
-  // The message itself, as Claude Code printed it.
+  kind?: "quota" | "balance"
+  // The message itself, cleaned for display.
   text: string
   // When it comes back (epoch ms), if the message said.
   resetsAt?: number
@@ -31,6 +32,68 @@ const RESETS =
 // Codex: "try again at Nov 12th, 2026 7:42 PM", on the computer's own clock.
 const TRY_AGAIN =
   /try again at\s+(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\.?\s+(\d{1,2})(?:st|nd|rd|th)?,?\s+(\d{4}),?\s+(\d{1,2}):(\d{2})\s*(am|pm)/i
+
+// Antigravity: "Your quota will reset after 4h59m48s."
+const RESET_AFTER = /reset(?:s)?\s+(?:after|in)\s+((?:\d+\s*[hms]\s*)+)/i
+
+const BALANCE_PATTERNS = [
+  /\binsufficient_quota\b/i,
+  /exceeded your current quota/i,
+  /\binsufficient[_\s-]?balance\b/i,
+  /credit balance is too low/i,
+  /billing[_\s-]?hard[_\s-]?limit/i,
+  /\binsufficient credits\b|\bout of credits\b|\bno available credits\b/i,
+  /\b402\b.*(?:payment required|insufficient|credit|balance)/i,
+  /余额不足|账户余额不足|可用余额不足|欠费|请先?充值/,
+]
+
+const QUOTA_PATTERNS = [
+  /exhausted your capacity/i,
+  /quota will reset after/i,
+  /(?:RESOURCE_EXHAUSTED|\b429\b).*(?:quota|capacity)/i,
+  /额度(?:已)?(?:用完|耗尽|不足)/,
+]
+
+// Unwrap API relay JSON payloads like `{"error":{"message":"...","code":"insufficient_quota"}}`
+// so callers and the room see the human-readable reason instead of `{"error":{"m…`.
+export function unwrapErrorMessage(text: string): string {
+  const trimmed = text.trim()
+  if (!trimmed) return trimmed
+  const jsonStart = trimmed.startsWith("{") ? 0 : trimmed.indexOf('{"')
+  if (jsonStart < 0) return trimmed
+  try {
+    const parsed = JSON.parse(trimmed.slice(jsonStart)) as Record<string, unknown>
+    const inner =
+      parsed.error && typeof parsed.error === "object" && !Array.isArray(parsed.error)
+        ? (parsed.error as Record<string, unknown>)
+        : parsed
+    const message = [inner.message, inner.msg, inner.error_msg, parsed.message].find(
+      (v): v is string => typeof v === "string" && v.trim().length > 0,
+    )
+    if (!message) return trimmed
+    const code = [inner.code, inner.type, inner.status, parsed.code].find(
+      (v): v is string => typeof v === "string" && v.trim().length > 0,
+    )
+    const clean = message.trim()
+    return code && !clean.toLowerCase().includes(code.toLowerCase()) ? `${clean} (${code})` : clean
+  } catch {
+    return trimmed
+  }
+}
+
+function resetAfterTime(text: string, now: number): number | undefined {
+  const found = RESET_AFTER.exec(text)
+  if (!found) return undefined
+  let ms = 0
+  for (const [, num, unit] of found[1].matchAll(/(\d+)\s*([hms])/gi)) {
+    const n = Number(num)
+    const u = unit.toLowerCase()
+    if (u === "h") ms += n * 3_600_000
+    else if (u === "m") ms += n * 60_000
+    else if (u === "s") ms += n * 1000
+  }
+  return ms > 0 ? now + ms : undefined
+}
 
 function tryAgainTime(text: string): number | undefined {
   const found = TRY_AGAIN.exec(text)
@@ -137,9 +200,52 @@ export function whenText(at: number, now = Date.now()) {
   return `${date.getMonth() + 1}/${date.getDate()} ${clock}`
 }
 
+function findMatchLine(text: string, pattern: RegExp, fallback: string) {
+  return text.split("\n").find((item) => pattern.test(item)) ?? fallback
+}
+
 export function detectLimit(text: string, now = Date.now()): LimitHit | null {
-  const hit = HIT.exec(text)
-  if (!hit) return null
-  const line = text.split("\n").find((item) => HIT.test(item)) ?? hit[0]
-  return { label: labelOf(hit[1]), text: line.trim().slice(0, 300), resetsAt: resetTime(line, now) ?? tryAgainTime(line) }
+  const unwrapped = unwrapErrorMessage(text)
+  const candidates = unwrapped !== text.trim() ? [unwrapped, text] : [text]
+
+  for (const candidate of candidates) {
+    const hit = HIT.exec(candidate)
+    if (hit) {
+      const line = findMatchLine(candidate, HIT, hit[0]).trim()
+      return {
+        label: labelOf(hit[1]),
+        kind: "quota",
+        text: line.slice(0, 300),
+        resetsAt: resetTime(line, now) ?? tryAgainTime(line) ?? resetAfterTime(line, now),
+      }
+    }
+  }
+
+  for (const candidate of candidates) {
+    const pat = BALANCE_PATTERNS.find((re) => re.test(candidate))
+    if (pat) {
+      const line = unwrapErrorMessage(findMatchLine(candidate, pat, candidate)).trim()
+      return {
+        label: "余额不足",
+        kind: "balance",
+        text: line.slice(0, 300),
+        resetsAt: resetAfterTime(line, now) ?? resetTime(line, now) ?? tryAgainTime(line),
+      }
+    }
+  }
+
+  for (const candidate of candidates) {
+    const pat = QUOTA_PATTERNS.find((re) => re.test(candidate))
+    if (pat) {
+      const line = unwrapErrorMessage(findMatchLine(candidate, pat, candidate)).trim()
+      return {
+        label: /exhausted your capacity/i.test(line) ? "模型容量额度" : "额度用完",
+        kind: "quota",
+        text: line.slice(0, 300),
+        resetsAt: resetAfterTime(line, now) ?? resetTime(line, now) ?? tryAgainTime(line),
+      }
+    }
+  }
+
+  return null
 }

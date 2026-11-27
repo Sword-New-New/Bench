@@ -6,6 +6,7 @@ import { toast } from "sonner"
 
 import { AdvancedSection } from "@/components/room/advanced"
 import { api } from "@/components/room/api"
+import { WORKFLOW_META, WorkflowChips } from "@/components/room/workflow-card"
 import { Button } from "@/components/ui/button"
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "@/components/ui/dialog"
 import { Input } from "@/components/ui/input"
@@ -69,25 +70,41 @@ export function WorkflowsDialog({ open, onOpenChange, workflows, agents, onChang
         ) : (
           <div className="space-y-3">
             {workflows.length === 0 ? <p className="py-4 text-sm text-muted-foreground">还没有工作流。新建一条，把协作分工保存下来。</p> : null}
-            {workflows.map((item) => (
-              <div key={item.id} className="rounded-xl border border-border p-3">
-                <div className="flex items-start gap-2">
-                  <div className="min-w-0 flex-1">
-                    <p className="break-words text-sm font-medium">{item.name} {item.command ? <span className="text-muted-foreground">/{item.command}</span> : null}</p>
-                    <p className="mt-1 break-words text-xs leading-relaxed text-muted-foreground">{workflowLine(item)}</p>
+            {workflows.map((item) => {
+              const meta = WORKFLOW_META[item.kind]
+              return (
+                <div
+                  key={item.id}
+                  className="rounded-xl border border-border bg-card/70 p-3"
+                  style={{ borderLeft: `3px solid ${meta.accent}` }}
+                >
+                  <div className="flex items-start gap-2">
+                    <div className="min-w-0 flex-1 space-y-1.5">
+                      <div className="flex flex-wrap items-center gap-1.5">
+                        <span className="break-words text-sm font-semibold">{item.name}</span>
+                        <span
+                          className="rounded-full px-2 py-0.5 text-[11px] font-medium"
+                          style={{ background: `color-mix(in srgb, ${meta.accent} 14%, transparent)`, color: meta.accent }}
+                        >
+                          {meta.badge}
+                        </span>
+                        {item.command ? <span className="font-mono text-xs text-muted-foreground">/{item.command}</span> : null}
+                      </div>
+                      <WorkflowChips workflow={item} agents={agents} />
+                    </div>
+                    <Button variant="ghost" size="icon" aria-label={`编辑${item.name}`} onClick={() => setEditing(item)}><Pencil /></Button>
+                    <Button variant="ghost" size="icon" aria-label={`删除${item.name}`} onClick={() => setDeleting(item.id)}><Trash2 /></Button>
                   </div>
-                  <Button variant="ghost" size="icon" aria-label={`编辑${item.name}`} onClick={() => setEditing(item)}><Pencil /></Button>
-                  <Button variant="ghost" size="icon" aria-label={`删除${item.name}`} onClick={() => setDeleting(item.id)}><Trash2 /></Button>
+                  {deleting === item.id ? (
+                    <div className="mt-2 flex flex-wrap items-center gap-2 text-xs">
+                      <span>删除后不会自动恢复。</span>
+                      <Button size="sm" variant="destructive" disabled={busy} onClick={() => void remove(item.id)}>确认删除</Button>
+                      <Button size="sm" variant="ghost" onClick={() => setDeleting(null)}>取消</Button>
+                    </div>
+                  ) : null}
                 </div>
-                {deleting === item.id ? (
-                  <div className="mt-2 flex flex-wrap items-center gap-2 text-xs">
-                    <span>删除后不会自动恢复。</span>
-                    <Button size="sm" variant="destructive" disabled={busy} onClick={() => void remove(item.id)}>确认删除</Button>
-                    <Button size="sm" variant="ghost" onClick={() => setDeleting(null)}>取消</Button>
-                  </div>
-                ) : null}
-              </div>
-            ))}
+              )
+            })}
             <Button variant="outline" onClick={() => setEditing("new")}><Plus />新建工作流</Button>
           </div>
         )}

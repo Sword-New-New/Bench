@@ -1156,4 +1156,152 @@ html:active-view-transition-type(tier-leave)::view-transition-group(.bench-in) {
   }
 }
 
+/* ---- Collaborative workflow aurora cards & rounded-angle traces ---- */
+
+@property --wf-angle {
+  syntax: "<angle>";
+  initial-value: 0deg;
+  inherits: false;
+}
+
+@keyframes wf-spin {
+  from {
+    --wf-angle: 0deg;
+  }
+  to {
+    --wf-angle: 360deg;
+  }
+}
+
+@keyframes wf-beam {
+  0% {
+    stroke-dashoffset: 180;
+    opacity: 0.25;
+  }
+  40% {
+    opacity: 0.95;
+  }
+  100% {
+    stroke-dashoffset: -60;
+    opacity: 0.25;
+  }
+}
+
+@keyframes wf-breathe {
+  0%,
+  100% {
+    opacity: 1;
+    transform: scale(1);
+  }
+  50% {
+    opacity: 0.4;
+    transform: scale(1.22);
+  }
+}
+
+.wf-beam {
+  stroke-dasharray: 42 198;
+  animation: wf-beam 2.2s ease-in-out infinite;
+}
+
+.wf-breathe {
+  animation: wf-breathe 1.8s ease-in-out infinite;
+}
+
+.wf-shell {
+  position: relative;
+  border-radius: 1rem;
+  padding: 1px;
+  background: var(--border);
+  transition: box-shadow 0.4s ease;
+}
+
+.wf-shell[data-state="active"] {
+  background: conic-gradient(
+    from var(--wf-angle),
+    transparent 0deg,
+    transparent 55deg,
+    color-mix(in srgb, var(--wf-accent) 78%, white 16%) 115deg,
+    color-mix(in srgb, var(--wf-accent-2) 65%, transparent) 165deg,
+    transparent 225deg,
+    transparent 360deg
+  );
+  animation: wf-spin 5.5s linear infinite;
+  box-shadow:
+    0 0 26px -8px color-mix(in srgb, var(--wf-accent) 42%, transparent),
+    0 10px 28px -18px color-mix(in srgb, var(--wf-accent) 35%, transparent);
+}
+
+.wf-shell[data-state="done"] {
+  background: linear-gradient(
+    140deg,
+    color-mix(in srgb, #34d399 48%, transparent),
+    var(--border) 55%,
+    color-mix(in srgb, #34d399 30%, transparent)
+  );
+  box-shadow: 0 0 22px -10px rgba(52, 211, 153, 0.35);
+}
+
+.wf-shell[data-state="error"] {
+  background: conic-gradient(
+    from var(--wf-angle),
+    color-mix(in srgb, #fb7185 18%, var(--border)) 0deg,
+    color-mix(in srgb, #fb7185 82%, transparent) 95deg,
+    color-mix(in srgb, #fb7185 18%, var(--border)) 190deg,
+    color-mix(in srgb, #fb7185 18%, var(--border)) 360deg
+  );
+  animation: wf-spin 4s linear infinite;
+  box-shadow: 0 0 24px -8px rgba(251, 113, 133, 0.42);
+}
+
+.wf-node {
+  border-radius: 0.75rem;
+  padding: 1px;
+  transition: transform 0.18s ease, box-shadow 0.3s ease;
+}
+
+.wf-node:hover {
+  transform: translateY(-1px);
+}
+
+.wf-node[data-state="running"] {
+  background: conic-gradient(
+    from var(--wf-angle),
+    color-mix(in srgb, var(--wf-seat) 18%, var(--border)) 0deg,
+    color-mix(in srgb, var(--wf-seat) 92%, white 12%) 90deg,
+    color-mix(in srgb, var(--wf-seat) 18%, var(--border)) 180deg,
+    color-mix(in srgb, var(--wf-seat) 18%, var(--border)) 360deg
+  );
+  animation: wf-spin 3.2s linear infinite;
+  box-shadow: 0 0 20px -4px color-mix(in srgb, var(--wf-seat) 48%, transparent);
+}
+
+.wf-node[data-state="done"] {
+  background: linear-gradient(135deg, color-mix(in srgb, #34d399 48%, transparent), var(--border) 70%);
+  box-shadow: 0 0 14px -6px rgba(52, 211, 153, 0.25);
+}
+
+.wf-node[data-state="error"] {
+  background: linear-gradient(
+    135deg,
+    color-mix(in srgb, #fb7185 75%, transparent),
+    color-mix(in srgb, #fb7185 25%, var(--border))
+  );
+  box-shadow: 0 0 18px -5px rgba(251, 113, 133, 0.45);
+}
+
+.wf-node[data-state="idle"] {
+  background: var(--border);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .wf-shell,
+  .wf-node,
+  .wf-beam,
+  .wf-breathe {
+    animation: none !important;
+  }
+}
+
+
 

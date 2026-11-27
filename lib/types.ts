@@ -193,8 +193,20 @@ export type Message = {
   authorColor: string
   authorDemo: boolean
   text: string
-  // Exact wake targets for a workflow launch; quoted @s and replyTo are context.
-  workflow?: { id: string; kind: WorkflowKind; targets: string[] }
+  // Exact wake targets and role snapshot for a workflow launch; quoted @s and replyTo are context.
+  workflow?: {
+    id: string
+    kind: WorkflowKind
+    targets: string[]
+    name?: string
+    command?: string
+    requirement?: string
+    lead?: string
+    workers?: string[]
+    summarizer?: string
+    planners?: string[]
+    explorers?: string[]
+  }
   // When the room itself wakes a seat to carry on (lib/continue.ts), `text` is
   // the short one-line note shown in the thread while `wakeText` is the fuller
   // instruction handed to that seat.

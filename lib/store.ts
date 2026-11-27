@@ -2519,7 +2519,10 @@ export function workflowAction(input: unknown) {
     }
   }
   const rendered = renderWorkflow(workflow, asString(body.text) ?? "", room().state.agents, overrides)
-  return say({ ...body, text: rendered.text }, { workflow: { id: workflow.id, kind: workflow.kind, targets: rendered.targets } })
+  return say(
+    { ...body, text: rendered.text },
+    { workflow: { id: workflow.id, kind: workflow.kind, targets: rendered.targets, ...rendered.meta } },
+  )
 }
 
 // The gist a reply gets as it is posted: its own first line, when the

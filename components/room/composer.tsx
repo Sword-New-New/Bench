@@ -7,6 +7,7 @@ import { Avatar, seatLook } from "@/components/room/bits"
 import { usePathPicker } from "@/components/room/folder-picker"
 import { Reveal } from "@/components/room/reveal"
 import { workflowLine } from "@/components/room/workflows-dialog"
+import { WORKFLOW_META, WorkflowChips } from "@/components/room/workflow-card"
 import { Button } from "@/components/ui/button"
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuSeparator, DropdownMenuTrigger } from "@/components/ui/dropdown-menu"
 import { Label } from "@/components/ui/label"
@@ -256,10 +257,33 @@ export function Composer({
         }}
       >
         {workflow ? (
-          <div className="flex items-start gap-2 border-b border-foreground/8 px-3.5 py-2 text-xs">
-            <GitBranch className="mt-0.5 size-3.5 shrink-0" />
-            <div className="min-w-0 flex-1"><p className="font-medium">按「{workflow.name}」发送</p><p className="mt-0.5 break-words text-muted-foreground">{workflowLine(workflow)}</p></div>
-            <button type="button" aria-label="取消工作流模式" className="rounded p-1 hover:bg-muted" onClick={() => onWorkflow?.(null)}><X className="size-3.5" /></button>
+          <div
+            className="flex items-start gap-2 border-b border-foreground/8 px-3.5 py-2 text-xs"
+            style={{
+              background: `color-mix(in srgb, ${WORKFLOW_META[workflow.kind].accent} 10%, transparent)`,
+            }}
+          >
+            <GitBranch className="mt-0.5 size-3.5 shrink-0" style={{ color: WORKFLOW_META[workflow.kind].accent }} />
+            <div className="min-w-0 flex-1 space-y-1">
+              <div className="flex flex-wrap items-center gap-1.5">
+                <span className="font-semibold" style={{ color: WORKFLOW_META[workflow.kind].accent }}>
+                  {workflow.name}
+                </span>
+                <span className="text-[11px] text-muted-foreground">{WORKFLOW_META[workflow.kind].badge}</span>
+                {workflow.command ? (
+                  <span className="font-mono text-[11px] text-muted-foreground">/{workflow.command}</span>
+                ) : null}
+              </div>
+              <WorkflowChips workflow={workflow} agents={agents} />
+            </div>
+            <button
+              type="button"
+              aria-label="取消工作流模式"
+              className="rounded p-1 text-muted-foreground hover:bg-muted hover:text-foreground"
+              onClick={() => onWorkflow?.(null)}
+            >
+              <X className="size-3.5" />
+            </button>
           </div>
         ) : null}
         <Reveal open={reply !== null}>

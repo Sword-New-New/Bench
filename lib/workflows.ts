@@ -114,5 +114,13 @@ export function renderWorkflow(workflow: Workflow, input: string, seats: Seat[],
   const heading = workflow.kind === "explore" ? "探索主题" : "用户需求"
   const text = `${called.map((name) => `@${name}`).join(" ")}\n【工作流：${workflow.name}】\n${rules}${workflow.note ? `\n补充规则：${workflow.note}` : ""}\n\n${heading}：\n${requirement}`
   if (text.length > 4000) throw new ApiError(400, "需求和补充规则合起来过长，请缩短后发送")
-  return { text, targets }
+  const meta = {
+    name: workflow.name,
+    command: workflow.command,
+    requirement,
+    ...(workflow.kind === "orchestrate" ? { lead, workers, summarizer } : {}),
+    ...(workflow.kind === "plan" ? { planners } : {}),
+    ...(workflow.kind === "explore" ? { explorers } : {}),
+  }
+  return { text, targets, meta }
 }

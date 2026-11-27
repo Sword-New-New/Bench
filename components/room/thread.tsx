@@ -16,6 +16,7 @@ import { expandMessage, openFold, SummaryButton, SummaryLine, useSummary } from 
 import { ProgressView } from "@/components/room/progress"
 import { GOTO_EVENT, type Goto } from "@/components/room/refs"
 import { Reveal } from "@/components/room/reveal"
+import { WorkflowCard } from "@/components/room/workflow-card"
 import { Button } from "@/components/ui/button"
 import type { Digest } from "@/lib/digest"
 import { clock } from "@/lib/status"
@@ -873,7 +874,9 @@ function ChainLine({
           <span className="text-muted-foreground">{clock(message.createdAt)}</span>
         </p>
         {reply ? <Quote message={reply} align="start" /> : null}
-        {message.text ? (
+        {message.workflow ? (
+          <WorkflowCard message={message} messages={messages} agents={agents} />
+        ) : message.text ? (
           <div className="mt-0.5">
             {sum.info ? (
               <SummaryLine
@@ -1183,6 +1186,24 @@ function MessageRow({
   )
 
   if (mine) {
+    if (message.workflow) {
+      return (
+        <article className={`flex justify-end ${grouped ? "mt-0.5" : "mt-4"}`}>
+          <div className="w-full max-w-[min(100%,44rem)]">
+            {reply ? <Quote message={reply} align="end" /> : null}
+            <WorkflowCard message={message} messages={messages} agents={agents} />
+            {message.attachments?.length ? <MessageFiles files={message.attachments} align="end" folded={folded(fold)} /> : null}
+            {chat ? null : <Reached message={message} align="end" />}
+            <Calls message={message} align="end" onOpenRun={onOpenRun} />
+            <div className="mt-1 flex items-center justify-end gap-2 text-[0.6875rem] text-muted-foreground">
+              <RecallButton message={message} />
+              {chat ? null : replyButton}
+              {!grouped ? <span>{clock(message.createdAt)}</span> : null}
+            </div>
+          </div>
+        </article>
+      )
+    }
     return (
       <article className={`flex justify-end ${grouped ? "mt-0.5" : "mt-4"}`}>
         <div className="max-w-[min(85%,36rem)]">
